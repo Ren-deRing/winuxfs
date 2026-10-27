@@ -12,7 +12,10 @@ pub struct AlignedDevice {
 
 impl AlignedDevice {
     pub fn new(inner: Arc<dyn BlockDevice>) -> AlignedDevice {
-        AlignedDevice { inner, lock: Mutex::new(()) }
+        AlignedDevice {
+            inner,
+            lock: Mutex::new(()),
+        }
     }
 
     /// Aligned span [start, end) covering [off, off+len). Requires in-range.

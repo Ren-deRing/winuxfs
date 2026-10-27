@@ -53,7 +53,11 @@ fn crc32(data: &[u8]) -> u32 {
     for &b in data {
         c ^= b as u32;
         for _ in 0..8 {
-            c = if c & 1 != 0 { (c >> 1) ^ 0xEDB8_8320 } else { c >> 1 };
+            c = if c & 1 != 0 {
+                (c >> 1) ^ 0xEDB8_8320
+            } else {
+                c >> 1
+            };
         }
     }
     !c
@@ -74,7 +78,9 @@ struct Ctx<'a> {
 
 impl Ctx<'_> {
     fn read_sector(&self, lba: u64) -> Result<Vec<u8>, PartError> {
-        let off = lba.checked_mul(self.ss).ok_or(PartError::Corrupt("lba overflow"))?;
+        let off = lba
+            .checked_mul(self.ss)
+            .ok_or(PartError::Corrupt("lba overflow"))?;
         let mut b = vec![0u8; self.ss as usize];
         self.dev.read_at(off, &mut b)?;
         Ok(b)
@@ -82,9 +88,15 @@ impl Ctx<'_> {
 
     /// Converts a sector range to a checked (byte start, byte len).
     fn range(&self, start_lba: u64, sectors: u64) -> Result<(u64, u64), PartError> {
-        let start = start_lba.checked_mul(self.ss).ok_or(PartError::Corrupt("lba overflow"))?;
-        let len = sectors.checked_mul(self.ss).ok_or(PartError::Corrupt("length overflow"))?;
-        let end = start.checked_add(len).ok_or(PartError::Corrupt("range overflow"))?;
+        let start = start_lba
+            .checked_mul(self.ss)
+            .ok_or(PartError::Corrupt("lba overflow"))?;
+        let len = sectors
+            .checked_mul(self.ss)
+            .ok_or(PartError::Corrupt("length overflow"))?;
+        let end = start
+            .checked_add(len)
+            .ok_or(PartError::Corrupt("range overflow"))?;
         if end > self.size {
             return Err(PartError::Corrupt("partition extends beyond device"));
         }
@@ -116,7 +128,11 @@ fn mbr_entries(sec: &[u8]) -> Result<[MbrEntry; 4], PartError> {
     }
     let e = |i: usize| {
         let o = 446 + i * 16;
-        MbrEntry { ty: sec[o + 4], start: le32(sec, o + 8), len: le32(sec, o + 12) }
+        MbrEntry {
+            ty: sec[o + 4],
+            start: le32(sec, o + 8),
+            len: le32(sec, o + 12),
+        }
     };
     Ok([e(0), e(1), e(2), e(3)])
 }
@@ -127,7 +143,11 @@ fn is_extended(ty: u8) -> bool {
 
 pub fn scan(dev: &dyn BlockDevice) -> Result<Vec<PartitionInfo>, PartError> {
     let ss = (dev.sector_size() as u64).max(512);
-    let cx = Ctx { dev, ss, size: dev.size() };
+    let cx = Ctx {
+        dev,
+        ss,
+        size: dev.size(),
+    };
     if cx.size < ss {
         return Ok(vec![]);
     }
@@ -162,7 +182,12 @@ pub fn scan(dev: &dyn BlockDevice) -> Result<Vec<PartitionInfo>, PartError> {
         }
     }
     check_overlap(top)?;
-    check_overlap(out.iter().filter(|p| p.index >= 5).map(|p| (p.start, p.len)).collect())?;
+    check_overlap(
+        out.iter()
+            .filter(|p| p.index >= 5)
+            .map(|p| (p.start, p.len))
+            .collect(),
+    )?;
     // Primaries (1..=4) first, then logicals (5..) in chain order.
     out.sort_by_key(|p| p.index);
     Ok(out)
@@ -180,7 +205,9 @@ fn scan_extended(
         let ents = mbr_entries(&sec)?;
         let l = &ents[0];
         if l.ty != 0 && l.len != 0 {
-            let abs = ebr.checked_add(l.start as u64).ok_or(PartError::Corrupt("lba overflow"))?;
+            let abs = ebr
+                .checked_add(l.start as u64)
+                .ok_or(PartError::Corrupt("lba overflow"))?;
             let (start, len) = cx.range(abs, l.len as u64)?;
             if start < container.0 || start + len > container.0 + container.1 {
                 return Err(PartError::Corrupt("logical partition outside extended"));
@@ -248,7 +275,9 @@ fn try_gpt(cx: &Ctx, hdr_lba: u64) -> Result<Vec<PartitionInfo>, PartError> {
         return Err(PartError::Corrupt("bad GPT entry array geometry"));
     }
     let total = count as u64 * esize as u64; // <= 4 MiB
-    let off = ent_lba.checked_mul(cx.ss).ok_or(PartError::Corrupt("lba overflow"))?;
+    let off = ent_lba
+        .checked_mul(cx.ss)
+        .ok_or(PartError::Corrupt("lba overflow"))?;
     if off.checked_add(total).is_none_or(|e| e > cx.size) {
         return Err(PartError::Corrupt("GPT entry array beyond device"));
     }
@@ -285,7 +314,10 @@ fn try_gpt(cx: &Ctx, hdr_lba: u64) -> Result<Vec<PartitionInfo>, PartError> {
             index: i as u32 + 1,
             start,
             len,
-            kind: PartKind::Gpt { type_guid: guid, name: String::from_utf16_lossy(&units) },
+            kind: PartKind::Gpt {
+                type_guid: guid,
+                name: String::from_utf16_lossy(&units),
+            },
         });
     }
     check_overlap(out.iter().map(|p| (p.start, p.len)).collect())?;
@@ -302,9 +334,11 @@ pub struct PartitionView {
 impl PartitionView {
     pub fn new(dev: Arc<dyn BlockDevice>, info: &PartitionInfo) -> Result<PartitionView, Errno> {
         match info.start.checked_add(info.len) {
-            Some(end) if end <= dev.size() => {
-                Ok(PartitionView { dev, start: info.start, len: info.len })
-            }
+            Some(end) if end <= dev.size() => Ok(PartitionView {
+                dev,
+                start: info.start,
+                len: info.len,
+            }),
             _ => Err(Errno::EINVAL),
         }
     }

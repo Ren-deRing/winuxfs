@@ -20,5 +20,8 @@ fn main() {
         b = b.clang_arg("-fms-extensions");
     }
     let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join("bindings.rs");
-    b.generate().expect("bindgen failed").write_to_file(out).unwrap();
+    b.generate()
+        .expect("bindgen failed")
+        .write_to_file(out)
+        .unwrap();
 }

@@ -10,12 +10,19 @@ pub struct MemDevice {
 
 impl MemDevice {
     pub fn new(size: u64, sector: u32) -> MemDevice {
-        MemDevice { data: RwLock::new(vec![0; size as usize]), sector, strict: false }
+        MemDevice {
+            data: RwLock::new(vec![0; size as usize]),
+            sector,
+            strict: false,
+        }
     }
 
     /// Rejects requests not aligned to the sector size with `EINVAL`.
     pub fn strict(size: u64, sector: u32) -> MemDevice {
-        MemDevice { strict: true, ..MemDevice::new(size, sector) }
+        MemDevice {
+            strict: true,
+            ..MemDevice::new(size, sector)
+        }
     }
 
     fn aligned(&self, off: u64, len: usize) -> bool {

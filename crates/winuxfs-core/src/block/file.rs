@@ -17,7 +17,11 @@ impl FileDevice {
             .open(path)
             .map_err(|e| io_errno(&e))?;
         let size = file.metadata().map_err(|e| io_errno(&e))?.len();
-        Ok(FileDevice { file, size, read_only })
+        Ok(FileDevice {
+            file,
+            size,
+            read_only,
+        })
     }
 }
 

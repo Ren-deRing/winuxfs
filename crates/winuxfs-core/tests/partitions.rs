@@ -10,7 +10,11 @@ fn crc32(d: &[u8]) -> u32 {
     for &b in d {
         c ^= b as u32;
         for _ in 0..8 {
-            c = if c & 1 != 0 { (c >> 1) ^ 0xEDB8_8320 } else { c >> 1 };
+            c = if c & 1 != 0 {
+                (c >> 1) ^ 0xEDB8_8320
+            } else {
+                c >> 1
+            };
         }
     }
     !c
@@ -91,7 +95,15 @@ fn gpt_build(
 }
 
 fn gpt_disk(sectors: usize, parts: &[(u64, u64, &str)]) -> MemDevice {
-    gpt_build(sectors, &gpt_arr(parts), (34, sectors as u64 - 34), 0x0001_0000, &[], false, 0)
+    gpt_build(
+        sectors,
+        &gpt_arr(parts),
+        (34, sectors as u64 - 34),
+        0x0001_0000,
+        &[],
+        false,
+        0,
+    )
 }
 
 fn mbr_ext_disk() -> MemDevice {
@@ -101,7 +113,14 @@ fn mbr_ext_disk() -> MemDevice {
     for (i, ebr) in [100u32, 1100, 2100].iter().enumerate() {
         mbr_entry(&dev, *ebr as usize * 512, 0, 0x83, 1, 500);
         if i < 2 {
-            mbr_entry(&dev, *ebr as usize * 512, 1, 0x05, 1000 * (i as u32 + 1), 1000);
+            mbr_entry(
+                &dev,
+                *ebr as usize * 512,
+                1,
+                0x05,
+                1000 * (i as u32 + 1),
+                1000,
+            );
         }
     }
     dev
@@ -134,9 +153,15 @@ fn mbr_primary_two_partitions() {
     mbr_entry(&dev, 0, 1, 0x07, 4000, 96);
     let p = scan(&dev).unwrap();
     assert_eq!(p.len(), 2);
-    assert_eq!((p[0].index, p[0].start, p[0].len), (1, 2048 * 512, 1000 * 512));
+    assert_eq!(
+        (p[0].index, p[0].start, p[0].len),
+        (1, 2048 * 512, 1000 * 512)
+    );
     assert!(matches!(p[0].kind, PartKind::Mbr { type_id: 0x83 }));
-    assert_eq!((p[1].index, p[1].start, p[1].len), (2, 4000 * 512, 96 * 512));
+    assert_eq!(
+        (p[1].index, p[1].start, p[1].len),
+        (2, 4000 * 512, 96 * 512)
+    );
 }
 
 #[test]
@@ -147,7 +172,14 @@ fn mbr_extended_chain() {
     for (i, ebr) in [100u32, 1100, 2100].iter().enumerate() {
         mbr_entry(&dev, *ebr as usize * 512, 0, 0x83, 1, 500);
         if i < 2 {
-            mbr_entry(&dev, *ebr as usize * 512, 1, 0x05, 1000 * (i as u32 + 1), 1000);
+            mbr_entry(
+                &dev,
+                *ebr as usize * 512,
+                1,
+                0x05,
+                1000 * (i as u32 + 1),
+                1000,
+            );
         }
     }
     let p = scan(&dev).unwrap();
@@ -174,7 +206,10 @@ fn gpt_basic_and_backup_fallback() {
     let p = scan(&dev).unwrap();
     assert_eq!(p.len(), 2);
     assert_eq!((p[0].index, p[0].start, p[0].len), (1, 34 * 512, 66 * 512));
-    assert_eq!((p[1].index, p[1].start, p[1].len), (2, 100 * 512, 900 * 512));
+    assert_eq!(
+        (p[1].index, p[1].start, p[1].len),
+        (2, 100 * 512, 900 * 512)
+    );
     match &p[1].kind {
         PartKind::Gpt { type_guid, name } => {
             assert_eq!(*type_guid, [0xAF; 16]);
@@ -233,7 +268,10 @@ fn view_translates_offsets_and_rejects_overflow() {
     assert_eq!(&c, b"world");
     assert_eq!(v.read_at(1000 * 512 - 2, &mut b), Err(Errno::EINVAL));
     assert_eq!(v.write_at(u64::MAX, &b), Err(Errno::EINVAL));
-    let big = PartitionInfo { len: 1 << 40, ..info };
+    let big = PartitionInfo {
+        len: 1 << 40,
+        ..info
+    };
     assert_eq!(PartitionView::new(dev, &big).err(), Some(Errno::EINVAL));
 }
 
@@ -284,13 +322,29 @@ fn gpt_entry_array_crc_mismatch_is_corrupt() {
 
 #[test]
 fn gpt_entry_at_lba1_rejected() {
-    let dev = gpt_build(2048, &gpt_arr(&[(1, 99, "a")]), (34, 2014), 0x0001_0000, &[], false, 0);
+    let dev = gpt_build(
+        2048,
+        &gpt_arr(&[(1, 99, "a")]),
+        (34, 2014),
+        0x0001_0000,
+        &[],
+        false,
+        0,
+    );
     assert!(matches!(scan(&dev), Err(PartError::Corrupt(_))));
 }
 
 #[test]
 fn gpt_entry_past_last_usable_rejected() {
-    let dev = gpt_build(2048, &gpt_arr(&[(100, 2020, "a")]), (34, 2014), 0x0001_0000, &[], false, 0);
+    let dev = gpt_build(
+        2048,
+        &gpt_arr(&[(100, 2020, "a")]),
+        (34, 2014),
+        0x0001_0000,
+        &[],
+        false,
+        0,
+    );
     assert!(matches!(scan(&dev), Err(PartError::Corrupt(_))));
 }
 
@@ -302,7 +356,15 @@ fn gpt_first_usable_after_last_usable_rejected() {
 
 #[test]
 fn gpt_bad_revision_rejected() {
-    let dev = gpt_build(2048, &gpt_arr(&[(34, 99, "a")]), (34, 2014), 0x0002_0000, &[], false, 0);
+    let dev = gpt_build(
+        2048,
+        &gpt_arr(&[(34, 99, "a")]),
+        (34, 2014),
+        0x0002_0000,
+        &[],
+        false,
+        0,
+    );
     assert!(matches!(scan(&dev), Err(PartError::Corrupt(_))));
 }
 
@@ -357,7 +419,10 @@ fn mbr_logicals_overlap_rejected() {
 #[test]
 fn mbr_valid_mixed_disk_scans() {
     let p = scan(&mbr_ext_disk()).unwrap();
-    assert_eq!(p.iter().map(|x| x.index).collect::<Vec<_>>(), vec![1, 5, 6, 7]);
+    assert_eq!(
+        p.iter().map(|x| x.index).collect::<Vec<_>>(),
+        vec![1, 5, 6, 7]
+    );
     check_invariants(&p, 8192 * 512);
 }
 

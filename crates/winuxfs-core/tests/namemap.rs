@@ -104,7 +104,12 @@ fn trailing_runs_and_edges() {
     assert_eq!(to_windows(b""), Vec::<u16>::new());
     assert_eq!(from_windows(&[]), Ok(vec![]));
     assert_ne!(to_windows("a\u{F02E}".as_bytes()), to_windows(b"a."));
-    for v in [b"a:.".to_vec(), "\u{F8FF}.".as_bytes().to_vec(), b" ".to_vec(), b"a. .".to_vec()] {
+    for v in [
+        b"a:.".to_vec(),
+        "\u{F8FF}.".as_bytes().to_vec(),
+        b" ".to_vec(),
+        b"a. .".to_vec(),
+    ] {
         assert_eq!(from_windows(&to_windows(&v)), Ok(v));
     }
 }
