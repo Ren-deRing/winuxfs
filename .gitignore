@@ -1,0 +1,7 @@
+.superpowers/
+target/
+vm/storage/
+vm/storage2/
+vm/shared/
+vm/oem/authorized_keys
+vm/oem/winfsp.msi
