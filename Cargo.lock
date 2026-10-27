@@ -611,3 +611,10 @@ dependencies = [
  "proptest",
  "winuxfs-abi",
 ]
+
+[[package]]
+name = "winuxfs-win"
+version = "0.1.0"
+dependencies = [
+ "windows-sys",
+]
