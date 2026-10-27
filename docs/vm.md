@@ -178,3 +178,39 @@ build, detected by dockur as Windows 11 Pro.
   `IsOffline False`, partition style RAW.
 - dockur's networking fell back to `Mode: User (passt)`; SSH via
   `USER_PORTS=22` works.
+
+## Disk and VHD tests (crates/winuxfs-win/tests/e2e_disk.rs)
+
+```sh
+python3 -I tools/mkdisk.py /tmp/pattern.img        # 64 MiB, block n starts with n (u64 LE)
+tools/vmctl.py attach-disk /tmp/pattern.img        # copies it to vm/storage2/data2.img
+cargo test -p winuxfs-win --target x86_64-pc-windows-gnu --no-run
+tools/vmctl.py push target/x86_64-pc-windows-gnu/debug/deps/e2e_disk-<hash>.exe t14/e2e_disk.exe
+tools/vmctl.py run -- 'copy /y \\host.lan\Data\t14\e2e_disk.exe C:\t14\e2e_disk.exe'
+tools/vmctl.py run -- 'C:\t14\e2e_disk.exe'
+```
+
+Verified 2026-10-28 (build 26300):
+
+- **Elevation.** Opening `\\.\PhysicalDriveN` needs an administrator token.
+  The SSH session of `Docker` (key auth) already has it: `whoami /groups`
+  shows `Mandatory Label\High Mandatory Level` and `net session` succeeds.
+  No `runas` or scheduled task is needed.
+- **Disk numbers.** Disk 0 is the 64 GB system disk (`IsBoot`/`IsSystem`
+  True, GPT). The attached image is disk 1 (67108864 bytes, RAW, online,
+  `BusType SAS`). The tests find it by size among the non-boot, non-system,
+  non-file-backed disks and require exactly one match; `WinDisk::open`
+  refuses write mode on the disk holding the Windows volume (`EBUSY`).
+- **Offline state.** Write-mode `WinDisk::open` sets the disk offline
+  *non-persistently* and restores it when the device is dropped. If a test
+  process is killed in between, the disk stays offline until the next
+  reboot (`vmctl.py down`/`up`) or
+  `powershell -Command "Set-Disk -Number 1 -IsOffline $false"`.
+- **VHDX.** The Hyper-V PowerShell module (`New-VHD`) is not installed, so
+  the tests create fixed VHDX files with `diskpart` (`create vdisk ...
+  type=fixed`) under `%TEMP%\winuxfs-e2e-disk`. Attachments are tied to the
+  virtual-disk handle (no `PERMANENT_LIFETIME`), so a killed test process
+  detaches automatically (`vhd_detached_when_process_killed` checks this);
+  each test deletes leftover files of an earlier run before it starts.
+  `ATTACH_VIRTUAL_DISK_FLAG_NO_LOCAL_HOST` cannot be used: the disk is then
+  not surfaced, and `GetVirtualDiskPhysicalPath` fails with error 55.

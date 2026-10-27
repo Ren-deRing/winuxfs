@@ -5,14 +5,32 @@
 //! hand-written declarations in [`winfsp_ffi`]. The declarations compile on
 //! every platform so that their layout tests run on the Linux build host;
 //! the loader itself exists only on Windows.
+//!
+//! Block devices: [`parse_device_spec`] classifies a device argument on every
+//! platform; on Windows `WinDisk` opens physical disks and `attach_vhd`
+//! attaches VHD/VHDX files.
 
 pub mod winfsp_ffi;
+
+mod devspec;
+
+pub use devspec::{parse_device_spec, DeviceSpec};
 
 #[cfg(windows)]
 mod loader;
 
 #[cfg(windows)]
 pub use loader::{winfsp_version, WinFsp};
+
+#[cfg(windows)]
+mod vhd;
+#[cfg(windows)]
+mod windisk;
+
+#[cfg(windows)]
+pub use vhd::{attach_vhd, VhdAttachment};
+#[cfg(windows)]
+pub use windisk::WinDisk;
 
 /// Environment variable naming a WinFsp install directory; when set, it is
 /// used instead of the registry (the DLL is `<dir>\bin\winfsp-x64.dll`).
