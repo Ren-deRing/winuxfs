@@ -383,22 +383,85 @@ fn backend_errno_is_sanitised() {
     assert_eq!(m.getattr(1001).err(), Some(Errno::EIO)); // returned -1234
     let mut buf = [0u8; 4];
     assert_eq!(m.read(4, 0, &mut buf).err(), Some(Errno::EIO)); // done > len
-    assert!(KNOWN_ERRNOS.contains(&Errno::ENOENT));
-    assert!(!KNOWN_ERRNOS.contains(&Errno(1234)));
+    assert_eq!(MAX_ERRNO, 133);
+}
+
+#[test]
+fn linux_errnos_pass_through_mount_wrapper() {
+    let b = load_plugin(&testplug()).unwrap();
+    let m = b.mount(no_devs(), "").unwrap();
+    // Not among the Task 4 Errno constants, but valid Linux errnos.
+    assert_eq!(m.getattr(2000 + 13).err(), Some(Errno(13))); // EACCES
+    assert_eq!(m.getattr(2000 + 18).err(), Some(Errno(18))); // EXDEV
+    assert_eq!(m.getattr(2000 + 1).err(), Some(Errno(1))); // EPERM
+    assert_eq!(m.getattr(2000 + 117).err(), Some(Errno(117))); // EUCLEAN
+                                                               // Range boundaries: EHWPOISON (133) passes, 134 does not.
+    assert_eq!(m.getattr(2000 + 133).err(), Some(Errno(133)));
+    assert_eq!(m.getattr(2000 + 134).err(), Some(Errno::EIO));
+}
+
+#[test]
+fn readdir_bounded_when_backend_ignores_stop() {
+    let p = private_copy(&testplug(), "readdir-stop");
+    let b = load_plugin(&p).unwrap();
+    let m = b.mount(no_devs(), "").unwrap();
+    // dir 5 emits 1000 entries and ignores the callback's return value.
+    let ents = m.readdir(5, 0, 10).unwrap();
+    assert_eq!(ents.len(), 10);
+    assert_eq!(ents[9].cookie, 10);
+    assert_eq!(m.readdir(5, 0, 1).unwrap().len(), 1);
+    // dir 6: good, bad, good, good. The bad entry fails the call and every
+    // later callback is told to stop (no entry accepted after it).
+    assert_eq!(m.readdir(6, 0, 100).err(), Some(Errno::EIO));
+    let h = open_hooks(&p);
+    assert_eq!(hook(&h, b"testplug_accepted_after_bad"), 0);
+}
+
+#[test]
+fn bogus_child_from_lookup_and_create_is_eio_and_forgotten() {
+    let p = private_copy(&testplug(), "bad-child");
+    let b = load_plugin(&p).unwrap();
+    let m = b.mount(no_devs(), "").unwrap();
+    let h = open_hooks(&p);
+    // Success with ino 0: EIO, nothing to forget.
+    assert_eq!(m.lookup(ROOT_INO, b"zero").err(), Some(Errno::EIO));
+    assert_eq!(hook(&h, b"testplug_bad_forgets"), 0);
+    // Success with a bad ftype: EIO, and the reference on ino 7 is released.
+    assert_eq!(m.lookup(ROOT_INO, b"badft").err(), Some(Errno::EIO));
+    assert_eq!(hook(&h, b"testplug_bad_forgets"), 1);
+
+    // Same through create (implemented only in the _st variant).
+    let p = private_copy(&test_plugin("testplug", "testplug_st"), "bad-child-st");
+    let b = load_plugin(&p).unwrap();
+    let devs = Devices {
+        data: Some(Arc::new(MemDevice::new(4096, 512))),
+        log: None,
+        rt: None,
+    };
+    let m = b.mount(devs, "").unwrap();
+    let h = open_hooks(&p);
+    let mk = |n: &[u8]| m.create(ROOT_INO, n, FileType::Reg, 0o644, 0, 0).err();
+    assert_eq!(mk(b"zero"), Some(Errno::EIO));
+    assert_eq!(hook(&h, b"testplug_bad_forgets"), 0);
+    assert_eq!(mk(b"badft"), Some(Errno::EIO));
+    assert_eq!(hook(&h, b"testplug_bad_forgets"), 1);
+    assert_eq!(mk(b"other"), Some(Errno::EEXIST));
 }
 
 #[test]
 fn mount_drop_unmounts_exactly_once_and_outlives_backend() {
     let p = private_copy(&testplug(), "unmount-once");
-    let h = open_hooks(&p);
     let b = load_plugin(&p).unwrap();
     let m1 = b.mount(no_devs(), "").unwrap();
     let m2 = b.mount(no_devs(), "").unwrap();
+    // The Backend value goes away; the Mounts must keep the library loaded.
+    drop(b);
+    // Opened only now: if the library had been unloaded with the Backend,
+    // this would load a fresh instance and the counts below would not move.
+    let h = open_hooks(&p);
     assert_eq!(hook(&h, b"testplug_unmount_count"), 0);
     drop(m1);
     assert_eq!(hook(&h, b"testplug_unmount_count"), 1);
-    // The Backend value goes away; the Mount must keep the library loaded.
-    drop(b);
     assert_eq!(m2.getattr(ROOT_INO).unwrap().ino, 1);
     let t = std::thread::spawn(move || {
         assert_eq!(m2.lookup(ROOT_INO, b"hello").unwrap().ino, 2);

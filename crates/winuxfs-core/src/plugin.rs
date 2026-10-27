@@ -19,38 +19,23 @@ use winuxfs_abi as abi;
 /// Root inode number every backend must expose.
 pub const ROOT_INO: u64 = 1;
 
-/// Errno values a backend may return and that the core passes through.
+/// Highest Linux errno value (`EHWPOISON`).
 ///
-/// This is exactly the set of `Errno` constants defined in `error.rs`
-/// (Task 4); the brief lists no others. Any other negative value, and every
-/// positive value, is replaced by `EIO`. Extend this list together with
-/// `Errno` when a backend needs to report a new error kind.
-pub const KNOWN_ERRNOS: &[Errno] = &[
-    Errno::ENOENT,
-    Errno::EIO,
-    Errno::EBUSY,
-    Errno::EEXIST,
-    Errno::ENODEV,
-    Errno::ENOTDIR,
-    Errno::EISDIR,
-    Errno::EINVAL,
-    Errno::EFBIG,
-    Errno::ENOSPC,
-    Errno::EROFS,
-    Errno::ENAMETOOLONG,
-    Errno::ENOSYS,
-    Errno::ENOTEMPTY,
-    Errno::EOVERFLOW,
-];
+/// Per docs/abi.md a backend failure is `-(Linux errno value)`. The "known
+/// set" of errnos the core passes through unchanged is therefore the whole
+/// Linux errno range `1..=MAX_ERRNO` (EPERM, EACCES, EXDEV, ENOMEM, EUCLEAN,
+/// ... included), not only the constants named in `Errno`.
+pub const MAX_ERRNO: i32 = 133;
 
-/// Maps a backend return value: 0 is success, `-e` for a known `e` is
-/// `Err(e)`, anything else is `Err(EIO)`.
-fn ret(r: abi::wfs_err_t) -> Result<(), Errno> {
+/// Maps a backend return value: 0 is success, `-e` with `e` in
+/// `1..=MAX_ERRNO` is `Err(e)`; any positive value or a negative value
+/// outside the Linux errno range (including `i32::MIN`) is `Err(EIO)`.
+pub(crate) fn ret(r: abi::wfs_err_t) -> Result<(), Errno> {
     if r == 0 {
         return Ok(());
     }
     match r.checked_neg() {
-        Some(e) if e > 0 && KNOWN_ERRNOS.contains(&Errno(e)) => Err(Errno(e)),
+        Some(e) if (1..=MAX_ERRNO).contains(&e) => Err(Errno(e)),
         _ => Err(Errno::EIO),
     }
 }
@@ -474,6 +459,11 @@ unsafe extern "C" fn readdir_cb(ctx: *mut c_void, ent: *const abi::wfs_dirent) -
         return 1;
     }
     let c = &mut *(ctx as *mut ReaddirCtx);
+    // A backend that ignores the stop signal must not grow the result past
+    // `max`, nor add entries after a malformed one.
+    if c.bad || c.out.len() >= c.max {
+        return 1;
+    }
     let r = catch_unwind(AssertUnwindSafe(|| {
         if ent.is_null() {
             return Err(());
@@ -532,9 +522,27 @@ impl Mount {
         let mut st = zeroed_stat();
         let mut ino = 0;
         ret(self.call(|| unsafe { f(self.fs, dir, name.as_ptr().cast(), len, &mut ino, &mut st) }))?;
-        let mut s = Stat::from_abi(&st)?;
-        s.ino = ino;
-        Ok(s)
+        self.child_stat(ino, &st)
+    }
+
+    /// Converts the result of a successful reference-returning op
+    /// (`lookup`/`create`). An out inode of 0 is `EIO`. If the stat is
+    /// malformed, the reference the backend handed out is released with
+    /// `forget(ino, 1)` before returning `EIO`.
+    fn child_stat(&self, ino: u64, st: &abi::wfs_stat) -> Result<Stat, Errno> {
+        if ino == 0 {
+            return Err(Errno::EIO);
+        }
+        match Stat::from_abi(st) {
+            Ok(mut s) => {
+                s.ino = ino;
+                Ok(s)
+            }
+            Err(e) => {
+                self.forget(ino, 1);
+                Err(e)
+            }
+        }
     }
 
     pub fn forget(&self, ino: u64, n: u64) {
@@ -614,9 +622,7 @@ impl Mount {
                 &mut st,
             )
         }))?;
-        let mut s = Stat::from_abi(&st)?;
-        s.ino = ino;
-        Ok(s)
+        self.child_stat(ino, &st)
     }
 
     pub fn unlink(&self, dir: u64, name: &[u8]) -> Result<(), Errno> {

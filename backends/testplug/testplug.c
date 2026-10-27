@@ -9,9 +9,19 @@
  *   getattr(3)    sleeps ~2 ms and counts overlapping calls (testplug_overlaps())
  *   getattr(1000) returns +7 (invalid positive result)
  *   getattr(1001) returns -1234 (unknown errno)
+ *   getattr(2000+e) returns -e (errno passthrough / range boundaries)
  *   read(4)       reports done = len + 1 (bogus)
+ *   lookup(1, "badft") succeeds with out ino 7 but ftype 99 (bogus)
+ *   lookup(1, "zero")  succeeds with out ino 0 (bogus)
+ *   readdir(5)    emits 1000 entries, ignoring the callback's stop signal
+ *   readdir(6)    emits good, bad (ftype 99), good, good, ignoring stop
  *   testplug_unmount_count() counts unmount calls.
- * Variant -DTESTPLUG_ST: caps = WFS_CAP_SINGLE_THREADED, dev_required = DATA.
+ *   testplug_bad_forgets() sums forget(n) calls on the bogus inodes 7 and 8.
+ *   testplug_accepted_after_bad() counts callbacks after the bad readdir(6)
+ *     entry that returned 0 (i.e. asked for more).
+ * Variant -DTESTPLUG_ST: caps = WFS_CAP_SINGLE_THREADED, dev_required = DATA,
+ *   plus `create`: "badft" -> ino 8 with ftype 99, "zero" -> ino 0,
+ *   anything else -EEXIST.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "winuxfs/backend.h"
@@ -32,10 +42,12 @@ static void nap(void) { struct timespec t = {0, 2000000}; nanosleep(&t, 0); }
 
 struct wfs_fs { char content[6]; };
 
-static atomic_int unmounts, inflight, overlaps;
+static atomic_int unmounts, inflight, overlaps, bad_forgets, accepted_after_bad;
 
 WFS_EXPORT int testplug_unmount_count(void) { return atomic_load(&unmounts); }
 WFS_EXPORT int testplug_overlaps(void) { return atomic_load(&overlaps); }
+WFS_EXPORT int testplug_bad_forgets(void) { return atomic_load(&bad_forgets); }
+WFS_EXPORT int testplug_accepted_after_bad(void) { return atomic_load(&accepted_after_bad); }
 
 static int read_magic(const wfs_host_api *h, wfs_blkdev *d, char out[10])
 {
@@ -92,6 +104,7 @@ static wfs_err_t t_getattr(wfs_fs *fs, wfs_ino_t ino, wfs_stat *s)
     }
     if (ino == 1000) return 7;
     if (ino == 1001) return -1234;
+    if (ino >= 2000 && ino < 3000) return -(wfs_err_t)(ino - 2000);
     if (ino != 1 && ino != 2) return -ENOENT;
     fill(ino, s);
     return 0;
@@ -101,17 +114,62 @@ static wfs_err_t t_lookup(wfs_fs *fs, wfs_ino_t dir, const char *n, uint32_t l, 
 {
     (void)fs;
     if (dir == 2) return -ENOTDIR;
+    if (dir == 1 && l == 5 && memcmp(n, "badft", 5) == 0) {
+        fill(2, s); s->ino = 7; s->ftype = 99; *out = 7;
+        return 0;
+    }
+    if (dir == 1 && l == 4 && memcmp(n, "zero", 4) == 0) {
+        fill(2, s); *out = 0;
+        return 0;
+    }
     if (dir != 1 || l != 5 || memcmp(n, "hello", 5) != 0) return -ENOENT;
     *out = 2;
     fill(2, s);
     return 0;
 }
 
-static void t_forget(wfs_fs *fs, wfs_ino_t i, uint64_t n) { (void)fs; (void)i; (void)n; }
+static void t_forget(wfs_fs *fs, wfs_ino_t i, uint64_t n)
+{
+    (void)fs;
+    if (i == 7 || i == 8) atomic_fetch_add(&bad_forgets, (int)n);
+}
+
+#ifdef TESTPLUG_ST
+static wfs_err_t t_create(wfs_fs *fs, wfs_ino_t dir, const char *n, uint32_t l, uint32_t ftype,
+                          uint32_t mode, uint32_t uid, uint32_t gid, wfs_ino_t *out, wfs_stat *s)
+{
+    (void)fs; (void)dir; (void)ftype; (void)mode; (void)uid; (void)gid;
+    if (l == 5 && memcmp(n, "badft", 5) == 0) {
+        fill(2, s); s->ino = 8; s->ftype = 99; *out = 8;
+        return 0;
+    }
+    if (l == 4 && memcmp(n, "zero", 4) == 0) {
+        fill(2, s); *out = 0;
+        return 0;
+    }
+    return -EEXIST;
+}
+#endif
 
 static wfs_err_t t_readdir(wfs_fs *fs, wfs_ino_t dir, uint64_t cookie, wfs_dirent_cb cb, void *ctx)
 {
     (void)fs;
+    if (dir == 5) {
+        for (uint64_t i = 0; i < 1000; i++) {
+            wfs_dirent e = { .next_cookie = i + 1, .ino = 2, .ftype = WFS_FT_REG, .name_len = 1, .name = "x" };
+            (void)cb(ctx, &e);
+        }
+        return 0;
+    }
+    if (dir == 6) {
+        wfs_dirent good = { .next_cookie = 1, .ino = 2, .ftype = WFS_FT_REG, .name_len = 1, .name = "g" };
+        wfs_dirent bad = { .next_cookie = 2, .ino = 2, .ftype = 99, .name_len = 1, .name = "b" };
+        (void)cb(ctx, &good);
+        (void)cb(ctx, &bad);
+        for (int i = 0; i < 2; i++)
+            if (cb(ctx, &good) == 0) atomic_fetch_add(&accepted_after_bad, 1);
+        return 0;
+    }
     if (dir != 1) return dir == 2 ? -ENOTDIR : -ENOENT;
     if (cookie == 0) {
         wfs_dirent e = { .next_cookie = 1, .ino = 2, .ftype = WFS_FT_REG, .name_len = 5, .name = "hello" };
@@ -136,6 +194,9 @@ static const wfs_ops ops = {
     .probe = t_probe, .mount = t_mount, .unmount = t_unmount, .statfs = t_statfs,
     .getattr = t_getattr, .lookup = t_lookup, .forget = t_forget, .readdir = t_readdir,
     .read = t_read,
+#ifdef TESTPLUG_ST
+    .create = t_create,
+#endif
 };
 
 static const wfs_backend_desc desc = {
