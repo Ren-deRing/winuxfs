@@ -1,6 +1,6 @@
 use proptest::prelude::*;
 use std::sync::Arc;
-use winuxfs_core::part::{scan, PartError, PartKind, PartitionView, PartitionInfo};
+use winuxfs_core::part::{scan, PartError, PartKind, PartitionInfo, PartitionView};
 use winuxfs_core::{BlockDevice, Errno, MemDevice};
 
 const SS: usize = 512;
@@ -29,9 +29,7 @@ fn mbr_entry(dev: &MemDevice, sector_off: usize, slot: usize, ty: u8, start: u32
     put(dev, sector_off + 510, &[0x55, 0xAA]);
 }
 
-fn gpt_disk(sectors: usize, parts: &[(u64, u64, &str)]) -> MemDevice {
-    let dev = MemDevice::new((sectors * SS) as u64, 512);
-    mbr_entry(&dev, 0, 0, 0xEE, 1, (sectors - 1) as u32);
+fn gpt_arr(parts: &[(u64, u64, &str)]) -> Vec<u8> {
     let mut arr = vec![0u8; 128 * 128];
     for (i, (s, e, name)) in parts.iter().enumerate() {
         let b = &mut arr[i * 128..(i + 1) * 128];
@@ -43,26 +41,84 @@ fn gpt_disk(sectors: usize, parts: &[(u64, u64, &str)]) -> MemDevice {
             b[56 + j * 2..58 + j * 2].copy_from_slice(&u.to_le_bytes());
         }
     }
+    arr
+}
+
+/// Full control: header byte mutations are applied to the PRIMARY header only;
+/// `fix_crc` recomputes its header CRC afterwards. `arr_crc_xor` corrupts the
+/// stored entry-array CRC in both headers.
+fn gpt_build(
+    sectors: usize,
+    arr: &[u8],
+    usable: (u64, u64),
+    rev: u32,
+    primary_muts: &[(usize, u8)],
+    fix_crc: bool,
+    arr_crc_xor: u32,
+) -> MemDevice {
+    let dev = MemDevice::new((sectors * SS) as u64, 512);
+    mbr_entry(&dev, 0, 0, 0xEE, 1, (sectors - 1) as u32);
     let last = (sectors - 1) as u64;
     for (hdr_lba, other, ent_lba) in [(1u64, last, 2u64), (last, 1, last - 32)] {
         let mut h = vec![0u8; 92];
         h[0..8].copy_from_slice(b"EFI PART");
-        h[8..12].copy_from_slice(&0x0001_0000u32.to_le_bytes());
+        h[8..12].copy_from_slice(&rev.to_le_bytes());
         h[12..16].copy_from_slice(&92u32.to_le_bytes());
         h[24..32].copy_from_slice(&hdr_lba.to_le_bytes());
         h[32..40].copy_from_slice(&other.to_le_bytes());
-        h[40..48].copy_from_slice(&34u64.to_le_bytes());
-        h[48..56].copy_from_slice(&(last - 33).to_le_bytes());
+        h[40..48].copy_from_slice(&usable.0.to_le_bytes());
+        h[48..56].copy_from_slice(&usable.1.to_le_bytes());
         h[72..80].copy_from_slice(&ent_lba.to_le_bytes());
         h[80..84].copy_from_slice(&128u32.to_le_bytes());
         h[84..88].copy_from_slice(&128u32.to_le_bytes());
-        h[88..92].copy_from_slice(&crc32(&arr).to_le_bytes());
+        h[88..92].copy_from_slice(&(crc32(arr) ^ arr_crc_xor).to_le_bytes());
         let c = crc32(&h);
         h[16..20].copy_from_slice(&c.to_le_bytes());
+        if hdr_lba == 1 {
+            for &(o, v) in primary_muts {
+                h[o % 92] = v;
+            }
+            if fix_crc {
+                h[16..20].fill(0);
+                let c = crc32(&h);
+                h[16..20].copy_from_slice(&c.to_le_bytes());
+            }
+        }
         put(&dev, hdr_lba as usize * SS, &h);
-        put(&dev, ent_lba as usize * SS, &arr);
+        put(&dev, ent_lba as usize * SS, arr);
     }
     dev
+}
+
+fn gpt_disk(sectors: usize, parts: &[(u64, u64, &str)]) -> MemDevice {
+    gpt_build(sectors, &gpt_arr(parts), (34, sectors as u64 - 34), 0x0001_0000, &[], false, 0)
+}
+
+fn mbr_ext_disk() -> MemDevice {
+    let dev = MemDevice::new(8192 * 512, 512);
+    mbr_entry(&dev, 0, 0, 0x83, 10, 50);
+    mbr_entry(&dev, 0, 1, 0x05, 100, 4000);
+    for (i, ebr) in [100u32, 1100, 2100].iter().enumerate() {
+        mbr_entry(&dev, *ebr as usize * 512, 0, 0x83, 1, 500);
+        if i < 2 {
+            mbr_entry(&dev, *ebr as usize * 512, 1, 0x05, 1000 * (i as u32 + 1), 1000);
+        }
+    }
+    dev
+}
+
+fn check_invariants(p: &[PartitionInfo], size: u64) {
+    let mut prev_idx = 0;
+    for x in p {
+        assert!(x.index > prev_idx, "indexes sorted and unique");
+        prev_idx = x.index;
+        assert!(x.start.checked_add(x.len).unwrap() <= size, "within device");
+    }
+    let mut r: Vec<(u64, u64)> = p.iter().map(|x| (x.start, x.len)).collect();
+    r.sort();
+    for w in r.windows(2) {
+        assert!(w[0].0 + w[0].1 <= w[1].0, "non-overlapping");
+    }
 }
 
 #[test]
@@ -190,14 +246,131 @@ proptest! {
         let _ = scan(&dev);
     }
 
-    // Structured: valid-looking signatures with random fields.
     #[test]
-    fn random_fields_with_signatures_never_panic(bytes in proptest::collection::vec(any::<u8>(), 64 * 512), ty in any::<u8>()) {
-        let dev = MemDevice::new(64 * 512, 512);
-        put(&dev, 0, &bytes);
-        put(&dev, 510, &[0x55, 0xAA]);
-        put(&dev, 446 + 4, &[ty]);
-        put(&dev, 512, b"EFI PART");
-        let _ = scan(&dev);
+    fn mutated_mbr_chain_never_panics(
+        muts in proptest::collection::vec((0usize..4, 440usize..512, any::<u8>()), 1..8)
+    ) {
+        let dev = mbr_ext_disk();
+        for (sec, o, v) in muts {
+            let base = [0usize, 100, 1100, 2100][sec] * 512;
+            put(&dev, base + o, &[v]);
+        }
+        if let Ok(p) = scan(&dev) {
+            check_invariants(&p, dev.size());
+        }
     }
+
+    #[test]
+    fn mutated_gpt_never_panics(
+        arr_muts in proptest::collection::vec((0usize..512, any::<u8>()), 0..8),
+        hdr_muts in proptest::collection::vec((8usize..92, any::<u8>()), 0..4),
+        fix in any::<bool>(),
+    ) {
+        let mut arr = gpt_arr(&[(34, 99, "a"), (100, 999, "b"), (1000, 1500, "c")]);
+        for (o, v) in arr_muts { arr[o] = v; }
+        let dev = gpt_build(2048, &arr, (34, 2014), 0x0001_0000, &hdr_muts, fix, 0);
+        if let Ok(p) = scan(&dev) {
+            check_invariants(&p, dev.size());
+        }
+    }
+}
+
+#[test]
+fn gpt_entry_array_crc_mismatch_is_corrupt() {
+    let arr = gpt_arr(&[(34, 99, "a")]);
+    let dev = gpt_build(2048, &arr, (34, 2014), 0x0001_0000, &[], false, 1);
+    assert!(matches!(scan(&dev), Err(PartError::Corrupt(_))));
+}
+
+#[test]
+fn gpt_entry_at_lba1_rejected() {
+    let dev = gpt_build(2048, &gpt_arr(&[(1, 99, "a")]), (34, 2014), 0x0001_0000, &[], false, 0);
+    assert!(matches!(scan(&dev), Err(PartError::Corrupt(_))));
+}
+
+#[test]
+fn gpt_entry_past_last_usable_rejected() {
+    let dev = gpt_build(2048, &gpt_arr(&[(100, 2020, "a")]), (34, 2014), 0x0001_0000, &[], false, 0);
+    assert!(matches!(scan(&dev), Err(PartError::Corrupt(_))));
+}
+
+#[test]
+fn gpt_first_usable_after_last_usable_rejected() {
+    let dev = gpt_build(2048, &gpt_arr(&[]), (500, 100), 0x0001_0000, &[], false, 0);
+    assert!(matches!(scan(&dev), Err(PartError::Corrupt(_))));
+}
+
+#[test]
+fn gpt_bad_revision_rejected() {
+    let dev = gpt_build(2048, &gpt_arr(&[(34, 99, "a")]), (34, 2014), 0x0002_0000, &[], false, 0);
+    assert!(matches!(scan(&dev), Err(PartError::Corrupt(_))));
+}
+
+#[test]
+fn gpt_overlapping_entries_rejected() {
+    let dev = gpt_disk(2048, &[(34, 99, "a"), (90, 200, "b")]);
+    assert!(matches!(scan(&dev), Err(PartError::Corrupt(_))));
+}
+
+#[test]
+fn mbr_entry_at_lba0_rejected() {
+    let dev = MemDevice::new(4096 * 512, 512);
+    mbr_entry(&dev, 0, 0, 0x83, 0, 100);
+    assert!(matches!(scan(&dev), Err(PartError::Corrupt(_))));
+}
+
+#[test]
+fn mbr_primaries_overlap_rejected() {
+    let dev = MemDevice::new(4096 * 512, 512);
+    mbr_entry(&dev, 0, 0, 0x83, 100, 100);
+    mbr_entry(&dev, 0, 1, 0x83, 150, 100);
+    assert!(matches!(scan(&dev), Err(PartError::Corrupt(_))));
+}
+
+#[test]
+fn mbr_primary_overlaps_extended_rejected() {
+    let dev = MemDevice::new(4096 * 512, 512);
+    mbr_entry(&dev, 0, 0, 0x83, 100, 100);
+    mbr_entry(&dev, 0, 1, 0x05, 150, 1000);
+    mbr_entry(&dev, 150 * 512, 0, 0x83, 1, 10);
+    assert!(matches!(scan(&dev), Err(PartError::Corrupt(_))));
+}
+
+#[test]
+fn mbr_logical_outside_extended_rejected() {
+    let dev = MemDevice::new(4096 * 512, 512);
+    mbr_entry(&dev, 0, 0, 0x05, 100, 200);
+    mbr_entry(&dev, 100 * 512, 0, 0x83, 1, 500); // ends at 601 > 300
+    assert!(matches!(scan(&dev), Err(PartError::Corrupt(_))));
+}
+
+#[test]
+fn mbr_logicals_overlap_rejected() {
+    let dev = MemDevice::new(4096 * 512, 512);
+    mbr_entry(&dev, 0, 0, 0x05, 100, 2000);
+    mbr_entry(&dev, 100 * 512, 0, 0x83, 1, 600);
+    mbr_entry(&dev, 100 * 512, 1, 0x05, 300, 1000);
+    mbr_entry(&dev, 400 * 512, 0, 0x83, 1, 100); // starts at 401, inside first logical
+    assert!(matches!(scan(&dev), Err(PartError::Corrupt(_))));
+}
+
+#[test]
+fn mbr_valid_mixed_disk_scans() {
+    let p = scan(&mbr_ext_disk()).unwrap();
+    assert_eq!(p.iter().map(|x| x.index).collect::<Vec<_>>(), vec![1, 5, 6, 7]);
+    check_invariants(&p, 8192 * 512);
+}
+
+#[test]
+fn works_on_4096_sector_device() {
+    // LBA unit is max(sector_size, 512) = 4096
+    let dev = MemDevice::new(1024 * 4096, 4096);
+    let mut e = [0u8; 16];
+    e[4] = 0x83;
+    e[8..12].copy_from_slice(&10u32.to_le_bytes());
+    e[12..16].copy_from_slice(&20u32.to_le_bytes());
+    put(&dev, 446, &e);
+    put(&dev, 510, &[0x55, 0xAA]);
+    let p = scan(&dev).unwrap();
+    assert_eq!((p[0].start, p[0].len), (10 * 4096, 20 * 4096));
 }

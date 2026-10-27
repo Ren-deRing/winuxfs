@@ -92,6 +92,18 @@ impl Ctx<'_> {
     }
 }
 
+/// Rejects overlapping `(start, len)` byte ranges.
+fn check_overlap(mut r: Vec<(u64, u64)>) -> Result<(), PartError> {
+    r.sort();
+    for w in r.windows(2) {
+        // ranges were already bounds-checked, so start + len cannot overflow
+        if w[0].0 + w[0].1 > w[1].0 {
+            return Err(PartError::Corrupt("overlapping partitions"));
+        }
+    }
+    Ok(())
+}
+
 struct MbrEntry {
     ty: u8,
     start: u32,
@@ -128,13 +140,18 @@ pub fn scan(dev: &dyn BlockDevice) -> Result<Vec<PartitionInfo>, PartError> {
         return scan_gpt(&cx);
     }
     let mut out = Vec::new();
+    let mut top = Vec::new(); // primaries + extended containers
     for (i, e) in ents.iter().enumerate() {
         if e.ty == 0 || e.len == 0 {
             continue;
         }
+        if e.start == 0 {
+            return Err(PartError::Corrupt("partition overlaps MBR"));
+        }
         let (start, len) = cx.range(e.start as u64, e.len as u64)?;
+        top.push((start, len));
         if is_extended(e.ty) {
-            scan_extended(&cx, e.start as u64, &mut out)?;
+            scan_extended(&cx, e.start as u64, (start, len), &mut out)?;
         } else {
             out.push(PartitionInfo {
                 index: i as u32 + 1,
@@ -144,12 +161,19 @@ pub fn scan(dev: &dyn BlockDevice) -> Result<Vec<PartitionInfo>, PartError> {
             });
         }
     }
+    check_overlap(top)?;
+    check_overlap(out.iter().filter(|p| p.index >= 5).map(|p| (p.start, p.len)).collect())?;
     // Primaries (1..=4) first, then logicals (5..) in chain order.
     out.sort_by_key(|p| p.index);
     Ok(out)
 }
 
-fn scan_extended(cx: &Ctx, ext_start: u64, out: &mut Vec<PartitionInfo>) -> Result<(), PartError> {
+fn scan_extended(
+    cx: &Ctx,
+    ext_start: u64,
+    container: (u64, u64),
+    out: &mut Vec<PartitionInfo>,
+) -> Result<(), PartError> {
     let mut ebr = ext_start;
     for n in 0..MAX_EXT_DEPTH {
         let sec = cx.read_sector(ebr)?;
@@ -158,6 +182,9 @@ fn scan_extended(cx: &Ctx, ext_start: u64, out: &mut Vec<PartitionInfo>) -> Resu
         if l.ty != 0 && l.len != 0 {
             let abs = ebr.checked_add(l.start as u64).ok_or(PartError::Corrupt("lba overflow"))?;
             let (start, len) = cx.range(abs, l.len as u64)?;
+            if start < container.0 || start + len > container.0 + container.1 {
+                return Err(PartError::Corrupt("logical partition outside extended"));
+            }
             out.push(PartitionInfo {
                 index: 5 + n as u32,
                 start,
@@ -172,7 +199,10 @@ fn scan_extended(cx: &Ctx, ext_start: u64, out: &mut Vec<PartitionInfo>) -> Resu
         ebr = ext_start
             .checked_add(nx.start as u64)
             .ok_or(PartError::Corrupt("lba overflow"))?;
-        cx.range(ebr, 1)?;
+        let (eb, _) = cx.range(ebr, 1)?;
+        if eb < container.0 || eb + cx.ss > container.0 + container.1 {
+            return Err(PartError::Corrupt("EBR outside extended"));
+        }
     }
     Err(PartError::Corrupt("extended partition chain too deep"))
 }
@@ -201,8 +231,15 @@ fn try_gpt(cx: &Ctx, hdr_lba: u64) -> Result<Vec<PartitionInfo>, PartError> {
     if crc32(&h) != want {
         return Err(PartError::Corrupt("GPT header CRC mismatch"));
     }
+    if le32(&h, 8) != 0x0001_0000 {
+        return Err(PartError::Corrupt("unsupported GPT revision"));
+    }
     if le64(&h, 24) != hdr_lba {
         return Err(PartError::Corrupt("GPT header LBA mismatch"));
+    }
+    let (first_usable, last_usable) = (le64(&h, 40), le64(&h, 48));
+    if first_usable < 2 || first_usable > last_usable || last_usable >= cx.size / cx.ss {
+        return Err(PartError::Corrupt("bad GPT usable range"));
     }
     let ent_lba = le64(&h, 72);
     let count = le32(&h, 80);
@@ -233,6 +270,9 @@ fn try_gpt(cx: &Ctx, hdr_lba: u64) -> Result<Vec<PartitionInfo>, PartError> {
             .checked_sub(first)
             .and_then(|d| d.checked_add(1))
             .ok_or(PartError::Corrupt("bad GPT entry range"))?;
+        if first < first_usable || lastl > last_usable {
+            return Err(PartError::Corrupt("GPT entry outside usable range"));
+        }
         let (start, len) = cx.range(first, sectors)?;
         let units: Vec<u16> = e[56..128]
             .as_chunks::<2>()
@@ -248,6 +288,7 @@ fn try_gpt(cx: &Ctx, hdr_lba: u64) -> Result<Vec<PartitionInfo>, PartError> {
             kind: PartKind::Gpt { type_guid: guid, name: String::from_utf16_lossy(&units) },
         });
     }
+    check_overlap(out.iter().map(|p| (p.start, p.len)).collect())?;
     Ok(out)
 }
 
@@ -296,5 +337,14 @@ impl BlockDevice for PartitionView {
     }
     fn read_only(&self) -> bool {
         self.dev.read_only()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn crc32_known_vector() {
+        assert_eq!(super::crc32(b"123456789"), 0xCBF4_3926);
+        assert_eq!(super::crc32(b""), 0);
     }
 }

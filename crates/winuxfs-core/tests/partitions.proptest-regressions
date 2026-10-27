@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 312879744b876be6eab317d69167dfc0b376765acda9487590e3aa1015d58ea4 # shrinks to muts = [(0, 454, 52)]
+cc 28fc65c1bac1e97a87aa7c8ba161bd22c6194a80e0e601587a7c8adb6947e61b # shrinks to arr_muts = [(160, 0)], hdr_muts = [], fix = false
