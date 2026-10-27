@@ -607,5 +607,7 @@ version = "0.1.0"
 name = "winuxfs-core"
 version = "0.1.0"
 dependencies = [
+ "libloading",
  "proptest",
+ "winuxfs-abi",
 ]
