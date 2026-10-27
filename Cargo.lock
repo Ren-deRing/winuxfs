@@ -234,3 +234,7 @@ version = "0.1.0"
 [[package]]
 name = "winuxfs-core"
 version = "0.1.0"
+dependencies = [
+ "libloading",
+ "winuxfs-abi",
+]
