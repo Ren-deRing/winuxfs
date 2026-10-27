@@ -1,0 +1,33 @@
+# cargo-deny policy. See docs/licensing.md for the reasoning.
+#
+# Project license: GPL-2.0-only. Only licenses compatible with distributing
+# a GPL-2.0-only binary are allowed. Anything not listed in `allow` is
+# rejected, which explicitly includes GPL-3.0*, AGPL*, and LGPL-3.0*
+# (all incompatible with GPL-2.0-only). Do not add those here.
+
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "GPL-2.0-only",
+]
+confidence-threshold = 0.93
+# Allow-list entries are kept even before a dependency uses them.
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

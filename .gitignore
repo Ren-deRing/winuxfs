@@ -6,3 +6,4 @@ vm/shared/
 vm/oem/authorized_keys
 vm/oem/winfsp.msi
 .worktrees/
+__pycache__/

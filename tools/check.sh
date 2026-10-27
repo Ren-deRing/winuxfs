@@ -4,6 +4,7 @@ cd "$(dirname "$0")/.."
 cargo fmt --check
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
+python3 -m unittest tools/test_license_scan.py
 if [ -f deny.toml ]; then
   cargo deny check
 fi
