@@ -4,3 +4,4 @@ pub mod part;
 
 pub use block::{AlignedDevice, BlockDevice, FileDevice, MemDevice};
 pub use error::Errno;
+pub mod namemap;
