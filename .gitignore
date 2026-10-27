@@ -6,3 +6,7 @@ vm/shared/
 vm/oem/authorized_keys
 vm/oem/winfsp.msi
 .worktrees/
+vm/oem/openssh.msi
+vm/snapshots/
+vm/.ssh/
+__pycache__/
