@@ -19,6 +19,9 @@ use winuxfs_abi as abi;
 /// Root inode number every backend must expose.
 pub const ROOT_INO: u64 = 1;
 
+/// Buffer size `Mount::readlink` offers the backend (Linux `PATH_MAX`).
+pub const READLINK_MAX: usize = 4096;
+
 /// Highest Linux errno value (`EHWPOISON`).
 ///
 /// Per docs/abi.md a backend failure is `-(Linux errno value)`. The "known
@@ -687,6 +690,66 @@ impl Mount {
     pub fn sync(&self) -> Result<(), Errno> {
         let f = self.ops().sync.ok_or(Errno::ENOSYS)?;
         ret(self.call(|| unsafe { f(self.fs) }))
+    }
+
+    pub fn fsync(&self, ino: u64, datasync: bool) -> Result<(), Errno> {
+        let f = self.ops().fsync.ok_or(Errno::ENOSYS)?;
+        ret(self.call(|| unsafe { f(self.fs, ino, datasync as c_int) }))
+    }
+
+    /// Adds the name `name` in `ndir` for the existing inode `ino`. Returns no
+    /// new reference.
+    pub fn link(&self, ino: u64, ndir: u64, name: &[u8]) -> Result<(), Errno> {
+        let f = self.ops().link.ok_or(Errno::ENOSYS)?;
+        let len = name_len(name)?;
+        ret(self.call(|| unsafe { f(self.fs, ino, ndir, name.as_ptr().cast(), len) }))
+    }
+
+    /// Creates a symlink; like `create`, the result carries one reference.
+    pub fn symlink(
+        &self,
+        dir: u64,
+        name: &[u8],
+        target: &[u8],
+        uid: u32,
+        gid: u32,
+    ) -> Result<Stat, Errno> {
+        let f = self.ops().symlink.ok_or(Errno::ENOSYS)?;
+        let len = name_len(name)?;
+        let tlen = name_len(target)?;
+        let mut st = zeroed_stat();
+        let mut ino = 0;
+        ret(self.call(|| unsafe {
+            f(
+                self.fs,
+                dir,
+                name.as_ptr().cast(),
+                len,
+                target.as_ptr().cast(),
+                tlen,
+                uid,
+                gid,
+                &mut ino,
+                &mut st,
+            )
+        }))?;
+        self.child_stat(ino, &st)
+    }
+
+    /// Reads a symlink target (at most `READLINK_MAX` bytes; the backend
+    /// truncates longer targets like readlink(2)).
+    pub fn readlink(&self, ino: u64) -> Result<Vec<u8>, Errno> {
+        let f = self.ops().readlink.ok_or(Errno::ENOSYS)?;
+        let mut buf = vec![0u8; READLINK_MAX];
+        let mut len = 0usize;
+        let cap = buf.len();
+        let p = buf.as_mut_ptr().cast();
+        ret(self.call(|| unsafe { f(self.fs, ino, p, cap, &mut len) }))?;
+        if len > cap {
+            return Err(Errno::EIO);
+        }
+        buf.truncate(len);
+        Ok(buf)
     }
 }
 

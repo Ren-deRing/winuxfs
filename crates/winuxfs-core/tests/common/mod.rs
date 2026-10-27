@@ -54,6 +54,21 @@ pub fn test_plugin(backend_dir: &str, name: &str) -> PathBuf {
     p
 }
 
+/// Output directory for shipped plugins (`memfs`, ...).
+pub fn plugin_dir() -> PathBuf {
+    workspace_root().join("target/plugins")
+}
+
+/// Path to `target/plugins/winuxfs_backend_<name>.<ext>`, built from
+/// `backends/<backend_dir>` if needed.
+pub fn plugin(backend_dir: &str, name: &str) -> PathBuf {
+    let dir = plugin_dir();
+    build(backend_dir, &dir);
+    let p = dir.join(format!("winuxfs_backend_{name}.{EXT}"));
+    assert!(p.exists(), "plugin {} was not built", p.display());
+    p
+}
+
 /// A fresh, empty scratch directory under `target/test-plugins/scratch`.
 pub fn scratch_dir(tag: &str) -> PathBuf {
     let d = test_plugin_dir()
