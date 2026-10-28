@@ -7,6 +7,7 @@ pub struct Errno(pub i32);
 impl Errno {
     pub const ENOENT: Errno = Errno(2);
     pub const EIO: Errno = Errno(5);
+    pub const EACCES: Errno = Errno(13);
     pub const EBUSY: Errno = Errno(16);
     pub const EEXIST: Errno = Errno(17);
     pub const ENODEV: Errno = Errno(19);
