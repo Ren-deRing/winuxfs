@@ -152,6 +152,8 @@ fn list_partitions_matches_sgdisk() {
     match o.status.code() {
         Some(0) => {}
         // 77: sgdisk is missing; the script says which package provides it.
+        // libtest hides this output, so tools/check.sh runs the script
+        // itself and prints SKIPPED.
         Some(77) => eprintln!("list_partitions_matches_sgdisk skipped: {err}"),
         c => panic!("xcheck failed ({c:?}):\n{}\n{err}", stdout_of(&o)),
     }
@@ -291,4 +293,128 @@ fn mount_is_windows_only() {
     let o = winuxfs().args(["unmount", "X:"]).output().unwrap();
     assert_eq!(o.status.code(), Some(1));
     assert!(stderr_of(&o).contains("Windows"), "{}", stderr_of(&o));
+}
+
+/// A plugin directory holding only the named plugins built from
+/// backends/testplug (`testplug` probes true when DATA starts with "TPLG").
+fn testplug_dir(tag: &str, names: &[&str]) -> PathBuf {
+    let built = plugins("testplug");
+    let d = scratch(tag);
+    for n in names {
+        let f = format!("winuxfs_backend_{n}.{EXT}");
+        std::fs::copy(built.join(&f), d.join(&f)).unwrap();
+    }
+    d
+}
+
+/// 1 MiB image whose first bytes are "TPLGabcdef".
+fn tplg_image(dir: &Path) -> PathBuf {
+    let p = dir.join("tplg.img");
+    let mut img = vec![0u8; 1 << 20];
+    img[..10].copy_from_slice(b"TPLGabcdef");
+    std::fs::write(&p, img).unwrap();
+    p
+}
+
+#[cfg(not(windows))]
+#[test]
+fn auto_type_picks_the_single_match() {
+    let plug = testplug_dir("auto-one", &["testplug"]);
+    let img = tplg_image(&scratch("auto-one-img"));
+    let o = winuxfs()
+        .args(["mount", "X:"])
+        .arg(&img)
+        .args(["--type", "auto", "--plugin-dir"])
+        .arg(&plug)
+        .output()
+        .unwrap();
+    // Every check passed; only the host refuses to mount.
+    assert_eq!(o.status.code(), Some(1));
+    let err = stderr_of(&o);
+    assert!(err.contains("'testplug' would serve"), "{err}");
+    assert!(err.contains("Windows"), "{err}");
+}
+
+#[test]
+fn auto_type_with_several_matches_errors() {
+    let plug = testplug_dir("auto-two", &["testplug", "testplug_st"]);
+    let img = tplg_image(&scratch("auto-two-img"));
+    let o = winuxfs()
+        .args(["mount", "X:"])
+        .arg(&img)
+        .args(["--plugin-dir"])
+        .arg(&plug)
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    let err = stderr_of(&o);
+    assert!(err.contains("Several backends"), "{err}");
+    assert!(
+        err.contains("testplug,") || err.contains("testplug_st"),
+        "{err}"
+    );
+    assert!(err.contains("--type"), "{err}");
+}
+
+#[test]
+fn auto_type_with_no_recognised_device_errors() {
+    let plug = testplug_dir("auto-zero", &["testplug", "testplug_st"]);
+    let d = scratch("auto-zero-img");
+    let img = d.join("zero.img");
+    std::fs::write(&img, vec![0u8; 1 << 20]).unwrap();
+    let o = winuxfs()
+        .args(["mount", "X:"])
+        .arg(&img)
+        .args(["--type", "auto", "--plugin-dir"])
+        .arg(&plug)
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    let err = stderr_of(&o);
+    assert!(err.contains("No installed backend recognises"), "{err}");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn ro_flag_reaches_the_mount_settings() {
+    let plug = plugins("memfs");
+    let o = winuxfs()
+        .args([
+            "mount",
+            "X:",
+            "none",
+            "--type",
+            "memfs",
+            "--ro",
+            "--plugin-dir",
+        ])
+        .arg(&plug)
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    assert!(stderr_of(&o).contains("read-only"), "{}", stderr_of(&o));
+    let o = winuxfs()
+        .args(["mount", "X:", "none", "--type", "memfs", "--plugin-dir"])
+        .arg(&plug)
+        .output()
+        .unwrap();
+    assert!(!stderr_of(&o).contains("read-only"), "{}", stderr_of(&o));
+}
+
+#[test]
+fn log_device_same_as_data_errors() {
+    let plug = plugins("memfs");
+    let img = tplg_image(&scratch("samelog"));
+    let o = winuxfs()
+        .args(["mount", "X:"])
+        .arg(&img)
+        .args(["--type", "memfs", "--log"])
+        .arg(&img)
+        .arg("--plugin-dir")
+        .arg(&plug)
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    let err = stderr_of(&o);
+    assert!(err.contains("--log") && err.contains("same"), "{err}");
 }

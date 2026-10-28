@@ -19,8 +19,14 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 BIN = os.environ.get("WINUXFS_BIN", str(ROOT / "target" / "debug" / "winuxfs"))
 
 
-@unittest.skipUnless(os.path.exists(BIN), f"{BIN} not built (cargo build -p winuxfs-cli)")
 class PermissionErrors(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # A missing binary is a failure, not a silent skip.
+        if not os.path.exists(BIN):
+            raise AssertionError(f"{BIN} not built: run 'cargo build -p winuxfs-cli' "
+                                 "or set WINUXFS_BIN")
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dev = pathlib.Path(self.tmp.name) / "locked.img"

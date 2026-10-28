@@ -8,14 +8,17 @@
 //! make -C backends/memfs CC=x86_64-w64-mingw32-gcc EXT=dll OUT=<dir>
 //! cargo build -p winuxfs-cli --target x86_64-pc-windows-gnu
 //! cargo test -p winuxfs-win --target x86_64-pc-windows-gnu --no-run
+//! make -C backends/testplug CC=x86_64-w64-mingw32-gcc EXT=dll OUT=<tp>
 //! # copy winuxfs.exe, winuxfs_backend_memfs.dll and e2e_cli-*.exe into one
-//! # directory in the VM and run the test exe there
+//! # directory in the VM, <tp>/winuxfs_backend_testplug.dll into its
+//! # `testplug` subdirectory (or WINUXFS_TESTPLUG_DIR), run the test exe
 //! ```
 //!
 //! The tests mount on [`DRIVE`] and are serialised by a lock (they share the
 //! drive letter, and sending Ctrl-C re-attaches this process's console).
 #![cfg(windows)]
 
+use std::ffi::OsString;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
@@ -96,12 +99,23 @@ struct Mount {
 }
 
 impl Mount {
+    /// `winuxfs mount X: none --type memfs` plus `extra`.
     fn start(extra: &[&str]) -> Mount {
+        let mut args: Vec<OsString> = ["none", "--type", "memfs", "--plugin-dir"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        args.push(plugin_dir().into());
+        args.extend(extra.iter().map(OsString::from));
+        Mount::start_args(&args)
+    }
+
+    /// `winuxfs mount X:` plus `args`; returns once X: is there.
+    fn start_args(args: &[OsString]) -> Mount {
         assert!(!drive_present(), "{DRIVE} is in use before the test");
         let child = Command::new(cli())
-            .args(["mount", DRIVE, "none", "--type", "memfs", "--plugin-dir"])
-            .arg(plugin_dir())
-            .args(extra)
+            .args(["mount", DRIVE])
+            .args(args)
             .env_remove("WINUXFS_PLUGIN_PATH")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -352,4 +366,88 @@ fn mount_requires_admin_message() {
         err.contains("denied") && err.contains("administrator"),
         "{err}"
     );
+}
+
+#[test]
+fn unmount_then_mount_back_to_back() {
+    // `unmount` returning means the mount point can be claimed again at
+    // once (a left-over stop event of the old process is stale).
+    let _g = lock();
+    for i in 0..5 {
+        let m = Mount::start(&[]);
+        let o = winuxfs(&["unmount", DRIVE]);
+        assert_eq!(
+            o.status.code(),
+            Some(0),
+            "round {i}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        // Mount again right away, before the old process has exited.
+        let again = Command::new(cli())
+            .args(["mount", DRIVE, "none", "--type", "memfs", "--plugin-dir"])
+            .arg(plugin_dir())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .unwrap();
+        let mut again = Mount { child: Some(again) };
+        let (st, out) = m.wait_exit();
+        assert_eq!(st.code(), Some(0), "round {i}: {out}");
+        let t = Instant::now();
+        while !drive_present() {
+            if let Some(st) = again.child_mut().try_wait().unwrap() {
+                let out = again.child.take().unwrap().wait_with_output().unwrap();
+                panic!(
+                    "round {i}: second mount exited ({st}): {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            assert!(t.elapsed() < MOUNT_TIMEOUT, "round {i}: no remount");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let o = winuxfs(&["unmount", DRIVE]);
+        assert_eq!(o.status.code(), Some(0), "round {i}");
+        let (st, out) = again.wait_exit();
+        assert_eq!(st.code(), Some(0), "round {i}: {out}");
+        wait_drive_gone();
+    }
+}
+
+#[test]
+fn auto_type_on_a_partition() {
+    // Image with an MBR; partition 1 (LBA 2048, 1 MiB) starts with
+    // "TPLGabcdef", which only the testplug backend recognises; testplug
+    // serves bytes 4..10 of its device as the file "hello".
+    let _g = lock();
+    let tp = std::env::var_os("WINUXFS_TESTPLUG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| exe_dir().join("testplug"));
+    let dir = std::env::temp_dir().join("winuxfs-e2e-cli");
+    let _ = std::fs::create_dir_all(&dir);
+    let img = dir.join("part.img");
+    let mut b = vec![0u8; 4 << 20];
+    b[446 + 4] = 0x83;
+    b[446 + 8..446 + 12].copy_from_slice(&2048u32.to_le_bytes());
+    b[446 + 12..446 + 16].copy_from_slice(&2048u32.to_le_bytes());
+    b[510] = 0x55;
+    b[511] = 0xAA;
+    b[2048 * 512..2048 * 512 + 10].copy_from_slice(b"TPLGabcdef");
+    std::fs::write(&img, &b).unwrap();
+    let args: Vec<OsString> = vec![
+        img.clone().into(),
+        "--partition".into(),
+        "1".into(),
+        "--plugin-dir".into(),
+        tp.into(),
+    ];
+    let m = Mount::start_args(&args);
+    assert_eq!(std::fs::read(root("hello")).unwrap(), b"abcdef");
+    send_ctrl_c(m.pid());
+    let (st, out) = m.wait_exit();
+    assert_eq!(st.code(), Some(0), "{out}");
+    assert!(out.contains("testplug"), "{out}");
+    wait_drive_gone();
+    let _ = std::fs::remove_file(&img);
 }
