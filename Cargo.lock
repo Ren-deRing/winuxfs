@@ -604,12 +604,20 @@ name = "winuxfs-cli"
 version = "0.1.0"
 
 [[package]]
+name = "winuxfs-conformance"
+version = "0.1.0"
+dependencies = [
+ "winuxfs-core",
+]
+
+[[package]]
 name = "winuxfs-core"
 version = "0.1.0"
 dependencies = [
  "libloading",
  "proptest",
  "winuxfs-abi",
+ "winuxfs-conformance",
 ]
 
 [[package]]
