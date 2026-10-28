@@ -6,6 +6,8 @@ cargo clippy --workspace -- -D warnings
 cargo test --workspace
 python3 -m unittest tools/test_license_scan.py
 python3 -m unittest tools/test_mkdisk.py
+# needs target/debug/winuxfs, which cargo test above builds
+python3 -m unittest tools/test_cli_errors.py
 if [ -f deny.toml ]; then
   cargo deny check
 fi
