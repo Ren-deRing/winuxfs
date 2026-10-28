@@ -75,3 +75,5 @@ clean:
 	rm -rf ../../target/xfs-shim ../../target/xfs-shim-win
 
 .PHONY: all clean probe-libxfs test-shim test-shim-build probe
+
+-include $(wildcard $(dir $(lastword $(MAKEFILE_LIST)))mk/*.mk)
