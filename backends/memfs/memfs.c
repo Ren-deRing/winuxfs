@@ -23,13 +23,14 @@
  *   - Thread safety: one coarse mutex per mount (pthreads; winpthreads on
  *     mingw-w64). The readdir callback runs with the lock held, so it must not
  *     call back into the backend (the core's callback does not).
- *   - Error codes are Linux errno values, defined locally below: the C
+ *   - Error codes are Linux errno values, from winuxfs/errno.h (WFS_E*): the C
  *     runtime's <errno.h> values differ on Windows (e.g. ENOTEMPTY is 41).
  *   - Timestamps come from clock_gettime(CLOCK_REALTIME). Reads do not update
  *     atime (noatime semantics).
  */
 #define _POSIX_C_SOURCE 200809L
 #include "winuxfs/backend.h"
+#include "winuxfs/errno.h"
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,20 +41,6 @@
 #else
 #define WFS_EXPORT __attribute__((visibility("default")))
 #endif
-
-/* Linux errno values (the ABI's error space). */
-#define L_EPERM 1
-#define L_ENOENT 2
-#define L_ENOMEM 12
-#define L_EEXIST 17
-#define L_ENOTDIR 20
-#define L_EISDIR 21
-#define L_EINVAL 22
-#define L_EFBIG 27
-#define L_ENOSPC 28
-#define L_EMLINK 31
-#define L_ENAMETOOLONG 36
-#define L_ENOTEMPTY 39
 
 #ifndef MEMFS_CAP_BYTES
 #define MEMFS_CAP_BYTES (1ULL << 30) /* overridable only for the self-test */
@@ -147,13 +134,13 @@ static uint64_t name_hash(wfs_ino_t dir, const char *name, uint32_t len)
 static wfs_err_t check_name(const char *name, uint32_t len)
 {
     if (len == 0 || name == NULL)
-        return -L_EINVAL;
+        return -WFS_EINVAL;
     if (len > MEMFS_NAME_MAX)
-        return -L_ENAMETOOLONG;
+        return -WFS_ENAMETOOLONG;
     if (memchr(name, '/', len) || memchr(name, '\0', len))
-        return -L_EINVAL;
+        return -WFS_EINVAL;
     if ((len == 1 && name[0] == '.') || (len == 2 && name[0] == '.' && name[1] == '.'))
-        return -L_EINVAL;
+        return -WFS_EINVAL;
     return 0;
 }
 
@@ -323,10 +310,10 @@ static size_t ents_after(const struct inode *dir, uint64_t cookie)
 static wfs_err_t dadd(wfs_fs *fs, struct inode *dir, const char *name, uint32_t len, struct inode *node)
 {
     if (grow((void **)&dir->ents, &dir->capents, dir->nents + 1, sizeof *dir->ents))
-        return -L_ENOMEM;
+        return -WFS_ENOMEM;
     struct dentry *d = malloc(sizeof *d + len);
     if (!d)
-        return -L_ENOMEM;
+        return -WFS_ENOMEM;
     d->dir = dir->ino;
     d->seq = fs->next_seq++;
     d->node = node;
@@ -366,11 +353,11 @@ static wfs_err_t get_dir(wfs_fs *fs, wfs_ino_t ino, struct inode **out)
 {
     struct inode *n = iget(fs, ino);
     if (!n)
-        return -L_ENOENT;
+        return -WFS_ENOENT;
     if (n->ftype != WFS_FT_DIR)
-        return -L_ENOTDIR;
+        return -WFS_ENOTDIR;
     if (n->nlink == 0)
-        return -L_ENOENT;
+        return -WFS_ENOENT;
     *out = n;
     return 0;
 }
@@ -420,16 +407,16 @@ static unsigned char *chunk_get(wfs_fs *fs, struct inode *n, uint64_t idx, wfs_e
     if (p < n->nchunks && n->chunks[p].idx == idx)
         return n->chunks[p].data;
     if (fs->used > MEMFS_CAP_BYTES - MEMFS_CHUNK) {
-        *err = -L_ENOSPC;
+        *err = -WFS_ENOSPC;
         return NULL;
     }
     if (grow((void **)&n->chunks, &n->capchunks, n->nchunks + 1, sizeof *n->chunks)) {
-        *err = -L_ENOMEM;
+        *err = -WFS_ENOMEM;
         return NULL;
     }
     unsigned char *data = calloc(1, MEMFS_CHUNK);
     if (!data) {
-        *err = -L_ENOMEM;
+        *err = -WFS_ENOMEM;
         return NULL;
     }
     memmove(&n->chunks[p + 1], &n->chunks[p], (n->nchunks - p) * sizeof *n->chunks);
@@ -462,7 +449,7 @@ static wfs_err_t m_probe(const wfs_host_api *h, wfs_blkdev *d[WFS_DEV_COUNT])
 {
     (void)h;
     (void)d;
-    return -L_EINVAL; /* device-less: never claims a device */
+    return -WFS_EINVAL; /* device-less: never claims a device */
 }
 
 static wfs_err_t m_mount(const wfs_host_api *h, wfs_blkdev *d[WFS_DEV_COUNT], const char *opts, wfs_fs **out)
@@ -472,7 +459,7 @@ static wfs_err_t m_mount(const wfs_host_api *h, wfs_blkdev *d[WFS_DEV_COUNT], co
     (void)opts; /* no options */
     wfs_fs *fs = calloc(1, sizeof *fs);
     if (!fs)
-        return -L_ENOMEM;
+        return -WFS_ENOMEM;
     fs->ibuckets = 64;
     fs->dbuckets = 64;
     fs->itab = calloc(fs->ibuckets, sizeof *fs->itab);
@@ -481,7 +468,7 @@ static wfs_err_t m_mount(const wfs_host_api *h, wfs_blkdev *d[WFS_DEV_COUNT], co
         free(fs->itab);
         free(fs->dtab);
         free(fs);
-        return -L_ENOMEM;
+        return -WFS_ENOMEM;
     }
     fs->next_ino = ROOT_INO;
     fs->next_seq = 1; /* cookie 0 means "from the start" */
@@ -491,7 +478,7 @@ static wfs_err_t m_mount(const wfs_host_api *h, wfs_blkdev *d[WFS_DEV_COUNT], co
         free(fs->itab);
         free(fs->dtab);
         free(fs);
-        return -L_ENOMEM;
+        return -WFS_ENOMEM;
     }
     root->nlink = 2;
     root->parent = ROOT_INO;
@@ -547,7 +534,7 @@ static wfs_err_t m_getattr(wfs_fs *fs, wfs_ino_t ino, wfs_stat *st)
     if (n)
         fill_stat(n, st);
     pthread_mutex_unlock(&fs->lock);
-    return n ? 0 : -L_ENOENT;
+    return n ? 0 : -WFS_ENOENT;
 }
 
 static int valid_time(const wfs_time *t) { return t->nsec < 1000000000u; }
@@ -558,25 +545,25 @@ static wfs_err_t m_setattr(wfs_fs *fs, wfs_ino_t ino, const wfs_stat *st, uint32
     pthread_mutex_lock(&fs->lock);
     struct inode *n = iget(fs, ino);
     if (!n) {
-        r = -L_ENOENT;
+        r = -WFS_ENOENT;
         goto out;
     }
     if (((mask & WFS_SET_ATIME) && !valid_time(&st->atime)) ||
         ((mask & WFS_SET_MTIME) && !valid_time(&st->mtime))) {
-        r = -L_EINVAL;
+        r = -WFS_EINVAL;
         goto out;
     }
     if (mask & WFS_SET_SIZE) {
         if (n->ftype == WFS_FT_DIR) {
-            r = -L_EISDIR;
+            r = -WFS_EISDIR;
             goto out;
         }
         if (n->ftype != WFS_FT_REG) {
-            r = -L_EINVAL;
+            r = -WFS_EINVAL;
             goto out;
         }
         if (st->size > MEMFS_MAX_FILE) {
-            r = -L_EFBIG;
+            r = -WFS_EFBIG;
             goto out;
         }
     }
@@ -613,7 +600,7 @@ static wfs_err_t m_lookup(wfs_fs *fs, wfs_ino_t dir, const char *name, uint32_t 
     if (r == 0) {
         struct dentry *e = dfind(fs, dir, name, len);
         if (!e) {
-            r = -L_ENOENT;
+            r = -WFS_ENOENT;
         } else {
             e->node->nlookup++;
             *out = e->node->ino;
@@ -638,14 +625,14 @@ static void m_forget(wfs_fs *fs, wfs_ino_t ino, uint64_t nlookup)
 static wfs_err_t m_readdir(wfs_fs *fs, wfs_ino_t dir, uint64_t cookie, wfs_dirent_cb cb, void *ctx)
 {
     if (!cb)
-        return -L_EINVAL;
+        return -WFS_EINVAL;
     pthread_mutex_lock(&fs->lock);
     struct inode *d = iget(fs, dir);
     wfs_err_t r = 0;
     if (!d)
-        r = -L_ENOENT;
+        r = -WFS_ENOENT;
     else if (d->ftype != WFS_FT_DIR)
-        r = -L_ENOTDIR;
+        r = -WFS_ENOTDIR;
     else {
         /* No "." / ".." entries: the host synthesises them. */
         for (size_t i = ents_after(d, cookie); i < d->nents; i++) {
@@ -667,11 +654,11 @@ static wfs_err_t m_readdir(wfs_fs *fs, wfs_ino_t dir, uint64_t cookie, wfs_diren
 static wfs_err_t file_check(const struct inode *n)
 {
     if (!n)
-        return -L_ENOENT;
+        return -WFS_ENOENT;
     if (n->ftype == WFS_FT_DIR)
-        return -L_EISDIR;
+        return -WFS_EISDIR;
     if (n->ftype != WFS_FT_REG)
-        return -L_EINVAL;
+        return -WFS_EINVAL;
     return 0;
 }
 
@@ -717,7 +704,7 @@ static wfs_err_t m_write(wfs_fs *fs, wfs_ino_t ino, uint64_t off, const void *bu
     if (r || len == 0)
         goto out;
     if (off >= MEMFS_MAX_FILE) {
-        r = -L_EFBIG;
+        r = -WFS_EFBIG;
         goto out;
     }
     /* Clamp to the max file size (a straddling write is cut short). */
@@ -757,12 +744,12 @@ static wfs_err_t make_node(wfs_fs *fs, struct inode *d, const char *name, uint32
                            uint32_t mode, uint32_t uid, uint32_t gid, struct inode **out)
 {
     if (dfind(fs, d->ino, name, len))
-        return -L_EEXIST;
+        return -WFS_EEXIST;
     if (ftype == WFS_FT_DIR && d->nlink >= MEMFS_NLINK_MAX)
-        return -L_EMLINK;
+        return -WFS_EMLINK;
     struct inode *n = inode_new(fs, ftype, mode, uid, gid);
     if (!n)
-        return -L_ENOMEM;
+        return -WFS_ENOMEM;
     wfs_err_t r = dadd(fs, d, name, len, n);
     if (r) {
         iremove(fs, n);
@@ -792,7 +779,7 @@ static wfs_err_t m_create(wfs_fs *fs, wfs_ino_t dir, const char *name, uint32_t 
     case WFS_FT_REG: case WFS_FT_DIR: case WFS_FT_CHR: case WFS_FT_BLK: case WFS_FT_FIFO: case WFS_FT_SOCK:
         break;
     default: /* WFS_FT_LNK goes through symlink */
-        return -L_EINVAL;
+        return -WFS_EINVAL;
     }
     pthread_mutex_lock(&fs->lock);
     struct inode *d, *n;
@@ -832,20 +819,20 @@ static wfs_err_t remove_entry(wfs_fs *fs, wfs_ino_t dir, const char *name, uint3
         goto out;
     struct dentry *e = dfind(fs, dir, name, len);
     if (!e) {
-        r = -L_ENOENT;
+        r = -WFS_ENOENT;
         goto out;
     }
     struct inode *n = e->node;
     if (want_dir && n->ftype != WFS_FT_DIR) {
-        r = -L_ENOTDIR;
+        r = -WFS_ENOTDIR;
         goto out;
     }
     if (!want_dir && n->ftype == WFS_FT_DIR) {
-        r = -L_EISDIR;
+        r = -WFS_EISDIR;
         goto out;
     }
     if (want_dir && n->nents > 0) {
-        r = -L_ENOTEMPTY;
+        r = -WFS_ENOTEMPTY;
         goto out;
     }
     wfs_time t = now();
@@ -871,7 +858,7 @@ static wfs_err_t m_rename(wfs_fs *fs, wfs_ino_t odir, const char *oname, uint32_
                           wfs_ino_t ndir, const char *nname, uint32_t nlen, uint32_t flags)
 {
     if (flags & ~(uint32_t)WFS_RENAME_NOREPLACE)
-        return -L_EINVAL; /* WFS_RENAME_EXCHANGE is not supported */
+        return -WFS_EINVAL; /* WFS_RENAME_EXCHANGE is not supported */
     wfs_err_t r = check_name(oname, olen);
     if (r == 0)
         r = check_name(nname, nlen);
@@ -886,7 +873,7 @@ static wfs_err_t m_rename(wfs_fs *fs, wfs_ino_t odir, const char *oname, uint32_
         goto out;
     struct dentry *src = dfind(fs, odir, oname, olen);
     if (!src) {
-        r = -L_ENOENT;
+        r = -WFS_ENOENT;
         goto out;
     }
     struct inode *n = src->node;
@@ -895,11 +882,11 @@ static wfs_err_t m_rename(wfs_fs *fs, wfs_ino_t odir, const char *oname, uint32_
         /* The target dir must not be n itself or inside n's subtree. */
         for (struct inode *p = nd;; p = iget(fs, p->parent)) {
             if (!p) {
-                r = -L_ENOENT; /* broken parent chain: cannot happen */
+                r = -WFS_ENOENT; /* broken parent chain: cannot happen */
                 goto out;
             }
             if (p == n) {
-                r = -L_EINVAL;
+                r = -WFS_EINVAL;
                 goto out;
             }
             if (p->ino == ROOT_INO)
@@ -910,26 +897,26 @@ static wfs_err_t m_rename(wfs_fs *fs, wfs_ino_t odir, const char *oname, uint32_
     if (dst) {
         struct inode *victim = dst->node;
         if (flags & WFS_RENAME_NOREPLACE) {
-            r = -L_EEXIST;
+            r = -WFS_EEXIST;
             goto out;
         }
         if (victim == n)
             goto out; /* same inode (same name or hard links): no-op */
         if (is_dir && victim->ftype != WFS_FT_DIR) {
-            r = -L_ENOTDIR;
+            r = -WFS_ENOTDIR;
             goto out;
         }
         if (!is_dir && victim->ftype == WFS_FT_DIR) {
-            r = -L_EISDIR;
+            r = -WFS_EISDIR;
             goto out;
         }
         if (victim->ftype == WFS_FT_DIR && victim->nents > 0) {
-            r = -L_ENOTEMPTY;
+            r = -WFS_ENOTEMPTY;
             goto out;
         }
     }
     if (is_dir && odir != ndir && !dst && nd->nlink >= MEMFS_NLINK_MAX) {
-        r = -L_EMLINK;
+        r = -WFS_EMLINK;
         goto out;
     }
     /* Add the new entry first, so an allocation failure changes nothing. It
@@ -965,26 +952,26 @@ static wfs_err_t m_link(wfs_fs *fs, wfs_ino_t ino, wfs_ino_t ndir, const char *n
     pthread_mutex_lock(&fs->lock);
     struct inode *n = iget(fs, ino), *d;
     if (!n) {
-        r = -L_ENOENT;
+        r = -WFS_ENOENT;
         goto out;
     }
     if (n->ftype == WFS_FT_DIR) {
-        r = -L_EPERM;
+        r = -WFS_EPERM;
         goto out;
     }
     r = get_dir(fs, ndir, &d);
     if (r)
         goto out;
     if (n->nlink == 0) {
-        r = -L_ENOENT;
+        r = -WFS_ENOENT;
         goto out;
     }
     if (n->nlink >= MEMFS_NLINK_MAX) {
-        r = -L_EMLINK;
+        r = -WFS_EMLINK;
         goto out;
     }
     if (dfind(fs, ndir, name, len)) {
-        r = -L_EEXIST;
+        r = -WFS_EEXIST;
         goto out;
     }
     r = dadd(fs, d, name, len, n);
@@ -1006,18 +993,18 @@ static wfs_err_t m_symlink(wfs_fs *fs, wfs_ino_t dir, const char *name, uint32_t
     if (r)
         return r;
     if (tlen == 0 || target == NULL)
-        return -L_ENOENT;
+        return -WFS_ENOENT;
     if (tlen > MEMFS_LINK_MAX)
-        return -L_ENAMETOOLONG;
+        return -WFS_ENAMETOOLONG;
     char *copy = malloc(tlen);
     if (!copy)
-        return -L_ENOMEM;
+        return -WFS_ENOMEM;
     memcpy(copy, target, tlen);
     pthread_mutex_lock(&fs->lock);
     struct inode *d, *n = NULL;
     r = get_dir(fs, dir, &d);
     if (r == 0 && fs->used > MEMFS_CAP_BYTES - tlen)
-        r = -L_ENOSPC;
+        r = -WFS_ENOSPC;
     if (r == 0)
         r = make_node(fs, d, name, len, WFS_FT_LNK, 0777, uid, gid, &n);
     if (r == 0) {
@@ -1041,9 +1028,9 @@ static wfs_err_t m_readlink(wfs_fs *fs, wfs_ino_t ino, char *buf, size_t cap, si
     struct inode *n = iget(fs, ino);
     wfs_err_t r = 0;
     if (!n)
-        r = -L_ENOENT;
+        r = -WFS_ENOENT;
     else if (n->ftype != WFS_FT_LNK)
-        r = -L_EINVAL;
+        r = -WFS_EINVAL;
     else {
         size_t k = n->size < cap ? (size_t)n->size : cap;
         if (k)
@@ -1066,7 +1053,7 @@ static wfs_err_t m_fsync(wfs_fs *fs, wfs_ino_t ino, int datasync)
     pthread_mutex_lock(&fs->lock);
     int ok = iget(fs, ino) != NULL;
     pthread_mutex_unlock(&fs->lock);
-    return ok ? 0 : -L_ENOENT;
+    return ok ? 0 : -WFS_ENOENT;
 }
 
 static const wfs_ops ops = {

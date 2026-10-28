@@ -18,11 +18,15 @@ impl AlignedDevice {
         }
     }
 
-    /// Aligned span [start, end) covering [off, off+len). Requires in-range.
-    fn span(&self, off: u64, len: usize) -> (u64, u64) {
+    /// Aligned span [start, end) covering [off, off+len). Requires in-range;
+    /// `EINVAL` if rounding up to a sector (or the span's size) overflows.
+    fn span(&self, off: u64, len: usize) -> Result<(u64, u64), Errno> {
         let s = self.inner.sector_size() as u64;
-        let end = off + len as u64;
-        (off / s * s, end.div_ceil(s) * s)
+        let end = off.checked_add(len as u64).ok_or(Errno::EINVAL)?;
+        let end = end.div_ceil(s).checked_mul(s).ok_or(Errno::EINVAL)?;
+        let start = off / s * s;
+        usize::try_from(end - start).map_err(|_| Errno::EINVAL)?;
+        Ok((start, end))
     }
 }
 
@@ -38,7 +42,7 @@ impl BlockDevice for AlignedDevice {
             return Ok(());
         }
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        let (start, end) = self.span(off, buf.len());
+        let (start, end) = self.span(off, buf.len())?;
         if end > self.size() {
             return Err(Errno::EINVAL); // size not a multiple of sector size
         }
@@ -56,7 +60,7 @@ impl BlockDevice for AlignedDevice {
             return Ok(());
         }
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        let (start, end) = self.span(off, buf.len());
+        let (start, end) = self.span(off, buf.len())?;
         if end > self.size() {
             return Err(Errno::EINVAL);
         }

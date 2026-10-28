@@ -9,6 +9,10 @@
  *                                   write-path op: setattr, write, create,
  *                                   unlink, rmdir, rename, link, symlink
  *   memfs_counting_syncs()          calls of fsync and sync
+ *   memfs_counting_syncs_at_unmount() value of memfs_counting_syncs() when
+ *                                   unmount was called (-1 if never)
+ *   memfs_counting_forgets_at_unmount() total forgotten refs at that moment
+ *   memfs_counting_set_forget_hook(f) f() is called at the start of every forget
  * Every other behaviour is memfs's.
  */
 #define wfs_backend_entry memfs_plain_entry
@@ -18,6 +22,19 @@
 #include <stdatomic.h>
 
 static atomic_ullong refs_taken, refs_forgotten, mutations, syncs;
+static atomic_llong syncs_at_unmount = -1, forgets_at_unmount = -1;
+static void (*_Atomic forget_hook)(void);
+
+WFS_EXPORT long long memfs_counting_syncs_at_unmount(void) { return atomic_load(&syncs_at_unmount); }
+WFS_EXPORT long long memfs_counting_forgets_at_unmount(void) { return atomic_load(&forgets_at_unmount); }
+WFS_EXPORT void memfs_counting_set_forget_hook(void (*f)(void)) { atomic_store(&forget_hook, f); }
+
+static wfs_err_t c_unmount(wfs_fs *fs)
+{
+    atomic_store(&syncs_at_unmount, (long long)atomic_load(&syncs));
+    atomic_store(&forgets_at_unmount, (long long)atomic_load(&refs_forgotten));
+    return m_unmount(fs);
+}
 
 WFS_EXPORT unsigned long long memfs_counting_refs_taken(void) { return atomic_load(&refs_taken); }
 WFS_EXPORT unsigned long long memfs_counting_refs_forgotten(void) { return atomic_load(&refs_forgotten); }
@@ -38,6 +55,9 @@ static wfs_err_t c_lookup(wfs_fs *fs, wfs_ino_t dir, const char *name, uint32_t 
 static void c_forget(wfs_fs *fs, wfs_ino_t ino, uint64_t n)
 {
     atomic_fetch_add(&refs_forgotten, n);
+    void (*hook)(void) = atomic_load(&forget_hook);
+    if (hook)
+        hook();
     m_forget(fs, ino, n);
 }
 
@@ -113,7 +133,7 @@ static wfs_err_t c_fsync(wfs_fs *fs, wfs_ino_t ino, int datasync)
 static const wfs_ops counting_ops = {
     .probe = m_probe,
     .mount = m_mount,
-    .unmount = m_unmount,
+    .unmount = c_unmount,
     .statfs = m_statfs,
     .getattr = m_getattr,
     .setattr = c_setattr,

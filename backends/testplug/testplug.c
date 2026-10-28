@@ -2,7 +2,7 @@
  *
  * Tree: root dir ino 1 containing one regular file "hello" (ino 2).
  * File content is "hello\n", or bytes 4..10 of the DATA device when one is given.
- * probe: 0 if DATA starts with "TPLG", else -EINVAL.
+ * probe: 0 if DATA starts with "TPLG", else -WFS_EINVAL.
  * Only the mandatory ops plus `read` are implemented; the rest are NULL (-> ENOSYS).
  *
  * Test hooks:
@@ -17,17 +17,23 @@
  *   readdir(6)    emits good, bad (ftype 99), good, good, ignoring stop
  *   readdir(9..12) emit one entry with next_cookie u64::MAX-1, u64::MAX, 2^63,
  *                 2^63-1 (the last is valid); readdir(1, cookie 99) emits u64::MAX
+ *   Mount options: "root=file" (getattr(1) says regular file), "root=err"
+ *     (getattr(1) fails EIO), "nullfs" (mount returns 0 but sets no fs).
+ *   readdir(13..21) emit one bad entry: cookie 0, repeated cookie 5, cookie ==
+ *     input cookie, ino 0, empty name, name with NUL, name with '/', 256-byte
+ *     name, 255-byte name (21, valid). lookup(1,"cyc") = dir 22 and
+ *     lookup(1,"dots") = dir 23 list cookie chains 1,2,1 (looping forever).
  *   testplug_unmount_count() counts unmount calls.
  *   testplug_bad_forgets() sums forget(n) calls on the bogus inodes 7 and 8.
  *   testplug_accepted_after_bad() counts callbacks after the bad readdir(6)
  *     entry that returned 0 (i.e. asked for more).
  * Variant -DTESTPLUG_ST: caps = WFS_CAP_SINGLE_THREADED, dev_required = DATA,
  *   plus `create`: "badft" -> ino 8 with ftype 99, "zero" -> ino 0,
- *   anything else -EEXIST.
+ *   anything else -WFS_EEXIST.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "winuxfs/backend.h"
-#include <errno.h>
+#include "winuxfs/errno.h"
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,7 +48,8 @@ static void nap(void) { Sleep(2); }
 static void nap(void) { struct timespec t = {0, 2000000}; nanosleep(&t, 0); }
 #endif
 
-struct wfs_fs { char content[6]; };
+struct wfs_fs { char content[6]; int root_mode; };
+enum { ROOT_DIR = 0, ROOT_FILE, ROOT_ERR };
 
 static atomic_int unmounts, inflight, overlaps, bad_forgets, accepted_after_bad;
 
@@ -59,14 +66,17 @@ static int read_magic(const wfs_host_api *h, wfs_blkdev *d, char out[10])
 static wfs_err_t t_probe(const wfs_host_api *h, wfs_blkdev *d[WFS_DEV_COUNT])
 {
     char b[10];
-    return read_magic(h, d[WFS_DEV_DATA], b) ? 0 : -EINVAL;
+    return read_magic(h, d[WFS_DEV_DATA], b) ? 0 : -WFS_EINVAL;
 }
 
 static wfs_err_t t_mount(const wfs_host_api *h, wfs_blkdev *d[WFS_DEV_COUNT], const char *o, wfs_fs **out)
 {
-    (void)o;
     wfs_fs *fs = malloc(sizeof *fs);
-    if (!fs) return -ENOMEM;
+    if (!fs) return -WFS_ENOMEM;
+    fs->root_mode = ROOT_DIR;
+    if (o && strcmp(o, "root=file") == 0) fs->root_mode = ROOT_FILE;
+    if (o && strcmp(o, "root=err") == 0) fs->root_mode = ROOT_ERR;
+    if (o && strcmp(o, "nullfs") == 0) { free(fs); return 0; } /* bogus: rc 0, *out untouched */
     char b[10];
     if (read_magic(h, d[WFS_DEV_DATA], b)) memcpy(fs->content, b + 4, 6);
     else memcpy(fs->content, "hello\n", 6);
@@ -97,17 +107,19 @@ static void fill(wfs_ino_t ino, wfs_stat *s)
 
 static wfs_err_t t_getattr(wfs_fs *fs, wfs_ino_t ino, wfs_stat *s)
 {
-    (void)fs;
+    if (ino == 1 && fs->root_mode == ROOT_ERR) return -WFS_EIO;
+    if (ino == 1 && fs->root_mode == ROOT_FILE) { fill(2, s); s->ino = 1; return 0; }
+    if (ino == 22 || ino == 23) { fill(1, s); s->ino = ino; return 0; }
     if (ino == 3) {
         if (atomic_fetch_add(&inflight, 1) > 0) atomic_fetch_add(&overlaps, 1);
         nap();
         atomic_fetch_sub(&inflight, 1);
-        return -ENOENT;
+        return -WFS_ENOENT;
     }
     if (ino == 1000) return 7;
     if (ino == 1001) return -1234;
     if (ino >= 2000 && ino < 3000) return -(wfs_err_t)(ino - 2000);
-    if (ino != 1 && ino != 2) return -ENOENT;
+    if (ino != 1 && ino != 2) return -WFS_ENOENT;
     fill(ino, s);
     return 0;
 }
@@ -115,7 +127,7 @@ static wfs_err_t t_getattr(wfs_fs *fs, wfs_ino_t ino, wfs_stat *s)
 static wfs_err_t t_lookup(wfs_fs *fs, wfs_ino_t dir, const char *n, uint32_t l, wfs_ino_t *out, wfs_stat *s)
 {
     (void)fs;
-    if (dir == 2) return -ENOTDIR;
+    if (dir == 2) return -WFS_ENOTDIR;
     if (dir == 1 && l == 5 && memcmp(n, "badft", 5) == 0) {
         fill(2, s); s->ino = 7; s->ftype = 99; *out = 7;
         return 0;
@@ -124,7 +136,9 @@ static wfs_err_t t_lookup(wfs_fs *fs, wfs_ino_t dir, const char *n, uint32_t l, 
         fill(2, s); *out = 0;
         return 0;
     }
-    if (dir != 1 || l != 5 || memcmp(n, "hello", 5) != 0) return -ENOENT;
+    if (dir == 1 && l == 3 && memcmp(n, "cyc", 3) == 0) { fill(1, s); s->ino = 22; *out = 22; return 0; }
+    if (dir == 1 && l == 4 && memcmp(n, "dots", 4) == 0) { fill(1, s); s->ino = 23; *out = 23; return 0; }
+    if (dir != 1 || l != 5 || memcmp(n, "hello", 5) != 0) return -WFS_ENOENT;
     *out = 2;
     fill(2, s);
     return 0;
@@ -149,7 +163,7 @@ static wfs_err_t t_create(wfs_fs *fs, wfs_ino_t dir, const char *n, uint32_t l, 
         fill(2, s); *out = 0;
         return 0;
     }
-    return -EEXIST;
+    return -WFS_EEXIST;
 }
 #endif
 
@@ -178,12 +192,49 @@ static wfs_err_t t_readdir(wfs_fs *fs, wfs_ino_t dir, uint64_t cookie, wfs_diren
         (void)cb(ctx, &e);
         return 0;
     }
+    if (dir >= 13 && dir <= 21) {
+        static char long256[256], ok255[255];
+        memset(long256, 'n', sizeof long256);
+        memset(ok255, 'n', sizeof ok255);
+        wfs_dirent e = { .next_cookie = 1, .ino = 2, .ftype = WFS_FT_REG, .name_len = 1, .name = "e" };
+        switch (dir) {
+        case 13: e.next_cookie = 0; break;
+        case 14: {
+            wfs_dirent a = e; a.next_cookie = 5;
+            (void)cb(ctx, &a);
+            a.name = "f";
+            (void)cb(ctx, &a); /* repeated cookie */
+            return 0;
+        }
+        case 15: e.next_cookie = cookie; break; /* no progress */
+        case 16: e.ino = 0; break;
+        case 17: e.name_len = 0; e.name = ""; break;
+        case 18: e.name_len = 3; e.name = "a\0b"; break;
+        case 19: e.name_len = 3; e.name = "a/b"; break;
+        case 20: e.name_len = 256; e.name = long256; break;
+        case 21: e.name_len = 255; e.name = ok255; break;
+        }
+        (void)cb(ctx, &e);
+        return 0;
+    }
+    if (dir == 22 || dir == 23) {
+        /* 22: a (1), b (2), c (1): the cookie chain loops back.
+         * 23: "." (1), ".." (2), "." (1): only dot entries, looping. */
+        static const char *const nm22[] = { "a", "b", "c" }, *const nm23[] = { ".", "..", "." };
+        static const uint64_t ck[] = { 1, 2, 1 };
+        int i = cookie == 0 ? 0 : cookie == 1 ? 1 : 2;
+        const char *nm = dir == 22 ? nm22[i] : nm23[i];
+        wfs_dirent e = { .next_cookie = ck[i], .ino = 2, .ftype = WFS_FT_REG,
+                         .name_len = (uint32_t)strlen(nm), .name = nm };
+        (void)cb(ctx, &e);
+        return 0;
+    }
     if (dir == 1 && cookie == 99) {
         wfs_dirent e = { .next_cookie = UINT64_MAX, .ino = 2, .ftype = WFS_FT_REG, .name_len = 1, .name = "c" };
         (void)cb(ctx, &e);
         return 0;
     }
-    if (dir != 1) return dir == 2 ? -ENOTDIR : -ENOENT;
+    if (dir != 1) return dir == 2 ? -WFS_ENOTDIR : -WFS_ENOENT;
     if (cookie == 0) {
         wfs_dirent e = { .next_cookie = 1, .ino = 2, .ftype = WFS_FT_REG, .name_len = 5, .name = "hello" };
         cb(ctx, &e);
@@ -194,8 +245,8 @@ static wfs_err_t t_readdir(wfs_fs *fs, wfs_ino_t dir, uint64_t cookie, wfs_diren
 static wfs_err_t t_read(wfs_fs *fs, wfs_ino_t ino, uint64_t off, void *buf, size_t len, size_t *done)
 {
     if (ino == 4) { *done = len + 1; return 0; }
-    if (ino == 1) return -EISDIR;
-    if (ino != 2) return -ENOENT;
+    if (ino == 1) return -WFS_EISDIR;
+    if (ino != 2) return -WFS_ENOENT;
     size_t n = off >= 6 ? 0 : 6 - (size_t)off;
     if (n > len) n = len;
     if (n) memcpy(buf, fs->content + off, n);

@@ -14,3 +14,20 @@ fn struct_sizes() {
     assert_eq!(size_of::<wfs_stat>(), 120);
     assert_eq!(size_of::<wfs_dirent>(), 32);
 }
+
+// Pointer-sized fields: the sizes below are the 64-bit ones (all targets this
+// project builds for).
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn statfs_and_host_api_sizes() {
+    // 5 x u64 + 2 x u32 = 48.
+    assert_eq!(size_of::<wfs_statfs>(), 48);
+    // abi_version + size (8) + 7 function pointers (56) = 64.
+    assert_eq!(size_of::<wfs_host_api>(), 64);
+}
+
+#[test]
+fn contract_constants() {
+    assert_eq!(WFS_ROOT_INO, 1);
+    assert_eq!(WFS_NAME_MAX, 255);
+}

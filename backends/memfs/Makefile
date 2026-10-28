@@ -7,7 +7,7 @@ EXT ?= so
 OUT ?= ../../target/plugins
 CFLAGS ?= -O2 -Wall -Wextra -Werror -std=c11
 INC = -I../../include
-HDR = ../../include/winuxfs/backend.h
+HDR = ../../include/winuxfs/backend.h ../../include/winuxfs/errno.h
 comma = ,
 SANFLAGS = $(if $(SAN),-fsanitize=address$(comma)undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g)
 ifeq ($(EXT),dll)

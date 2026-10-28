@@ -8,7 +8,28 @@
 extern "C" {
 #endif
 
+/*
+ * Backend ABI v1. Contract summary (details in docs/abi.md):
+ *
+ *  - Errors: return 0 or -WFS_Exxx from <winuxfs/errno.h> (Linux errno values;
+ *    never the C runtime's errno.h numbers, which differ on Windows).
+ *  - Root inode: the root directory MUST be inode WFS_ROOT_INO (1). A backend
+ *    whose on-disk root has another number (XFS) remaps it. After mount the
+ *    host calls getattr(1) and refuses the mount (EIO) unless it is a directory.
+ *    mount must set *out to a non-NULL handle when it returns 0.
+ *  - Names: 1..WFS_NAME_MAX bytes, no NUL, no '/'. The host passes only such
+ *    names; a backend must report only such names (otherwise EIO).
+ *    lookup/dirent inode numbers are never 0.
+ *  - readdir cookies: nonzero, < 2^63, different from the cookie passed in and
+ *    from every earlier cookie of the same call; otherwise EIO.
+ *  - unmount writes back everything and releases the filesystem; the host
+ *    flushes the block devices after it returns.
+ *  - Read-only: a backend learns it only from blk_read_only(); it must then
+ *    not write to the device and must fail every mutation with -WFS_EROFS.
+ */
 #define WFS_ABI_VERSION 1
+#define WFS_ROOT_INO 1
+#define WFS_NAME_MAX 255
 typedef int32_t wfs_err_t;
 typedef uint64_t wfs_ino_t;
 typedef struct wfs_fs wfs_fs;          /* 백엔드가 정의하는 마운트 인스턴스 */
@@ -55,7 +76,7 @@ typedef struct {
     wfs_err_t (*setattr)(wfs_fs *, wfs_ino_t, const wfs_stat *, uint32_t set_mask);
     wfs_err_t (*lookup)(wfs_fs *, wfs_ino_t dir, const char *name, uint32_t len, wfs_ino_t *out, wfs_stat *st);
     void      (*forget)(wfs_fs *, wfs_ino_t, uint64_t nlookup);
-    wfs_err_t (*readdir)(wfs_fs *, wfs_ino_t dir, uint64_t cookie, wfs_dirent_cb, void *ctx);   /* cookie 0 = 처음. next_cookie는 반드시 < 2^63 (이상이면 호스트가 EIO 처리) */
+    wfs_err_t (*readdir)(wfs_fs *, wfs_ino_t dir, uint64_t cookie, wfs_dirent_cb, void *ctx);   /* cookie 0 = start. next_cookie: 0 < c < 2^63, != the cookie passed in, unique within the call (else EIO) */
     wfs_err_t (*read)(wfs_fs *, wfs_ino_t, uint64_t off, void *buf, size_t len, size_t *done);
     wfs_err_t (*write)(wfs_fs *, wfs_ino_t, uint64_t off, const void *buf, size_t len, size_t *done);
     wfs_err_t (*create)(wfs_fs *, wfs_ino_t dir, const char *name, uint32_t len, uint32_t ftype,

@@ -7,7 +7,7 @@ OUT ?= ../../target/test-plugins
 CFLAGS ?= -O2 -Wall -Wextra -Werror -std=c11
 INC = -I../../include
 PIC = $(if $(filter dll,$(EXT)),,-fPIC)
-HDR = ../../include/winuxfs/backend.h
+HDR = ../../include/winuxfs/backend.h ../../include/winuxfs/errno.h
 # memfs needs pthreads (winpthreads linked statically into a DLL).
 MEMFS_LIBS = $(if $(filter dll,$(EXT)),-static -lpthread,-pthread)
 
