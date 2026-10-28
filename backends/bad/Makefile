@@ -6,7 +6,7 @@ OUT ?= ../../target/test-plugins
 CFLAGS ?= -O2 -Wall -Wextra -Werror
 INC = -I../../include
 PIC = $(if $(filter dll,$(EXT)),,-fPIC)
-HDR = ../../include/winuxfs/backend.h
+HDR = ../../include/winuxfs/backend.h ../../include/winuxfs/errno.h
 
 ALL = $(OUT)/winuxfs_backend_bad_abi.$(EXT) \
       $(OUT)/winuxfs_backend_bad_noops.$(EXT) \

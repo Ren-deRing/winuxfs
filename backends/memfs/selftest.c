@@ -74,7 +74,7 @@ static void test_io(wfs_fs *fs)
     EQ(done, 0);
     EQ(O->read(fs, f, UINT64_MAX, buf, sizeof buf, &done), 0);
     EQ(done, 0);
-    EQ(O->write(fs, f, UINT64_MAX, "abc", 3, &done), -L_EFBIG);
+    EQ(O->write(fs, f, UINT64_MAX, "abc", 3, &done), -WFS_EFBIG);
     EQ(O->write(fs, f, MEMFS_MAX_FILE - 1, "abc", 3, &done), 0);
     EQ(done, 1);
     O->getattr(fs, f, &st);
@@ -93,7 +93,7 @@ static void test_io(wfs_fs *fs)
     CHECK(memcmp(buf + 2, "\0\0\0\0\0\0", 6) == 0);
     O->forget(fs, f, 1);
     EQ(O->unlink(fs, ROOT_INO, "f", 1), 0);
-    EQ(O->getattr(fs, f, &st), -L_ENOENT);
+    EQ(O->getattr(fs, f, &st), -WFS_ENOENT);
     EQ(fs->used, 0);
 }
 
@@ -107,7 +107,7 @@ static void test_enospc(wfs_fs *fs)
     wfs_err_t r;
     while ((r = O->write(fs, f, off, block, sizeof block, &done)) == 0 && done == sizeof block)
         off += sizeof block;
-    EQ(r, -L_ENOSPC);
+    EQ(r, -WFS_ENOSPC);
     EQ(off, MEMFS_CAP_BYTES);
     wfs_statfs s;
     O->statfs(fs, &s);
@@ -143,23 +143,23 @@ static void test_names_and_rename(wfs_fs *fs)
     wfs_stat st;
     char longname[300];
     memset(longname, 'n', sizeof longname);
-    EQ(O->create(fs, ROOT_INO, longname, 256, WFS_FT_REG, 0644, 0, 0, &ino, &st), -L_ENAMETOOLONG);
-    EQ(O->create(fs, ROOT_INO, "a/b", 3, WFS_FT_REG, 0644, 0, 0, &ino, &st), -L_EINVAL);
-    EQ(O->create(fs, ROOT_INO, "a\0b", 3, WFS_FT_REG, 0644, 0, 0, &ino, &st), -L_EINVAL);
-    EQ(O->create(fs, ROOT_INO, "..", 2, WFS_FT_REG, 0644, 0, 0, &ino, &st), -L_EINVAL);
-    EQ(O->create(fs, ROOT_INO, "x", 0, WFS_FT_REG, 0644, 0, 0, &ino, &st), -L_EINVAL);
-    EQ(O->create(fs, ROOT_INO, "x", 1, WFS_FT_LNK, 0644, 0, 0, &ino, &st), -L_EINVAL);
+    EQ(O->create(fs, ROOT_INO, longname, 256, WFS_FT_REG, 0644, 0, 0, &ino, &st), -WFS_ENAMETOOLONG);
+    EQ(O->create(fs, ROOT_INO, "a/b", 3, WFS_FT_REG, 0644, 0, 0, &ino, &st), -WFS_EINVAL);
+    EQ(O->create(fs, ROOT_INO, "a\0b", 3, WFS_FT_REG, 0644, 0, 0, &ino, &st), -WFS_EINVAL);
+    EQ(O->create(fs, ROOT_INO, "..", 2, WFS_FT_REG, 0644, 0, 0, &ino, &st), -WFS_EINVAL);
+    EQ(O->create(fs, ROOT_INO, "x", 0, WFS_FT_REG, 0644, 0, 0, &ino, &st), -WFS_EINVAL);
+    EQ(O->create(fs, ROOT_INO, "x", 1, WFS_FT_LNK, 0644, 0, 0, &ino, &st), -WFS_EINVAL);
     wfs_ino_t d = mk(fs, ROOT_INO, "d", WFS_FT_DIR);
     wfs_ino_t sub = mk(fs, d, "sub", WFS_FT_DIR);
     wfs_ino_t f = mk(fs, sub, "f", WFS_FT_REG);
-    EQ(O->rename(fs, ROOT_INO, "d", 1, sub, "d2", 2, 0), -L_EINVAL);
+    EQ(O->rename(fs, ROOT_INO, "d", 1, sub, "d2", 2, 0), -WFS_EINVAL);
     EQ(O->rename(fs, d, "sub", 3, ROOT_INO, "sub", 3, 0), 0);
-    EQ(O->rename(fs, sub, "f", 1, ROOT_INO, "d", 1, 0), -L_EISDIR);
+    EQ(O->rename(fs, sub, "f", 1, ROOT_INO, "d", 1, 0), -WFS_EISDIR);
     EQ(O->rmdir(fs, ROOT_INO, "d", 1), 0);
     /* d is referenced (create): lookups inside fail, it frees on forget. */
-    EQ(O->lookup(fs, d, "x", 1, &ino, &st), -L_ENOENT);
+    EQ(O->lookup(fs, d, "x", 1, &ino, &st), -WFS_ENOENT);
     O->forget(fs, d, 1);
-    EQ(O->getattr(fs, d, &st), -L_ENOENT);
+    EQ(O->getattr(fs, d, &st), -WFS_ENOENT);
     /* Replace a file by rename while the victim is still referenced. */
     wfs_ino_t g = mk(fs, ROOT_INO, "g", WFS_FT_REG);
     size_t done;
@@ -169,7 +169,7 @@ static void test_names_and_rename(wfs_fs *fs)
     EQ(O->read(fs, g, 0, buf, sizeof buf, &done), 0);
     EQ(done, 6);
     O->forget(fs, g, 1);
-    EQ(O->getattr(fs, g, &st), -L_ENOENT);
+    EQ(O->getattr(fs, g, &st), -WFS_ENOENT);
     EQ(O->lookup(fs, ROOT_INO, "g", 1, &ino, &st), 0);
     EQ(ino, f);
     O->forget(fs, ino, 2);

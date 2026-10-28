@@ -10,12 +10,37 @@ pub struct FileDevice {
 }
 
 impl FileDevice {
+    /// Opens an image file or block device.
+    ///
+    /// Opens are coordinated per file: a read-write open is exclusive, a
+    /// read-only open is shared with other read-only opens. Any other
+    /// combination (rw/rw, rw/ro, ro/rw) fails with `EBUSY`, so two
+    /// filesystem instances can never write one image. On Unix this is an
+    /// advisory `flock` (honoured by other winuxfs processes, not by
+    /// arbitrary programs); on Windows the file is opened with a share mode
+    /// that denies writers, which is mandatory, and the lock is taken as well.
+    /// The lock is released when the device is dropped.
     pub fn open(path: &Path, read_only: bool) -> Result<FileDevice, Errno> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(!read_only)
-            .open(path)
-            .map_err(|e| io_errno(&e))?;
+        let mut oo = OpenOptions::new();
+        oo.read(true).write(!read_only);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_SHARE_READ only: nobody else may open the file for writing
+            // while we hold it, and a writer admits no other opener's write.
+            oo.share_mode(1);
+        }
+        let file = oo.open(path).map_err(|e| io_errno(&e))?;
+        let locked = if read_only {
+            file.try_lock_shared()
+        } else {
+            file.try_lock()
+        };
+        match locked {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Err(Errno::EBUSY),
+            Err(std::fs::TryLockError::Error(_)) => return Err(Errno::EIO),
+        }
         let size = file.metadata().map_err(|e| io_errno(&e))?.len();
         Ok(FileDevice {
             file,
@@ -27,6 +52,10 @@ impl FileDevice {
 
 fn io_errno(e: &std::io::Error) -> Errno {
     use std::io::ErrorKind::*;
+    // ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION: another open denies us.
+    if cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33)) {
+        return Errno::EBUSY;
+    }
     match e.kind() {
         NotFound => Errno::ENOENT,
         // Callers tell "needs more privilege" apart from I/O failures.
@@ -116,5 +145,9 @@ mod tests {
         assert_eq!(FileDevice::open(&missing, true).err(), Some(Errno::ENOENT));
         let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
         assert_eq!(io_errno(&denied), Errno::EACCES);
+        if cfg!(windows) {
+            let sharing = std::io::Error::from_raw_os_error(32);
+            assert_eq!(io_errno(&sharing), Errno::EBUSY);
+        }
     }
 }

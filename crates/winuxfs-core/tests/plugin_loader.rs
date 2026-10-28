@@ -530,3 +530,162 @@ fn multithreaded_backend_calls_overlap_control() {
     hammer_slow_getattr(&m);
     assert!(hook(&open_hooks(&p), b"testplug_overlaps") > 0);
 }
+
+// ---- ABI contract enforcement ----
+
+#[test]
+fn mount_rejects_ok_with_null_fs() {
+    let p = private_copy(&testplug(), "null-fs");
+    let b = load_plugin(&p).unwrap();
+    assert_eq!(b.mount(no_devs(), "nullfs").err(), Some(Errno::EIO));
+}
+
+#[test]
+fn mount_rejects_root_that_is_not_a_directory() {
+    let p = private_copy(&testplug(), "bad-root");
+    let b = load_plugin(&p).unwrap();
+    let h = open_hooks(&p);
+    assert_eq!(b.mount(no_devs(), "root=file").err(), Some(Errno::EIO));
+    assert_eq!(b.mount(no_devs(), "root=err").err(), Some(Errno::EIO));
+    // A mount that is refused is still unmounted, exactly once each.
+    assert_eq!(hook(&h, b"testplug_unmount_count"), 2);
+    assert!(b.mount(no_devs(), "").is_ok());
+}
+
+#[test]
+fn readdir_entry_rules_are_enforced() {
+    let p = private_copy(&testplug(), "readdir-rules");
+    let b = load_plugin(&p).unwrap();
+    let m = b.mount(no_devs(), "").unwrap();
+    // 13 cookie 0; 14 repeated cookie; 15 cookie == input; 16 ino 0;
+    // 17 empty name; 18 NUL in name; 19 '/' in name; 20 name of 256 bytes.
+    for dir in 13..=20 {
+        let cookie = if dir == 15 { 7 } else { 0 };
+        assert_eq!(
+            m.readdir(dir, cookie, 10).err(),
+            Some(Errno::EIO),
+            "dir {dir}"
+        );
+    }
+    // 255 bytes is the longest valid name.
+    let ents = m.readdir(21, 0, 10).unwrap();
+    assert_eq!(ents[0].name.len(), 255);
+}
+
+#[test]
+fn name_arguments_are_validated_before_the_backend() {
+    let b = load_plugin(&testplug()).unwrap();
+    let m = b.mount(no_devs(), "").unwrap();
+    assert_eq!(m.lookup(1, &[b'a'; 256]).err(), Some(Errno::ENAMETOOLONG));
+    for bad in [&b""[..], b"a\0b", b"a/b"] {
+        assert_eq!(m.lookup(1, bad).err(), Some(Errno::EINVAL), "{bad:?}");
+    }
+    assert_eq!(m.lookup(1, b"nope").err(), Some(Errno::ENOENT));
+}
+
+#[test]
+fn errno_values_are_linux_numbers_from_the_shipped_header() {
+    // include/winuxfs/errno.h is the ABI's error space; the core's named
+    // constants must agree with it.
+    let h = std::fs::read_to_string(workspace_root().join("include/winuxfs/errno.h")).unwrap();
+    let val = |name: &str| -> i32 {
+        let key = format!("#define WFS_{name} ");
+        let l = h
+            .lines()
+            .find(|l| l.starts_with(&key))
+            .unwrap_or_else(|| panic!("{name} missing from errno.h"));
+        l[key.len()..].trim().parse().unwrap()
+    };
+    for (n, e) in [
+        ("ENOENT", Errno::ENOENT),
+        ("EIO", Errno::EIO),
+        ("EBADF", Errno::EBADF),
+        ("EACCES", Errno::EACCES),
+        ("EBUSY", Errno::EBUSY),
+        ("EEXIST", Errno::EEXIST),
+        ("ENOTDIR", Errno::ENOTDIR),
+        ("EISDIR", Errno::EISDIR),
+        ("EINVAL", Errno::EINVAL),
+        ("EFBIG", Errno::EFBIG),
+        ("ENOSPC", Errno::ENOSPC),
+        ("EROFS", Errno::EROFS),
+        ("ENAMETOOLONG", Errno::ENAMETOOLONG),
+        ("ENOSYS", Errno::ENOSYS),
+        ("ENOTEMPTY", Errno::ENOTEMPTY),
+        ("EOVERFLOW", Errno::EOVERFLOW),
+    ] {
+        assert_eq!(val(n), e.0, "{n}");
+    }
+    assert_eq!(val("EHWPOISON"), MAX_ERRNO);
+    // A backend that returns the C runtime's number instead (mingw ENOTEMPTY
+    // is 41) is NOT translated: the host reads 41 as the Linux errno
+    // EMULTIHOP. Backends must use winuxfs/errno.h.
+    let b = load_plugin(&testplug()).unwrap();
+    let m = b.mount(no_devs(), "").unwrap();
+    assert_eq!(m.getattr(2000 + 41).err(), Some(Errno(41)));
+    assert_ne!(Errno(41), Errno::ENOTEMPTY);
+}
+
+#[test]
+fn explicit_unmount_is_idempotent_and_reports_once() {
+    let p = private_copy(&testplug(), "explicit-unmount");
+    let b = load_plugin(&p).unwrap();
+    let h = open_hooks(&p);
+    let m = b.mount(no_devs(), "").unwrap();
+    assert_eq!(m.unmount(), Ok(()));
+    assert_eq!(m.unmount(), Ok(()));
+    drop(m);
+    assert_eq!(hook(&h, b"testplug_unmount_count"), 1);
+}
+
+struct FlushCounter {
+    flushes: std::sync::atomic::AtomicUsize,
+    ro: bool,
+}
+
+impl BlockDevice for FlushCounter {
+    fn size(&self) -> u64 {
+        4096
+    }
+    fn sector_size(&self) -> u32 {
+        512
+    }
+    fn read_at(&self, _off: u64, buf: &mut [u8]) -> Result<(), Errno> {
+        buf.fill(0);
+        Ok(())
+    }
+    fn write_at(&self, _off: u64, _buf: &[u8]) -> Result<(), Errno> {
+        Ok(())
+    }
+    fn flush(&self) -> Result<(), Errno> {
+        self.flushes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn read_only(&self) -> bool {
+        self.ro
+    }
+}
+
+#[test]
+fn unmount_flushes_writable_devices_only() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let b = load_plugin(&test_plugin("testplug", "testplug_st")).unwrap();
+    for (ro, expect) in [(false, 1), (true, 0)] {
+        let d = Arc::new(FlushCounter {
+            flushes: Default::default(),
+            ro,
+        });
+        let devs = Devices {
+            data: Some(d.clone()),
+            log: None,
+            rt: None,
+        };
+        let m = b.mount(devs, "").unwrap();
+        assert_eq!(d.flushes.load(SeqCst), 0);
+        assert_eq!(m.unmount(), Ok(()));
+        assert_eq!(d.flushes.load(SeqCst), expect, "ro={ro}");
+        drop(m);
+        assert_eq!(d.flushes.load(SeqCst), expect, "flush happens once");
+    }
+}

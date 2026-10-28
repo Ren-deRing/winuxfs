@@ -8,16 +8,21 @@
 use crate::hostapi::{host_api, BlkHandle};
 use crate::{BlockDevice, Errno};
 use libloading::Library;
+use std::collections::HashSet;
 use std::ffi::{c_int, c_void, CStr, CString};
 use std::fmt;
 use std::mem::MaybeUninit;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use winuxfs_abi as abi;
 
 /// Root inode number every backend must expose.
 pub const ROOT_INO: u64 = 1;
+
+/// Longest name (in bytes) a backend accepts or reports (`NAME_MAX`).
+pub const NAME_MAX: usize = 255;
 
 /// Buffer size `Mount::readlink` offers the backend (Linux `PATH_MAX`).
 pub const READLINK_MAX: usize = 4096;
@@ -417,11 +422,23 @@ impl Backend {
             unsafe { f(host_api(), p.as_mut_ptr(), opts.as_ptr(), &mut fs) }
         };
         ret(r)?;
-        Ok(Mount {
+        if fs.is_null() {
+            // Success without a filesystem handle: nothing to unmount.
+            return Err(Errno::EIO);
+        }
+        let m = Mount {
             inner: self.inner.clone(),
             fs,
+            unmounted: AtomicBool::new(false),
             _devs: h,
-        })
+        };
+        // ABI rule: the root inode is ROOT_INO and it is a directory. On
+        // violation `m` is dropped, which unmounts it again.
+        let root = m.getattr(ROOT_INO)?;
+        if root.ftype != FileType::Dir {
+            return Err(Errno::EIO);
+        }
+        Ok(m)
     }
 }
 
@@ -430,6 +447,8 @@ pub struct Mount {
     inner: Arc<Loaded>,
     /// Opaque backend handle; never dereferenced by the core.
     fs: *mut abi::wfs_fs,
+    /// Set once the backend's `unmount` has run; no call may follow it.
+    unmounted: AtomicBool,
     /// Keeps the `wfs_blkdev` pointers handed to the backend valid until
     /// after `unmount`.
     _devs: [Option<BlkHandle>; 3],
@@ -442,8 +461,21 @@ pub struct Mount {
 unsafe impl Send for Mount {}
 unsafe impl Sync for Mount {}
 
+/// Length of a symlink target (not a name: no character rules).
 fn name_len(name: &[u8]) -> Result<u32, Errno> {
     u32::try_from(name.len()).map_err(|_| Errno::ENAMETOOLONG)
+}
+
+/// Validates a directory entry name handed to the backend: at most
+/// `NAME_MAX` bytes (`ENAMETOOLONG`), non-empty, no NUL, no '/' (`EINVAL`).
+fn entry_name_len(name: &[u8]) -> Result<u32, Errno> {
+    if name.len() > NAME_MAX {
+        return Err(Errno::ENAMETOOLONG);
+    }
+    if name.is_empty() || name.iter().any(|&b| b == 0 || b == b'/') {
+        return Err(Errno::EINVAL);
+    }
+    Ok(name.len() as u32)
 }
 
 fn zeroed_stat() -> abi::wfs_stat {
@@ -458,6 +490,9 @@ struct ReaddirCtx {
     out: Vec<DirEntry>,
     max: usize,
     bad: bool,
+    /// The cookie this call resumed from.
+    start: u64,
+    seen: HashSet<u64>,
 }
 
 unsafe extern "C" fn readdir_cb(ctx: *mut c_void, ent: *const abi::wfs_dirent) -> c_int {
@@ -475,14 +510,24 @@ unsafe extern "C" fn readdir_cb(ctx: *mut c_void, ent: *const abi::wfs_dirent) -
             return Err(());
         }
         let e = &*ent;
-        if e.name.is_null() && e.name_len != 0 {
+        // ABI rules: names are 1..=NAME_MAX bytes without NUL or '/', inode
+        // numbers are nonzero, and every cookie is nonzero (0 means "start")
+        // and new: it differs from the cookie passed in and from every
+        // earlier cookie of this call. Otherwise a listing would loop.
+        if e.name.is_null()
+            || e.name_len == 0
+            || e.name_len as usize > NAME_MAX
+            || e.ino == 0
+            || e.next_cookie == 0
+            || e.next_cookie == c.start
+            || !c.seen.insert(e.next_cookie)
+        {
             return Err(());
         }
-        let name = if e.name_len == 0 {
-            Vec::new()
-        } else {
-            std::slice::from_raw_parts(e.name.cast::<u8>(), e.name_len as usize).to_vec()
-        };
+        let name = std::slice::from_raw_parts(e.name.cast::<u8>(), e.name_len as usize).to_vec();
+        if name.iter().any(|&b| b == 0 || b == b'/') {
+            return Err(());
+        }
         let ftype = FileType::from_abi(e.ftype).map_err(|_| ())?;
         // ABI rule: cookies are < 2^63. The Windows adapter reserves the top
         // of the range for its "." / ".." markers; a larger cookie would make
@@ -530,7 +575,7 @@ impl Mount {
     /// Returns the child's attributes; `Stat.ino` is the child inode.
     pub fn lookup(&self, dir: u64, name: &[u8]) -> Result<Stat, Errno> {
         let f = self.ops().lookup.ok_or(Errno::ENOSYS)?;
-        let len = name_len(name)?;
+        let len = entry_name_len(name)?;
         let mut st = zeroed_stat();
         let mut ino = 0;
         ret(self.call(|| unsafe { f(self.fs, dir, name.as_ptr().cast(), len, &mut ino, &mut st) }))?;
@@ -573,6 +618,8 @@ impl Mount {
             out: Vec::new(),
             max,
             bad: false,
+            start: cookie,
+            seen: HashSet::new(),
         };
         let p = &mut ctx as *mut ReaddirCtx as *mut c_void;
         let r = self.call(|| unsafe { f(self.fs, dir, cookie, Some(readdir_cb), p) });
@@ -616,7 +663,7 @@ impl Mount {
         gid: u32,
     ) -> Result<Stat, Errno> {
         let f = self.ops().create.ok_or(Errno::ENOSYS)?;
-        let len = name_len(name)?;
+        let len = entry_name_len(name)?;
         let mut st = zeroed_stat();
         let mut ino = 0;
         let ft = ftype.to_abi();
@@ -639,13 +686,13 @@ impl Mount {
 
     pub fn unlink(&self, dir: u64, name: &[u8]) -> Result<(), Errno> {
         let f = self.ops().unlink.ok_or(Errno::ENOSYS)?;
-        let len = name_len(name)?;
+        let len = entry_name_len(name)?;
         ret(self.call(|| unsafe { f(self.fs, dir, name.as_ptr().cast(), len) }))
     }
 
     pub fn rmdir(&self, dir: u64, name: &[u8]) -> Result<(), Errno> {
         let f = self.ops().rmdir.ok_or(Errno::ENOSYS)?;
-        let len = name_len(name)?;
+        let len = entry_name_len(name)?;
         ret(self.call(|| unsafe { f(self.fs, dir, name.as_ptr().cast(), len) }))
     }
 
@@ -658,7 +705,7 @@ impl Mount {
         flags: u32,
     ) -> Result<(), Errno> {
         let f = self.ops().rename.ok_or(Errno::ENOSYS)?;
-        let (ol, nl) = (name_len(oname)?, name_len(nname)?);
+        let (ol, nl) = (entry_name_len(oname)?, entry_name_len(nname)?);
         ret(self.call(|| unsafe {
             f(
                 self.fs,
@@ -710,7 +757,7 @@ impl Mount {
     /// new reference.
     pub fn link(&self, ino: u64, ndir: u64, name: &[u8]) -> Result<(), Errno> {
         let f = self.ops().link.ok_or(Errno::ENOSYS)?;
-        let len = name_len(name)?;
+        let len = entry_name_len(name)?;
         ret(self.call(|| unsafe { f(self.fs, ino, ndir, name.as_ptr().cast(), len) }))
     }
 
@@ -724,7 +771,7 @@ impl Mount {
         gid: u32,
     ) -> Result<Stat, Errno> {
         let f = self.ops().symlink.ok_or(Errno::ENOSYS)?;
-        let len = name_len(name)?;
+        let len = entry_name_len(name)?;
         let tlen = name_len(target)?;
         let mut st = zeroed_stat();
         let mut ino = 0;
@@ -762,13 +809,39 @@ impl Mount {
     }
 }
 
+impl Mount {
+    /// Unmounts the backend and then flushes the writable block devices.
+    ///
+    /// The backend's `unmount` must write back everything it holds (docs/abi.md);
+    /// the devices are flushed afterwards so that data reaches stable storage.
+    /// Runs the backend's `unmount` at most once: later calls (and the drop)
+    /// return `Ok(())`. The backend must not be called after this. Returns the
+    /// unmount error if there is one, else the first flush error.
+    pub fn unmount(&self) -> Result<(), Errno> {
+        if self.unmounted.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        let r = match self.inner.ops.unmount {
+            Some(f) => ret(self.call(|| unsafe { f(self.fs) })),
+            None => Ok(()),
+        };
+        let mut flush = Ok(());
+        for h in self._devs.iter().flatten() {
+            let d = h.device();
+            if !d.read_only() {
+                if let Err(e) = d.flush() {
+                    flush = flush.and(Err(e));
+                }
+            }
+        }
+        r.and(flush)
+    }
+}
+
 impl Drop for Mount {
     fn drop(&mut self) {
-        if let Some(f) = self.inner.ops.unmount {
-            let r = self.call(|| unsafe { f(self.fs) });
-            if let Err(e) = ret(r) {
-                eprintln!("warning: backend {} unmount failed: {e}", self.inner.name);
-            }
+        if let Err(e) = self.unmount() {
+            eprintln!("warning: backend {} unmount failed: {e}", self.inner.name);
         }
     }
 }

@@ -12,7 +12,9 @@ fn main() {
         .header(header.to_str().unwrap())
         .clang_arg(format!("--target={target}"))
         .layout_tests(true)
-        .allowlist_file(".*backend\\.h")
+        // Anchored: only backend.h itself (either path separator), never a
+        // file whose name merely ends in "backend.h" (or errno.h, stdint.h...).
+        .allowlist_file("^(.*[/\\\\])?backend\\.h$")
         .derive_default(false)
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
     if env::var("CARGO_CFG_TARGET_OS").unwrap() == "windows" {

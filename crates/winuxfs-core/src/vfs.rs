@@ -73,14 +73,21 @@
 //! # Handles and concurrency
 //! Handles are monotonically increasing `u64`s, never reused within a Vfs.
 //! All methods take `&self`; `Vfs` is `Send + Sync`. One mutex guards the pin
-//! table, cache and handle table; backend reads and writes run outside it
-//! (only `forget` is called under it). Known follow-up (Task 13, under
-//! load): `forget` may do backend I/O on real filesystems, and emptying a
-//! full cache forgets up to `CACHE_MAX` inodes while holding the mutex,
-//! stalling every other call meanwhile; collecting the inodes and
-//! forgetting them after unlocking would avoid that. Using a handle concurrently with its
+//! table, cache and handle table; no backend call runs under it. A `forget`
+//! can be expensive on a real filesystem (the last forget of an unlinked
+//! file frees its data), so references that become unneeded are collected
+//! while the mutex is held and forgotten right after it is released (see
+//! `Locked`). Using a handle concurrently with its
 //! own `close` is a caller error (the backend then sees an unreferenced
 //! inode and typically reports `ENOENT`).
+//!
+//! # Unmounting
+//! [`Vfs::unmount`] releases every held reference, writes back everything
+//! (`sync`, unless read-only), then unmounts the backend and flushes its
+//! block devices, and returns the first error. It is idempotent. Dropping a
+//! `Vfs` without unmounting releases the references and syncs (unless
+//! read-only; errors are reported on stderr); the backend is unmounted when
+//! the last `Arc<Mount>` goes away.
 //!
 //! # Read-only mode
 //! With [`VfsOptions::read_only`], `create`, `write`, `set_len`, `set_times`,
@@ -89,7 +96,9 @@
 
 use crate::plugin::{DirEntry, FileType, Mount, Stat, Statfs, Timespec, ROOT_INO};
 use crate::Errno;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use winuxfs_abi as abi;
 
@@ -134,12 +143,51 @@ struct State {
     index: HashMap<u64, HashMap<Vec<u8>, Vec<Vec<u8>>>>,
     /// Bumped by every namespace change made through this Vfs.
     ns_gen: u64,
+    /// Inodes whose backend reference was released while the lock was held;
+    /// forgotten by [`Locked`] once the lock is dropped.
+    pending: Vec<u64>,
+}
+
+/// The locked [`State`]. Dropping it releases the mutex first and only then
+/// forgets the inodes in `State::pending`, so no backend call is made while
+/// the mutex is held.
+struct Locked<'a> {
+    vfs: &'a Vfs,
+    guard: Option<MutexGuard<'a, State>>,
+}
+
+impl Deref for Locked<'_> {
+    type Target = State;
+    fn deref(&self) -> &State {
+        self.guard.as_ref().expect("locked")
+    }
+}
+
+impl DerefMut for Locked<'_> {
+    fn deref_mut(&mut self) -> &mut State {
+        self.guard.as_mut().expect("locked")
+    }
+}
+
+impl Drop for Locked<'_> {
+    fn drop(&mut self) {
+        let Some(mut g) = self.guard.take() else {
+            return;
+        };
+        let pending = std::mem::take(&mut g.pending);
+        drop(g);
+        for ino in pending {
+            self.vfs.mount.forget(ino, 1);
+        }
+    }
 }
 
 pub struct Vfs {
     mount: Arc<Mount>,
     opts: VfsOptions,
     state: Mutex<State>,
+    /// Set by `unmount`: the state has been released and the mount is gone.
+    closed: AtomicBool,
     /// Serialises create/rename in case-insensitive mode.
     ns: Mutex<()>,
 }
@@ -236,7 +284,9 @@ impl Vfs {
                 gen: 0,
                 index: HashMap::new(),
                 ns_gen: 0,
+                pending: Vec::new(),
             }),
+            closed: AtomicBool::new(false),
             ns: Mutex::new(()),
         }
     }
@@ -245,8 +295,11 @@ impl Vfs {
         self.opts
     }
 
-    fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    fn lock(&self) -> Locked<'_> {
+        Locked {
+            vfs: self,
+            guard: Some(self.state.lock().unwrap_or_else(|e| e.into_inner())),
+        }
     }
 
     fn ns_guard(&self) -> Option<MutexGuard<'_, ()>> {
@@ -282,13 +335,13 @@ impl Vfs {
     /// Takes over one fresh backend reference on `ino` as a new pin.
     fn adopt(&self, st: &mut State, ino: u64) {
         if ino == ROOT_INO {
-            self.mount.forget(ino, 1);
+            st.pending.push(ino);
             return;
         }
         match st.pins.get_mut(&ino) {
             Some(n) => {
                 *n += 1;
-                self.mount.forget(ino, 1);
+                st.pending.push(ino);
             }
             None => {
                 st.pins.insert(ino, 1);
@@ -304,7 +357,7 @@ impl Vfs {
         *n -= 1;
         if *n == 0 {
             st.pins.remove(&ino);
-            self.mount.forget(ino, 1);
+            st.pending.push(ino);
         }
     }
 
@@ -378,10 +431,15 @@ impl Vfs {
         let gen = self.lock().ns_gen;
         let mut ix: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
         let mut cookie = 0;
+        let mut seen = HashSet::new();
         loop {
             let page = self.mount.readdir(dir, cookie, SCAN_PAGE)?;
             let Some(last) = page.last() else { break };
             cookie = last.cookie;
+            // A cookie chain that comes back to an earlier page never ends.
+            if !seen.insert(cookie) {
+                return Err(Errno::EIO);
+            }
             for e in page {
                 ix.entry(fold(&e.name)).or_default().push(e.name);
             }
@@ -693,12 +751,16 @@ impl Vfs {
     pub fn read_dir(&self, h: Handle, cookie: u64, max: usize) -> Result<Vec<DirEntry>, Errno> {
         let ino = self.ino_of(h)?;
         let mut cookie = cookie;
+        let mut seen = HashSet::new();
         loop {
             let page = self.mount.readdir(ino, cookie, max)?;
             let Some(last) = page.last() else {
                 return Ok(page);
             };
             cookie = last.cookie;
+            if !seen.insert(cookie) {
+                return Err(Errno::EIO);
+            }
             let out: Vec<DirEntry> = page
                 .into_iter()
                 .filter(|e| e.name != b"." && e.name != b"..")
@@ -874,16 +936,49 @@ impl Vfs {
     }
 }
 
+impl Vfs {
+    /// Releases all held backend references (handles, cache, pins).
+    fn release_all(&self) {
+        {
+            let mut st = self.lock();
+            let inos: Vec<u64> = st.pins.keys().copied().collect();
+            st.pending.extend(inos);
+            st.pins.clear();
+            st.cache.clear();
+            st.handles.clear();
+            st.opens.clear();
+            st.index.clear();
+        } // forgets run here, after the mutex is released
+    }
+
+    /// Ends the session: releases every held reference, writes back
+    /// everything (`sync`, skipped when read-only or when the backend has no
+    /// `sync`), unmounts the backend and flushes its block devices. All steps
+    /// run even if one fails; the first error is returned. Idempotent; after
+    /// it every handle is invalid and no other method may be used.
+    pub fn unmount(&self) -> Result<(), Errno> {
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        self.release_all();
+        let synced = match self.sync() {
+            Err(Errno::ENOSYS) => Ok(()),
+            r => r,
+        };
+        synced.and(self.mount.unmount())
+    }
+}
+
 impl Drop for Vfs {
     fn drop(&mut self) {
-        let st = self.state.get_mut().unwrap_or_else(|e| e.into_inner());
-        for &ino in st.pins.keys() {
-            self.mount.forget(ino, 1);
+        if self.closed.load(Ordering::SeqCst) {
+            return;
         }
-        st.pins.clear();
-        st.cache.clear();
-        st.handles.clear();
-        st.opens.clear();
+        self.release_all();
+        match self.sync() {
+            Ok(()) | Err(Errno::ENOSYS) => {}
+            Err(e) => eprintln!("warning: sync on drop failed: {e}"),
+        }
     }
 }
 

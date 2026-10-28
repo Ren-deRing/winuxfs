@@ -825,3 +825,125 @@ fn readonly_vfs_fsync_and_set_mode_never_call_backend() {
     w.close(h);
     assert!(c.syncs() > syncs_before);
 }
+
+// ---- unmount ----
+
+#[test]
+fn vfs_unmount_syncs_then_unmounts_the_backend() {
+    let c = Counting::new("vfs-unmount");
+    let m = c.mount();
+    let v = Vfs::new(m.clone(), opts(false, false));
+    mkfile(&v, b"/f", b"x");
+    let (h, _) = v.open(b"/f").unwrap(); // left open on purpose
+    assert_eq!(c.counter(b"memfs_counting_syncs_at_unmount") as i64, -1);
+    let before = c.syncs();
+    assert_eq!(v.unmount(), Ok(()));
+    // Everything was written back first, and every held reference released.
+    assert!(c.syncs() > before, "no sync before unmount");
+    let at = c.counter(b"memfs_counting_syncs_at_unmount");
+    assert!(at as i64 > before as i64, "unmount ran before the sync");
+    assert_eq!(c.taken(), c.counter(b"memfs_counting_forgets_at_unmount"));
+    // Idempotent; the handle is gone with the unmount.
+    assert_eq!(v.unmount(), Ok(()));
+    let _ = h;
+    drop(v);
+    drop(m);
+}
+
+#[test]
+fn vfs_drop_syncs_writable_but_not_readonly() {
+    let c = Counting::new("vfs-drop-sync");
+    let m = c.mount();
+    let s0 = c.syncs();
+    drop(Vfs::new(m.clone(), opts(false, true)));
+    assert_eq!(c.syncs(), s0, "read-only Vfs must not sync");
+    drop(Vfs::new(m.clone(), opts(false, false)));
+    assert!(c.syncs() > s0, "writable Vfs drop must sync");
+    drop(m);
+    assert!(c.counter(b"memfs_counting_syncs_at_unmount") as i64 > s0 as i64);
+}
+
+#[test]
+fn readonly_vfs_unmount_does_not_sync() {
+    let c = Counting::new("vfs-ro-unmount");
+    let v = Vfs::new(c.mount(), opts(false, true));
+    let s0 = c.syncs();
+    assert_eq!(v.unmount(), Ok(()));
+    assert_eq!(c.syncs(), s0);
+    assert_eq!(c.counter(b"memfs_counting_syncs_at_unmount"), s0);
+}
+
+// ---- forget outside the state lock ----
+
+static HOOK_VFS: std::sync::Mutex<Option<(Arc<Vfs>, Handle)>> = std::sync::Mutex::new(None);
+static HOOK_RESULT: std::sync::Mutex<Vec<bool>> = std::sync::Mutex::new(Vec::new());
+
+/// Called by the backend inside `forget`: another thread must be able to use
+/// the Vfs (which needs its state lock) while this forget is running.
+extern "C" fn forget_probe() {
+    let Some((v, h)) = HOOK_VFS.lock().unwrap().clone() else {
+        return;
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = v.stat(h);
+        let _ = tx.send(());
+    });
+    let ok = rx.recv_timeout(std::time::Duration::from_secs(3)).is_ok();
+    HOOK_RESULT.lock().unwrap().push(ok);
+}
+
+#[test]
+fn forget_runs_without_the_state_lock() {
+    let c = Counting::new("vfs-forget-unlocked");
+    let v = Arc::new(Vfs::new(c.mount(), opts(false, false)));
+    mkfile(&v, b"/keep", b"k");
+    let (probe_h, _) = v.open(b"/keep").unwrap();
+    for i in 0..3 {
+        mkfile(&v, format!("/f{i}").as_bytes(), b"x");
+    }
+    *HOOK_VFS.lock().unwrap() = Some((v.clone(), probe_h));
+    // SAFETY: the symbol is `void f(void (*)(void))` in memfs_counting.c.
+    unsafe {
+        let set = c
+            .lib
+            .get::<unsafe extern "C" fn(extern "C" fn())>(b"memfs_counting_set_forget_hook")
+            .unwrap();
+        set(forget_probe);
+    }
+    // Handle close (last close of an inode), unlink (cache invalidation) and
+    // rename all end in a forget.
+    let (h, _) = v.open(b"/f0").unwrap();
+    v.close(h);
+    v.unlink(b"/f1").unwrap();
+    v.rename(b"/f2", b"/g2", true).unwrap();
+    // Unmount forgets everything that is still held.
+    assert_eq!(v.unmount(), Ok(()));
+    let r = HOOK_RESULT.lock().unwrap().clone();
+    *HOOK_VFS.lock().unwrap() = None;
+    assert!(r.len() >= 3, "hook ran only {} times", r.len());
+    assert!(r.iter().all(|&ok| ok), "a forget ran under the state lock");
+}
+
+// ---- readdir cookie loops ----
+
+fn testplug_vfs(tag: &str, o: VfsOptions) -> Vfs {
+    let p = private_copy(&test_plugin("testplug", "testplug"), tag);
+    let b = load_plugin(&p).unwrap();
+    // The Mount keeps the library loaded, so the Backend can go.
+    Vfs::new(Arc::new(b.mount(no_devs(), "").unwrap()), o)
+}
+
+#[test]
+fn read_dir_with_looping_cookies_fails_instead_of_hanging() {
+    let v = testplug_vfs("vfs-dots-loop", opts(false, false));
+    let (h, _) = v.open(b"/dots").unwrap();
+    assert_eq!(v.read_dir(h, 0, 10).err(), Some(Errno::EIO));
+    v.close(h);
+}
+
+#[test]
+fn case_insensitive_scan_with_looping_cookies_fails_instead_of_hanging() {
+    let v = testplug_vfs("vfs-scan-loop", opts(true, false));
+    assert_eq!(v.open(b"/cyc/MISSING").err(), Some(Errno::EIO));
+}
