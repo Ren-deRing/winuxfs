@@ -8,3 +8,21 @@ publish.workspace = true
 [[bin]]
 name = "winuxfs"
 path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+winuxfs-abi = { path = "../winuxfs-abi" }
+winuxfs-core = { path = "../winuxfs-core" }
+winuxfs-win = { path = "../winuxfs-win" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+assert_cmd = "2"

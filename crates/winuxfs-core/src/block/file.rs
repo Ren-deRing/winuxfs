@@ -29,6 +29,8 @@ fn io_errno(e: &std::io::Error) -> Errno {
     use std::io::ErrorKind::*;
     match e.kind() {
         NotFound => Errno::ENOENT,
+        // Callers tell "needs more privilege" apart from I/O failures.
+        PermissionDenied => Errno::EACCES,
         _ => Errno::EIO,
     }
 }
@@ -101,5 +103,18 @@ impl BlockDevice for FileDevice {
     }
     fn read_only(&self) -> bool {
         self.read_only
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_errors_map_to_errno() {
+        let missing = std::env::temp_dir().join(format!("winuxfs-nofile-{}", std::process::id()));
+        assert_eq!(FileDevice::open(&missing, true).err(), Some(Errno::ENOENT));
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(io_errno(&denied), Errno::EACCES);
     }
 }
