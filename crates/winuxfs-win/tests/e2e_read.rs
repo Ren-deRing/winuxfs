@@ -317,6 +317,80 @@ fn read_only_mount_rejects_create() {
         "{err:?}"
     );
     assert!(!root("new.txt").exists());
+    // Other modifications are refused too, and nothing reaches the Vfs.
+    assert!(std::fs::remove_file(root("hello.txt")).is_err());
+    assert!(std::fs::rename(root("hello.txt"), root("x.txt")).is_err());
+    assert!(std::fs::create_dir(root("newdir")).is_err());
+    assert!(std::fs::remove_dir(root("dir1\\sub")).is_err());
+    // WRITE_DAC / WRITE_OWNER: the owner gets WRITE_DAC implicitly from
+    // the descriptor, so this reaches the adapter's own read-only check.
+    use std::os::windows::fs::OpenOptionsExt;
+    for access in [
+        0x4_0000u32, /* WRITE_DAC */
+        0x8_0000,    /* WRITE_OWNER */
+    ] {
+        let r = std::fs::OpenOptions::new()
+            .access_mode(access)
+            .open(root("hello.txt"));
+        assert!(
+            r.is_err(),
+            "access {access:#x} granted on a read-only mount"
+        );
+    }
+    assert_eq!(std::fs::read(root("hello.txt")).unwrap(), HELLO);
+    assert!(root("dir1\\sub").is_dir());
+    assert_eq!(names(&root("")).len(), 4);
+}
+
+/// The read-only mount reports itself as such: the volume flag, and no
+/// per-file READONLY attribute noise.
+#[test]
+fn read_only_mount_reports_read_only_volume() {
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationW;
+    const FILE_READ_ONLY_VOLUME: u32 = 0x80000;
+    let _m = mount_with(Setup {
+        big_dir: false,
+        read_only: true,
+    });
+    let rootw = wide(&format!("{DRIVE}\\"));
+    let mut flags = 0u32;
+    // SAFETY: rootw is NUL-terminated; unused outputs are null.
+    let ok = unsafe {
+        GetVolumeInformationW(
+            rootw.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut flags,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    assert_ne!(ok, 0, "{}", std::io::Error::last_os_error());
+    assert_ne!(flags & FILE_READ_ONLY_VOLUME, 0, "flags {flags:#x}");
+}
+
+#[test]
+fn mount_rejects_read_only_mismatch() {
+    let _g = lock();
+    let fsp = WinFsp::load().unwrap();
+    for (vfs_ro, mount_ro) in [(true, false), (false, true)] {
+        let vfs = fixture(Setup {
+            big_dir: false,
+            read_only: vfs_ro,
+        });
+        let opts = MountOptions {
+            volume_label: LABEL.to_string(),
+            read_only: mount_ro,
+            case_sensitive: true,
+        };
+        assert!(
+            mount_vfs(&fsp, vfs.clone(), DRIVE, &opts).is_err(),
+            "vfs ro {vfs_ro}, mount ro {mount_ro}"
+        );
+        assert_eq!(Arc::strong_count(&vfs), 1);
+    }
 }
 
 /// `dir Y:\` from cmd.exe in this process's logon session (a drive letter
@@ -359,7 +433,13 @@ fn unmount_removes_drive_and_releases_vfs() {
 fn unmount_with_open_handles_does_not_hang() {
     let mut m = mount();
     let mut f = std::fs::File::open(root("hello.txt")).unwrap();
-    let d = std::fs::File::open(root("dir1")).ok();
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let d = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(root("dir1"))
+        .expect("open a directory handle");
     let fs = m.fs.take().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -397,8 +477,9 @@ fn mount_rejects_case_mode_mismatch() {
 }
 
 /// Review Focus 1: a 10,000-entry directory read through a small buffer
-/// (many directory queries), with 1,000 already-listed files deleted
-/// through the Vfs midway, lists every remaining file exactly once.
+/// (many directory queries), with 1,000 already-listed files (including the
+/// resume marker entry) and 500 not yet listed files deleted and 50 files
+/// created through the Vfs midway, lists every remaining file exactly once.
 #[test]
 fn big_dir_small_buffer_paging_with_deletes() {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
@@ -433,6 +514,8 @@ fn big_dir_small_buffer_paging_with_deletes() {
     );
     let mut seen: Vec<String> = Vec::new();
     let mut deleted = std::collections::HashSet::new();
+    let mut unlisted_deleted = std::collections::HashSet::new();
+    let mut dots = 0;
     let mut buf = vec![0u64; 64]; // 512 bytes: a handful of entries per query
     let mut queries = 0;
     loop {
@@ -466,17 +549,43 @@ fn big_dir_small_buffer_paging_with_deletes() {
                     String::from_utf16(std::slice::from_raw_parts(np, len)).unwrap(),
                 )
             };
-            seen.push(name);
+            if name == "." || name == ".." {
+                dots += 1;
+            } else {
+                seen.push(name);
+            }
             if next == 0 {
                 break;
             }
             off += next;
         }
         if deleted.is_empty() && seen.len() >= 2000 {
-            // Delete 1,000 files that were already listed.
-            for name in seen.iter().take(1000) {
+            // Delete 1,000 files that were already listed, including the
+            // last one returned (the entry the next query resumes after),
+            // 500 files not listed yet, and create 50 new files.
+            let mut victims: Vec<String> = seen.iter().take(999).cloned().collect();
+            victims.push(seen.last().unwrap().clone());
+            for name in &victims {
                 m.vfs.unlink(format!("/big/{name}").as_bytes()).unwrap();
                 deleted.insert(name.clone());
+            }
+            let listed: std::collections::HashSet<&String> = seen.iter().collect();
+            for i in (0..BIG_DIR_FILES).rev() {
+                if unlisted_deleted.len() == 500 {
+                    break;
+                }
+                let n = format!("file{i:05}");
+                if !listed.contains(&n) {
+                    m.vfs.unlink(format!("/big/{n}").as_bytes()).unwrap();
+                    unlisted_deleted.insert(n);
+                }
+            }
+            for i in 0..50 {
+                let (h, _) = m
+                    .vfs
+                    .create(format!("/big/new{i:02}").as_bytes(), FileType::Reg, 0o644)
+                    .unwrap();
+                m.vfs.close(h);
             }
         }
     }
@@ -489,12 +598,96 @@ fn big_dir_small_buffer_paging_with_deletes() {
     );
     let unique: std::collections::HashSet<&String> = seen.iter().collect();
     assert_eq!(unique.len(), seen.len(), "duplicate entries");
+    assert_eq!(dots, 2, "\".\" and \"..\" once each");
     assert_eq!(deleted.len(), 1000);
+    assert_eq!(unlisted_deleted.len(), 500);
     for i in 0..BIG_DIR_FILES {
         let n = format!("file{i:05}");
-        assert!(
-            unique.contains(&n) || deleted.contains(&n),
-            "{n} missing from the listing"
-        );
+        if unlisted_deleted.contains(&n) {
+            assert!(!unique.contains(&n), "{n} was deleted before it was listed");
+        } else {
+            assert!(
+                unique.contains(&n) || deleted.contains(&n),
+                "{n} missing from the listing"
+            );
+        }
     }
+    // Files created mid-listing may or may not show up, but at most once
+    // (checked above) and with their real names.
+    for n in &seen {
+        assert!(n.starts_with("file") || n.starts_with("new"), "{n}");
+    }
+}
+
+/// A non-root directory lists "." and ".." first (as on NTFS), so the
+/// first query of an empty directory succeeds; the root has neither.
+#[test]
+fn directory_queries_include_dot_entries() {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FileIdBothDirectoryRestartInfo, GetFileInformationByHandleEx,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    let _m = mount();
+    let list = |rel: &str| -> Vec<String> {
+        let path = wide(&format!("{DRIVE}\\{rel}"));
+        // SAFETY: path is NUL-terminated; the handle is closed below.
+        let h = unsafe {
+            CreateFileW(
+                path.as_ptr(),
+                FILE_LIST_DIRECTORY,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(h, INVALID_HANDLE_VALUE);
+        let mut buf = vec![0u64; 1024];
+        // SAFETY: buf has the given size; h is a directory handle.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                h,
+                FileIdBothDirectoryRestartInfo,
+                buf.as_mut_ptr().cast(),
+                (buf.len() * 8) as u32,
+            )
+        };
+        let err = std::io::Error::last_os_error();
+        let mut out = Vec::new();
+        if ok != 0 {
+            let base = buf.as_ptr() as *const u8;
+            let mut off = 0usize;
+            loop {
+                // SAFETY: the API filled a chain of records inside buf.
+                let (next, name) = unsafe {
+                    let rec = base.add(off) as *const FILE_ID_BOTH_DIR_INFO;
+                    let len = (*rec).FileNameLength as usize / 2;
+                    let np = std::ptr::addr_of!((*rec).FileName) as *const u16;
+                    (
+                        (*rec).NextEntryOffset as usize,
+                        String::from_utf16(std::slice::from_raw_parts(np, len)).unwrap(),
+                    )
+                };
+                out.push(name);
+                if next == 0 {
+                    break;
+                }
+                off += next;
+            }
+        }
+        // SAFETY: h came from CreateFileW.
+        unsafe { CloseHandle(h) };
+        assert_ne!(ok, 0, "first query of {rel:?}: {err}");
+        out
+    };
+    assert_eq!(list("dir1\\sub"), [".", ".."]);
+    assert_eq!(list("dir1"), [".", "..", "nested.txt", "sub"]);
+    let root_names = list("");
+    assert!(
+        !root_names.iter().any(|n| n == "." || n == ".."),
+        "{root_names:?}"
+    );
 }

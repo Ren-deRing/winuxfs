@@ -84,8 +84,8 @@
 //!
 //! # Read-only mode
 //! With [`VfsOptions::read_only`], `create`, `write`, `set_len`, `set_times`,
-//! `unlink`, `rmdir` and `rename` return `EROFS` before touching the
-//! backend.
+//! `set_mode`, `unlink`, `rmdir` and `rename` return `EROFS` before touching
+//! the backend; `fsync` and `sync` succeed without calling it.
 
 use crate::plugin::{DirEntry, FileType, Mount, Stat, Statfs, Timespec, ROOT_INO};
 use crate::Errno;
@@ -488,6 +488,22 @@ impl Vfs {
         Ok(cur)
     }
 
+    /// Like [`Vfs::walk`], and also appends `/` + the disk name of each
+    /// component to `disk`.
+    fn walk_resolved(&self, comps: &[&[u8]], disk: &mut Vec<u8>) -> Result<Pin<'_>, Errno> {
+        let mut cur = Pin {
+            vfs: self,
+            ino: ROOT_INO,
+        };
+        for c in comps {
+            let (next, name) = self.child(&cur, c)?;
+            disk.push(b'/');
+            disk.extend_from_slice(&name);
+            cur = next;
+        }
+        Ok(cur)
+    }
+
     /// Turns a pin into an open handle.
     fn register(&self, pin: Pin<'_>) -> Handle {
         let ino = pin.release();
@@ -521,15 +537,44 @@ impl Vfs {
         Ok((self.register(pin), st))
     }
 
+    /// [`Vfs::open`], also returning the path as stored on disk (every
+    /// component in its disk spelling; only differs from `path` in
+    /// case-insensitive mode).
+    pub fn open_resolved(&self, path: &[u8]) -> Result<(Handle, Stat, Vec<u8>), Errno> {
+        let comps = parse(path)?;
+        let mut disk = Vec::with_capacity(path.len());
+        let pin = self.walk_resolved(&comps, &mut disk)?;
+        if disk.is_empty() {
+            disk.push(b'/');
+        }
+        let st = self.mount.getattr(pin.ino)?;
+        Ok((self.register(pin), st, disk))
+    }
+
     /// Creates `path` (its parent must exist: `ENOENT` otherwise) and opens
     /// it.
     pub fn create(&self, path: &[u8], ftype: FileType, mode: u32) -> Result<(Handle, Stat), Errno> {
+        self.create_resolved(path, ftype, mode)
+            .map(|(h, st, _)| (h, st))
+    }
+
+    /// [`Vfs::create`], also returning the new entry's path as stored on
+    /// disk (the parents in their disk spelling, the new name as given).
+    pub fn create_resolved(
+        &self,
+        path: &[u8],
+        ftype: FileType,
+        mode: u32,
+    ) -> Result<(Handle, Stat, Vec<u8>), Errno> {
         self.writable()?;
         let comps = parse(path)?;
         let Some((last, parent)) = comps.split_last() else {
             return Err(Errno::EEXIST);
         };
-        let dir = self.walk(parent)?;
+        let mut disk = Vec::with_capacity(path.len());
+        let dir = self.walk_resolved(parent, &mut disk)?;
+        disk.push(b'/');
+        disk.extend_from_slice(last);
         let _ns = self.ns_guard();
         if self.opts.case_insensitive {
             match self.lookup_name(dir.ino, last) {
@@ -555,7 +600,7 @@ impl Vfs {
                 ino: st.ino,
             }
         };
-        Ok((self.register(pin), st))
+        Ok((self.register(pin), st, disk))
     }
 
     /// Closes a handle; the inode's open reference is released at the last
@@ -591,6 +636,33 @@ impl Vfs {
         let ino = self.ino_of(h)?;
         let a = attrs(len, Timespec::default(), Timespec::default());
         self.mount.setattr(ino, &a, abi::WFS_SET_SIZE)
+    }
+
+    /// Sets the permission bits (`mode & 0o7777`).
+    pub fn set_mode(&self, h: Handle, mode: u32) -> Result<(), Errno> {
+        self.writable()?;
+        let ino = self.ino_of(h)?;
+        let mut a = attrs(0, Timespec::default(), Timespec::default());
+        a.mode = mode & 0o7777;
+        self.mount.setattr(ino, &a, abi::WFS_SET_MODE)
+    }
+
+    /// Flushes one file to stable storage. A no-op (no backend call) in
+    /// read-only mode, which never has anything to flush.
+    pub fn fsync(&self, h: Handle, datasync: bool) -> Result<(), Errno> {
+        let ino = self.ino_of(h)?;
+        if self.opts.read_only {
+            return Ok(());
+        }
+        self.mount.fsync(ino, datasync)
+    }
+
+    /// Flushes the whole mount; a no-op in read-only mode.
+    pub fn sync(&self) -> Result<(), Errno> {
+        if self.opts.read_only {
+            return Ok(());
+        }
+        self.mount.sync()
     }
 
     /// Sets the given timestamps; `None` leaves one unchanged.

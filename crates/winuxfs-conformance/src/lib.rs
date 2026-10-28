@@ -1,8 +1,9 @@
 //! Shared path-level conformance suite.
 //!
 //! The same assertions run against the core's [`Vfs`] (through [`VfsPathFs`])
-//! and, on Windows, against `std::fs` on a mounted drive (Task 13). The crate
-//! is std-only so it builds for both Linux and Windows targets.
+//! and against `std::fs` (through [`StdFsPathFs`]), on Windows on a mounted
+//! winuxfs drive. The crate is std-only so it builds for both Linux and
+//! Windows targets.
 //!
 //! Each `conf_*` function takes a filesystem and an existing, empty directory
 //! to work in, and panics on failure. [`run_all`] runs every function that
@@ -11,8 +12,10 @@
 //! depend on the filesystem's case mode and are therefore not part of
 //! `run_all`; callers run the one matching their configuration.
 
-use std::io::{self, ErrorKind};
+use std::fs;
+use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use winuxfs_core::plugin::FileType;
@@ -336,23 +339,7 @@ pub fn conf_case_insensitive_collision(fs: &dyn PathFs, dir: &str) {
 /// Maps a Linux errno to a portable `io::Error` (by kind, not by raw OS
 /// code, whose numbering differs on Windows).
 pub fn errno_to_io(e: Errno) -> io::Error {
-    let k = match e.0 {
-        1 | 13 => ErrorKind::PermissionDenied,
-        2 => ErrorKind::NotFound,
-        16 => ErrorKind::ResourceBusy,
-        17 => ErrorKind::AlreadyExists,
-        20 => ErrorKind::NotADirectory,
-        21 => ErrorKind::IsADirectory,
-        22 => ErrorKind::InvalidInput,
-        27 => ErrorKind::FileTooLarge,
-        28 => ErrorKind::StorageFull,
-        30 => ErrorKind::ReadOnlyFilesystem,
-        36 => ErrorKind::InvalidFilename,
-        38 => ErrorKind::Unsupported,
-        39 => ErrorKind::DirectoryNotEmpty,
-        _ => ErrorKind::Other,
-    };
-    io::Error::new(k, format!("errno {}", e.0))
+    io::Error::new(e.io_kind(), format!("errno {}", e.0))
 }
 
 /// [`PathFs`] over a [`Vfs`]; paths are UTF-8 Vfs paths (leading `/`).
@@ -466,5 +453,91 @@ impl PathFs for VfsPathFs<'_> {
 
     fn len(&self, p: &str) -> io::Result<u64> {
         self.with(p, |v, h| v.stat(h)).map(|s| s.size)
+    }
+}
+
+/// [`PathFs`] over `std::fs`. A path starting with `/` is taken relative to
+/// `root`; any other path is joined to `root` with `PathBuf::join`, so an
+/// absolute Windows path such as `Y:\dir` replaces `root`. On Windows `/` is
+/// turned into `\` first. Errors keep the kind `std` gives them, which for
+/// the conditions the suite checks matches [`errno_to_io`]'s kinds.
+pub struct StdFsPathFs {
+    pub root: PathBuf,
+}
+
+impl StdFsPathFs {
+    fn path(&self, p: &str) -> PathBuf {
+        let rel = p.trim_start_matches('/');
+        let rel = if cfg!(windows) {
+            rel.replace('/', "\\")
+        } else {
+            rel.to_string()
+        };
+        if rel.is_empty() {
+            self.root.clone()
+        } else {
+            self.root.join(rel)
+        }
+    }
+}
+
+impl PathFs for StdFsPathFs {
+    fn create_dir(&self, p: &str) -> io::Result<()> {
+        fs::create_dir(self.path(p))
+    }
+
+    fn write_file(&self, p: &str, off: u64, data: &[u8]) -> io::Result<()> {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.path(p))?;
+        f.seek(SeekFrom::Start(off))?;
+        f.write_all(data)
+    }
+
+    fn read_file(&self, p: &str, off: u64, len: usize) -> io::Result<Vec<u8>> {
+        let mut f = fs::File::open(self.path(p))?;
+        f.seek(SeekFrom::Start(off))?;
+        let mut buf = Vec::with_capacity(len);
+        f.take(len as u64).read_to_end(&mut buf)?;
+        Ok(buf)
+    }
+
+    fn set_len(&self, p: &str, len: u64) -> io::Result<()> {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(self.path(p))?
+            .set_len(len)
+    }
+
+    fn remove_file(&self, p: &str) -> io::Result<()> {
+        fs::remove_file(self.path(p))
+    }
+
+    fn remove_dir(&self, p: &str) -> io::Result<()> {
+        fs::remove_dir(self.path(p))
+    }
+
+    fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        fs::rename(self.path(from), self.path(to))
+    }
+
+    fn list_dir(&self, p: &str) -> io::Result<Vec<String>> {
+        fs::read_dir(self.path(p))?
+            .map(|e| {
+                e?.file_name()
+                    .into_string()
+                    .map_err(|_| io::Error::new(ErrorKind::InvalidData, "non-Unicode name"))
+            })
+            .collect()
+    }
+
+    fn is_dir(&self, p: &str) -> io::Result<bool> {
+        fs::metadata(self.path(p)).map(|m| m.is_dir())
+    }
+
+    fn len(&self, p: &str) -> io::Result<u64> {
+        fs::metadata(self.path(p)).map(|m| m.len())
     }
 }

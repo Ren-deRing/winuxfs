@@ -48,9 +48,40 @@ impl fmt::Display for Errno {
 
 impl std::error::Error for Errno {}
 
+impl Errno {
+    /// The portable `io::ErrorKind` for this errno (`Other` when there is no
+    /// specific kind).
+    pub fn io_kind(self) -> std::io::ErrorKind {
+        use std::io::ErrorKind as K;
+        match self.0 {
+            1 | 13 => K::PermissionDenied,
+            2 => K::NotFound,
+            16 => K::ResourceBusy,
+            17 => K::AlreadyExists,
+            20 => K::NotADirectory,
+            21 => K::IsADirectory,
+            22 => K::InvalidInput,
+            27 => K::FileTooLarge,
+            28 => K::StorageFull,
+            30 => K::ReadOnlyFilesystem,
+            36 => K::InvalidFilename,
+            38 => K::Unsupported,
+            39 => K::DirectoryNotEmpty,
+            _ => K::Other,
+        }
+    }
+}
+
+/// On Linux the errno is the OS error number, so the raw code is kept (and
+/// the kind follows from it). Elsewhere (Windows) the numbers mean other
+/// errors, so the error is built from [`Errno::io_kind`] instead.
 impl From<Errno> for std::io::Error {
     fn from(e: Errno) -> Self {
-        std::io::Error::from_raw_os_error(e.0)
+        if cfg!(target_os = "linux") {
+            std::io::Error::from_raw_os_error(e.0)
+        } else {
+            std::io::Error::new(e.io_kind(), e)
+        }
     }
 }
 
@@ -64,5 +95,40 @@ mod tests {
         assert_eq!(Errno::from_abi(-2), Err(Errno::ENOENT));
         assert_eq!(Errno::from_abi(7), Err(Errno::EIO));
         assert_eq!(Errno::from_abi(i32::MIN), Err(Errno(i32::MAX)));
+    }
+
+    #[test]
+    fn converts_to_io_error_by_kind() {
+        use std::io::ErrorKind as K;
+        let table = [
+            (Errno::ENOENT, K::NotFound),
+            (Errno::EACCES, K::PermissionDenied),
+            (Errno(1), K::PermissionDenied),
+            (Errno::EEXIST, K::AlreadyExists),
+            (Errno::ENOTDIR, K::NotADirectory),
+            (Errno::EISDIR, K::IsADirectory),
+            (Errno::EINVAL, K::InvalidInput),
+            (Errno::ENOSPC, K::StorageFull),
+            (Errno::EROFS, K::ReadOnlyFilesystem),
+            (Errno::ENAMETOOLONG, K::InvalidFilename),
+            (Errno::ENOTEMPTY, K::DirectoryNotEmpty),
+            (Errno::EBUSY, K::ResourceBusy),
+            (Errno::EFBIG, K::FileTooLarge),
+            (Errno::ENOSYS, K::Unsupported),
+        ];
+        for (e, k) in table {
+            assert_eq!(e.io_kind(), k, "{e:?}");
+            let io: std::io::Error = e.into();
+            assert_eq!(io.kind(), k, "{e:?}");
+            // Linux keeps the raw errno; elsewhere the number would be a
+            // different (wrong) OS error, so none is attached.
+            if cfg!(target_os = "linux") {
+                assert_eq!(io.raw_os_error(), Some(e.0));
+            } else {
+                assert_eq!(io.raw_os_error(), None);
+            }
+        }
+        assert_eq!(Errno::EIO.io_kind(), K::Other);
+        assert_eq!(Errno(-5).io_kind(), K::Other);
     }
 }

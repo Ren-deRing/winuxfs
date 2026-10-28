@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! WinFsp callbacks over a path-level [`Vfs`] (read path).
+//! WinFsp callbacks over a path-level [`Vfs`].
 //!
 //! # Names
 //! WinFsp hands over UTF-16 paths with `\` separators. Each component is
@@ -22,6 +22,45 @@
 //! the last entry it consumed back as the marker (8 bytes), so listing
 //! resumes exactly where it stopped, even in directories with thousands of
 //! entries or ones that change while being read.
+//!
+//! `.` and `..` are not Vfs entries, but every non-root directory listing
+//! starts with them (cookies [`COOKIE_DOT`]/[`COOKIE_DOTDOT`], reserved
+//! above 2^63), as on NTFS: Windows code (for example
+//! `std::fs::remove_dir_all`) treats an empty first directory query as an
+//! error. They carry the directory's own information.
+//!
+//! # Case-insensitive volumes
+//! `Create` and `Open` return the on-disk spelling of the whole path as the
+//! normalized name (`FSP_FSCTL_OPEN_FILE_INFO`). Without it WinFsp would
+//! keep the upper-cased name the file was opened with and pass that to
+//! `Cleanup` and `Rename`. Case-sensitive volumes skip this, as WinFsp's
+//! documentation asks.
+//!
+//! # Writes, deletes and renames
+//! - `Write` honours `WriteToEndOfFile` (start at the current size) and
+//!   `ConstrainedIo` (never extend the file); see [`write_range`].
+//! - Deletion follows WinFsp: `CanDelete` only checks (read-only volume,
+//!   root, non-empty directory); `Cleanup` with the delete flag, which
+//!   WinFsp sends for the last handle of a delete-pending file, unlinks or
+//!   removes the directory. So a file deleted while open keeps its name
+//!   until the last handle closes (Windows semantics); the Vfs keeps the
+//!   inode readable through handles that are still open.
+//! - `Rename` passes `ReplaceIfExists` to the Vfs (without it an existing
+//!   target is `STATUS_OBJECT_NAME_COLLISION`); a directory is never
+//!   replaced (`STATUS_ACCESS_DENIED`), except by itself (a case-only
+//!   rename). Open handles follow the renamed inode.
+//! - `SetFileSize` grows with zeros or truncates; allocation size is not
+//!   stored (shrinking it below the file size truncates, growing it is a
+//!   no-op). `Overwrite` truncates to 0.
+//! - Attributes: only `READONLY` on regular files is stored, as "no write
+//!   permission bits" ([`create_mode`], [`mode_for_attributes`]); other
+//!   attribute bits are accepted and ignored. `SetBasicInfo` sets access
+//!   and modification times; creation and change times are accepted and
+//!   ignored (the Vfs cannot set them).
+//! - `Flush` maps to `Vfs::fsync` (one file) or `Vfs::sync` (volume).
+//! - `SetSecurity` is not implemented (WinFsp refuses it), so the fixed
+//!   descriptor cannot be changed; on read-only mounts `Open` also refuses
+//!   `WRITE_DAC`/`WRITE_OWNER`, which the owner is granted implicitly.
 //!
 //! # Safety net
 //! Every callback body runs under `catch_unwind`; a panic becomes
@@ -112,6 +151,75 @@ pub(crate) fn vfs_path(win: &[u16]) -> Result<Vec<u8>, Errno> {
     Ok(out)
 }
 
+/// The Windows form (`\`-separated UTF-16, no terminator) of a Vfs path,
+/// each component mapped with [`namemap::to_windows`]; the inverse of
+/// [`vfs_path`]. Used as the normalized name WinFsp stores for an open file.
+pub(crate) fn windows_path(path: &[u8]) -> Vec<u16> {
+    const SEP: u16 = b'\\' as u16;
+    let rest = path.strip_prefix(b"/").unwrap_or(path);
+    let mut out = Vec::with_capacity(path.len() + 1);
+    if rest.is_empty() {
+        out.push(SEP);
+        return out;
+    }
+    for comp in rest.split(|&b| b == b'/') {
+        out.push(SEP);
+        out.extend(namemap::to_windows(comp));
+    }
+    out
+}
+
+/// The byte range a WinFsp `Write` touches in a file of `size` bytes:
+/// `WriteToEndOfFile` starts at `size`; `ConstrainedIo` (paging I/O) never
+/// extends the file, so it stops at `size` (length 0 at or past the end).
+pub(crate) fn write_range(
+    offset: u64,
+    len: u32,
+    size: u64,
+    to_end: bool,
+    constrained: bool,
+) -> (u64, usize) {
+    let offset = if to_end { size } else { offset };
+    let len = u64::from(len);
+    let len = if constrained {
+        len.min(size.saturating_sub(offset))
+    } else {
+        len
+    };
+    (offset, len as usize)
+}
+
+/// Permission bits for a new file or directory. The only Windows attribute
+/// stored is `READONLY` on files (no write bits); on directories Windows
+/// treats it as a shell hint, so it is ignored.
+pub(crate) fn create_mode(is_dir: bool, attributes: u32) -> u32 {
+    if is_dir {
+        0o755
+    } else if attributes & FILE_ATTRIBUTE_READONLY != 0 {
+        0o444
+    } else {
+        0o644
+    }
+}
+
+/// New permission bits for a regular file whose attributes are set to
+/// `attributes` (only `READONLY` is stored: set clears every write bit,
+/// clear gives the owner write access back), or `None` if nothing changes.
+pub(crate) fn mode_for_attributes(mode: u32, ftype: FileType, attributes: u32) -> Option<u32> {
+    if ftype != FileType::Reg {
+        return None;
+    }
+    let mode = mode & 0o7777;
+    let new = if attributes & FILE_ATTRIBUTE_READONLY != 0 {
+        mode & !0o222
+    } else if mode & 0o222 == 0 {
+        mode | 0o200
+    } else {
+        mode
+    };
+    (new != mode).then_some(new)
+}
+
 /// Unix time to Windows FILETIME (100 ns ticks since 1601-01-01), clamped
 /// to `0..=i64::MAX` (Windows treats FILETIME as signed); `nsec` is clamped
 /// to the last tick of its second.
@@ -119,6 +227,51 @@ pub(crate) fn filetime(t: Timespec) -> u64 {
     let nsec = i128::from(t.nsec.min(999_999_999));
     let ticks = (i128::from(t.sec) + FILETIME_UNIX_OFFSET) * 10_000_000 + nsec / 100;
     ticks.clamp(0, i128::from(i64::MAX)) as u64
+}
+
+/// Directory-listing cookie of the synthetic `.` entry. Backend cookies
+/// are below 2^63 (like Linux directory offsets; see docs/abi.md), so the
+/// two synthetic values cannot collide with them.
+pub(crate) const COOKIE_DOT: u64 = u64::MAX - 1;
+/// Directory-listing cookie of the synthetic `..` entry.
+pub(crate) const COOKIE_DOTDOT: u64 = u64::MAX;
+const _: () = assert!(COOKIE_DOT >= 1 << 63);
+
+/// Where a `ReadDirectory` call resumes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirStart {
+    /// At the `.` entry (a fresh listing of a non-root directory).
+    Dot,
+    /// At the `..` entry.
+    DotDot,
+    /// At the Vfs entries after this cookie (0 = the first).
+    Entries(u64),
+}
+
+/// The resume point for `marker` (the NextOffset of the last entry WinFsp
+/// consumed, or `None` for a fresh listing). Non-root directories list `.`
+/// and `..` first, as on NTFS: Windows code such as `std::fs::remove_dir_all`
+/// treats a first query that returns nothing as an error.
+pub(crate) fn dir_start(marker: Option<u64>, is_root: bool) -> DirStart {
+    match marker {
+        None if is_root => DirStart::Entries(0),
+        None => DirStart::Dot,
+        Some(COOKIE_DOT) => DirStart::DotDot,
+        Some(COOKIE_DOTDOT) => DirStart::Entries(0),
+        Some(c) => DirStart::Entries(c),
+    }
+}
+
+/// Windows FILETIME to Unix time, or `None` for the values `SetBasicInfo`
+/// uses to mean "leave unchanged": 0, and -1/-2 (as unsigned).
+pub(crate) fn timespec_from_filetime(ft: u64) -> Option<Timespec> {
+    if ft == 0 || ft >= u64::MAX - 1 || ft > i64::MAX as u64 {
+        return None;
+    }
+    let ticks = ft as i64;
+    let sec = ticks.div_euclid(10_000_000) - FILETIME_UNIX_OFFSET as i64;
+    let nsec = (ticks.rem_euclid(10_000_000) * 100) as u32;
+    Some(Timespec { sec, nsec })
 }
 
 /// WinFsp file information for `st`.
@@ -331,5 +484,101 @@ mod tests {
         // On a read-only mount the volume flag already says so.
         let ro_mount = file_info(&stat(FileType::Reg, 0o444, 0), true);
         assert_eq!(ro_mount.file_attributes, FILE_ATTRIBUTE_NORMAL);
+    }
+
+    #[test]
+    fn write_ranges_follow_the_flags() {
+        // (offset, len, size, to_end, constrained) -> (offset, len)
+        assert_eq!(write_range(0, 10, 0, false, false), (0, 10));
+        assert_eq!(write_range(100, 10, 5, false, false), (100, 10));
+        // WriteToEndOfFile: the offset is the current size.
+        assert_eq!(write_range(0, 10, 5, true, false), (5, 10));
+        // ConstrainedIo never extends the file.
+        assert_eq!(write_range(0, 10, 5, false, true), (0, 5));
+        assert_eq!(write_range(3, 10, 5, false, true), (3, 2));
+        assert_eq!(write_range(5, 10, 5, false, true), (5, 0));
+        assert_eq!(write_range(9, 10, 5, false, true), (9, 0));
+        assert_eq!(write_range(0, 10, 5, true, true), (5, 0));
+        // No overflow at the top of the range.
+        assert_eq!(
+            write_range(u64::MAX - 1, 10, u64::MAX, false, true),
+            (u64::MAX - 1, 1)
+        );
+    }
+
+    #[test]
+    fn normalized_names_are_windows_paths() {
+        assert_eq!(windows_path(b"/"), w("\\"));
+        assert_eq!(windows_path(b"/Dir/Hello.TXT"), w("\\Dir\\Hello.TXT"));
+        assert_eq!(windows_path(b"/a:b/x."), w("\\a\u{F03A}b\\x\u{F02E}"));
+        // Round trip through vfs_path.
+        let p = windows_path(&[b'/', 0x66, 0xFF, b'/', b'k']);
+        assert_eq!(vfs_path(&p).unwrap(), [b'/', 0x66, 0xFF, b'/', b'k']);
+    }
+
+    #[test]
+    fn readonly_attribute_maps_to_write_bits() {
+        // New files: READONLY drops every write bit.
+        assert_eq!(create_mode(false, 0), 0o644);
+        assert_eq!(create_mode(false, FILE_ATTRIBUTE_READONLY), 0o444);
+        assert_eq!(create_mode(true, 0), 0o755);
+        // Directories ignore READONLY (Windows treats it as a shell hint).
+        assert_eq!(create_mode(true, FILE_ATTRIBUTE_READONLY), 0o755);
+        // Existing files: set or clear; None = leave unchanged.
+        assert_eq!(
+            mode_for_attributes(0o644, FileType::Reg, FILE_ATTRIBUTE_READONLY),
+            Some(0o444)
+        );
+        assert_eq!(
+            mode_for_attributes(0o444, FileType::Reg, FILE_ATTRIBUTE_NORMAL),
+            Some(0o644)
+        );
+        assert_eq!(mode_for_attributes(0o640, FileType::Reg, 0), None);
+        assert_eq!(
+            mode_for_attributes(0o4755, FileType::Reg, FILE_ATTRIBUTE_READONLY),
+            Some(0o4555)
+        );
+        assert_eq!(
+            mode_for_attributes(0o555, FileType::Reg, FILE_ATTRIBUTE_READONLY),
+            None
+        );
+        assert_eq!(
+            mode_for_attributes(0o755, FileType::Dir, FILE_ATTRIBUTE_READONLY),
+            None
+        );
+    }
+
+    #[test]
+    fn filetime_to_timespec_and_no_change_values() {
+        let t = |sec, nsec| Timespec { sec, nsec };
+        assert_eq!(timespec_from_filetime(0), None);
+        // -1 and -2 are Windows' "stop/resume updating" markers.
+        assert_eq!(timespec_from_filetime(u64::MAX), None);
+        assert_eq!(timespec_from_filetime(u64::MAX - 1), None);
+        assert_eq!(
+            timespec_from_filetime(116_444_736_000_000_000),
+            Some(t(0, 0))
+        );
+        assert_eq!(
+            timespec_from_filetime(116_444_736_000_000_000 + 10_000_009),
+            Some(t(1, 900))
+        );
+        assert_eq!(timespec_from_filetime(1), Some(t(-11_644_473_600, 100)));
+        for ts in [t(1_000_000_000, 123_456_700), t(-5, 0), t(0, 999_999_900)] {
+            assert_eq!(timespec_from_filetime(filetime(ts)), Some(ts));
+        }
+    }
+
+    #[test]
+    fn directory_listing_start_points() {
+        use DirStart::*;
+        // Non-root directories start with "." and "..", like NTFS.
+        assert_eq!(dir_start(None, false), Dot);
+        assert_eq!(dir_start(Some(COOKIE_DOT), false), DotDot);
+        assert_eq!(dir_start(Some(COOKIE_DOTDOT), false), Entries(0));
+        assert_eq!(dir_start(Some(42), false), Entries(42));
+        // The root has neither.
+        assert_eq!(dir_start(None, true), Entries(0));
+        assert_eq!(dir_start(Some(7), true), Entries(7));
     }
 }

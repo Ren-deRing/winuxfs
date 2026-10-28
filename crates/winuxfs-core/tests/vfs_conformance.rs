@@ -73,6 +73,10 @@ impl Counting {
         self.counter(b"memfs_counting_refs_forgotten")
     }
 
+    fn syncs(&self) -> u64 {
+        self.counter(b"memfs_counting_syncs")
+    }
+
     fn mutations(&self) -> u64 {
         self.counter(b"memfs_counting_mutations")
     }
@@ -745,4 +749,79 @@ fn stat_at_reads_entry_without_keeping_references() {
     v.close(dh);
     drop(v);
     assert_eq!(c.forgotten(), c.taken());
+}
+
+// ---- Task 13 additions: resolved names, fsync, mode ----
+
+#[test]
+fn open_and_create_resolved_report_disk_names() {
+    let v = vfs(true);
+    mkdir(&v, b"/Dir");
+    mkfile(&v, b"/Dir/Hello.TXT", b"x");
+    let (h, st, disk) = v.open_resolved(b"/dIR/hello.txt").unwrap();
+    assert_eq!(disk, b"/Dir/Hello.TXT");
+    assert_eq!(st.size, 1);
+    v.close(h);
+    let (h, _, disk) = v.open_resolved(b"/").unwrap();
+    assert_eq!(disk, b"/");
+    v.close(h);
+    let (h, st, disk) = v
+        .create_resolved(b"/DIR/New", FileType::Reg, 0o644)
+        .unwrap();
+    assert_eq!(disk, b"/Dir/New");
+    assert_eq!(st.ftype, FileType::Reg);
+    v.close(h);
+    assert_eq!(
+        v.create_resolved(b"/dir/NEW", FileType::Reg, 0o644)
+            .map(|_| ()),
+        Err(Errno::EEXIST)
+    );
+    // Case-sensitive mode: the path as given.
+    let s = vfs(false);
+    mkfile(&s, b"/a", b"");
+    let (h, _, disk) = s.open_resolved(b"/a").unwrap();
+    assert_eq!(disk, b"/a");
+    s.close(h);
+    assert_eq!(s.open_resolved(b"/A").map(|_| ()), Err(Errno::ENOENT));
+}
+
+#[test]
+fn fsync_sync_and_set_mode() {
+    let v = vfs(false);
+    mkfile(&v, b"/f", b"data");
+    let (h, st) = v.open(b"/f").unwrap();
+    assert_eq!(st.mode & 0o777, 0o644);
+    v.fsync(h, false).unwrap();
+    v.fsync(h, true).unwrap();
+    v.sync().unwrap();
+    v.set_mode(h, 0o444).unwrap();
+    assert_eq!(v.stat(h).unwrap().mode & 0o777, 0o444);
+    assert_eq!(v.fsync(Handle(999_999), false), Err(EBADF));
+    v.close(h);
+}
+
+#[test]
+fn readonly_vfs_fsync_and_set_mode_never_call_backend() {
+    let c = Counting::new("vfs-ro-sync");
+    let m = c.mount();
+    {
+        let w = Vfs::new(m.clone(), opts(false, false));
+        mkfile(&w, b"/f", b"content");
+    }
+    let before = c.mutations();
+    let syncs_before = c.syncs();
+    let v = Vfs::new(m.clone(), opts(false, true));
+    let (h, _) = v.open(b"/f").unwrap();
+    v.fsync(h, false).unwrap();
+    v.sync().unwrap();
+    assert_eq!(v.set_mode(h, 0o444), Err(Errno::EROFS));
+    v.close(h);
+    assert_eq!(c.mutations(), before);
+    assert_eq!(c.syncs(), syncs_before);
+    // The counter works: a writable Vfs does reach the backend's fsync.
+    let w = Vfs::new(m.clone(), opts(false, false));
+    let (h, _) = w.open(b"/f").unwrap();
+    w.fsync(h, false).unwrap();
+    w.close(h);
+    assert!(c.syncs() > syncs_before);
 }

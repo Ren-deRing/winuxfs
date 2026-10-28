@@ -184,6 +184,21 @@ pub struct FSP_FSCTL_FILE_INFO {
     pub ea_size: u32,
 }
 
+/// What the `info` argument of the `Create` and `Open` callbacks really
+/// points to (WinFsp's API documentation for `FspFileSystemGetOpenFileInfo`):
+/// the file information followed by a buffer for the normalized file name.
+/// A case-insensitive file system may store the name with its on-disk case
+/// there (no terminating NUL; `normalized_name_size` is the buffer size in
+/// bytes on entry and the name's size in bytes on return). Otherwise WinFsp
+/// uses the upper-case form of the name the file was opened with.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FSP_FSCTL_OPEN_FILE_INFO {
+    pub file_info: FSP_FSCTL_FILE_INFO,
+    pub normalized_name: PWSTR,
+    pub normalized_name_size: u16,
+}
+
 /// The 24-byte tail of [`FSP_FSCTL_DIR_INFO`]. WinFsp sizes it like the
 /// matching NT directory record; only `next_offset` carries meaning.
 #[repr(C)]
@@ -485,5 +500,6 @@ const _: () = assert!(size_of::<FSP_FSCTL_VOLUME_PARAMS>() == 504);
 const _: () = assert!(size_of::<FSP_FSCTL_VOLUME_INFO>() == 88);
 const _: () = assert!(size_of::<FSP_FSCTL_FILE_INFO>() == 72);
 const _: () = assert!(size_of::<FSP_FSCTL_DIR_INFO>() == 104);
+const _: () = assert!(size_of::<FSP_FSCTL_OPEN_FILE_INFO>() == 88);
 const _: () = assert!(size_of::<FSP_FILE_SYSTEM_INTERFACE>() == 64 * size_of::<usize>());
 const _: () = assert!(core::mem::offset_of!(FSP_FILE_SYSTEM, user_context) == 8);

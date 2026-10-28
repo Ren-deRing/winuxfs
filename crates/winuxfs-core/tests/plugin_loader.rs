@@ -401,6 +401,22 @@ fn linux_errnos_pass_through_mount_wrapper() {
 }
 
 #[test]
+fn readdir_rejects_cookies_at_or_above_2_pow_63() {
+    let p = private_copy(&testplug(), "readdir-cookie");
+    let b = load_plugin(&p).unwrap();
+    let m = b.mount(no_devs(), "").unwrap();
+    for dir in [9, 10, 11] {
+        assert_eq!(m.readdir(dir, 0, 10).err(), Some(Errno::EIO), "dir {dir}");
+    }
+    // The root directory too.
+    assert_eq!(m.readdir(1, 99, 10).err(), Some(Errno::EIO));
+    // The largest valid cookie is accepted.
+    let ents = m.readdir(12, 0, 10).unwrap();
+    assert_eq!(ents.len(), 1);
+    assert_eq!(ents[0].cookie, (1u64 << 63) - 1);
+}
+
+#[test]
 fn readdir_bounded_when_backend_ignores_stop() {
     let p = private_copy(&testplug(), "readdir-stop");
     let b = load_plugin(&p).unwrap();
