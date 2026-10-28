@@ -45,6 +45,14 @@ case $rc in
   77) skipped+=("tools/test_part_xcheck.sh: sgdisk missing (install the gdisk package)") ;;
   *) exit "$rc" ;;
 esac
+rc=0
+tools/gen-fixtures.sh --self-test || rc=$?
+case $rc in
+  0) ;;
+  77) skipped+=("tools/gen-fixtures.sh --self-test: xfsprogs missing (install xfsprogs)") ;;
+  *) exit "$rc" ;;
+esac
+python3 -m unittest tools.test_xfs_manifest
 if [ -f deny.toml ]; then
   cargo deny check
 fi
