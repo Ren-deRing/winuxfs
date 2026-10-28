@@ -538,6 +538,16 @@ unsafe fn finish_open(
             {
                 std::ptr::copy_nonoverlapping(name.as_ptr(), (*oi).normalized_name, name.len());
                 (*oi).normalized_name_size = bytes as u16;
+            } else if !(*oi).normalized_name.is_null() {
+                // WinFsp falls back to the upcased name; leave a trace.
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "winuxfs: debug: NormalizedName buffer too small ({} > {} bytes) for {}",
+                    bytes,
+                    (*oi).normalized_name_size,
+                    String::from_utf16_lossy(&name)
+                );
             }
         }
     }
@@ -900,11 +910,15 @@ unsafe extern "system" fn rename(
             return STATUS_OBJECT_NAME_INVALID;
         };
         let replace = replace_if_exists != 0;
-        // Windows never replaces a directory, even with ReplaceIfExists
-        // (unless the target is the source itself: a case-only rename).
+        // Windows never replaces a directory, and a directory never replaces
+        // anything, even with ReplaceIfExists (unless the target is the
+        // source itself: a case-only rename). NTFS answers ACCESS_DENIED.
         if replace {
-            if let Some((tino, FileType::Dir)) = ino_of_path(c, &new) {
-                if ino_of_path(c, &old).map(|(i, _)| i) != Some(tino) {
+            if let Some((tino, tty)) = ino_of_path(c, &new) {
+                let src = ino_of_path(c, &old);
+                let same = src.map(|(i, _)| i) == Some(tino);
+                let src_is_dir = matches!(src, Some((_, FileType::Dir)));
+                if !same && (tty == FileType::Dir || src_is_dir) {
                     return STATUS_ACCESS_DENIED;
                 }
             }

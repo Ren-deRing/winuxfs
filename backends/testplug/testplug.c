@@ -15,6 +15,8 @@
  *   lookup(1, "zero")  succeeds with out ino 0 (bogus)
  *   readdir(5)    emits 1000 entries, ignoring the callback's stop signal
  *   readdir(6)    emits good, bad (ftype 99), good, good, ignoring stop
+ *   readdir(9..12) emit one entry with next_cookie u64::MAX-1, u64::MAX, 2^63,
+ *                 2^63-1 (the last is valid); readdir(1, cookie 99) emits u64::MAX
  *   testplug_unmount_count() counts unmount calls.
  *   testplug_bad_forgets() sums forget(n) calls on the bogus inodes 7 and 8.
  *   testplug_accepted_after_bad() counts callbacks after the bad readdir(6)
@@ -168,6 +170,17 @@ static wfs_err_t t_readdir(wfs_fs *fs, wfs_ino_t dir, uint64_t cookie, wfs_diren
         (void)cb(ctx, &bad);
         for (int i = 0; i < 2; i++)
             if (cb(ctx, &good) == 0) atomic_fetch_add(&accepted_after_bad, 1);
+        return 0;
+    }
+    if (dir >= 9 && dir <= 12) {
+        static const uint64_t ck[] = { UINT64_MAX - 1, UINT64_MAX, (uint64_t)1 << 63, ((uint64_t)1 << 63) - 1 };
+        wfs_dirent e = { .next_cookie = ck[dir - 9], .ino = 2, .ftype = WFS_FT_REG, .name_len = 1, .name = "c" };
+        (void)cb(ctx, &e);
+        return 0;
+    }
+    if (dir == 1 && cookie == 99) {
+        wfs_dirent e = { .next_cookie = UINT64_MAX, .ino = 2, .ftype = WFS_FT_REG, .name_len = 1, .name = "c" };
+        (void)cb(ctx, &e);
         return 0;
     }
     if (dir != 1) return dir == 2 ? -ENOTDIR : -ENOENT;

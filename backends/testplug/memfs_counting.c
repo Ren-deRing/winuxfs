@@ -8,6 +8,7 @@
  *   memfs_counting_mutations()      calls (successful or not) of every
  *                                   write-path op: setattr, write, create,
  *                                   unlink, rmdir, rename, link, symlink
+ *   memfs_counting_syncs()          calls of fsync and sync
  * Every other behaviour is memfs's.
  */
 #define wfs_backend_entry memfs_plain_entry
@@ -16,11 +17,13 @@
 
 #include <stdatomic.h>
 
-static atomic_ullong refs_taken, refs_forgotten, mutations;
+static atomic_ullong refs_taken, refs_forgotten, mutations, syncs;
 
 WFS_EXPORT unsigned long long memfs_counting_refs_taken(void) { return atomic_load(&refs_taken); }
 WFS_EXPORT unsigned long long memfs_counting_refs_forgotten(void) { return atomic_load(&refs_forgotten); }
 WFS_EXPORT unsigned long long memfs_counting_mutations(void) { return atomic_load(&mutations); }
+
+WFS_EXPORT unsigned long long memfs_counting_syncs(void) { return atomic_load(&syncs); }
 
 static void mut(void) { atomic_fetch_add(&mutations, 1); }
 
@@ -95,6 +98,18 @@ static wfs_err_t c_symlink(wfs_fs *fs, wfs_ino_t dir, const char *name, uint32_t
     return r;
 }
 
+static wfs_err_t c_sync(wfs_fs *fs)
+{
+    atomic_fetch_add(&syncs, 1);
+    return m_sync(fs);
+}
+
+static wfs_err_t c_fsync(wfs_fs *fs, wfs_ino_t ino, int datasync)
+{
+    atomic_fetch_add(&syncs, 1);
+    return m_fsync(fs, ino, datasync);
+}
+
 static const wfs_ops counting_ops = {
     .probe = m_probe,
     .mount = m_mount,
@@ -114,8 +129,8 @@ static const wfs_ops counting_ops = {
     .link = c_link,
     .symlink = c_symlink,
     .readlink = m_readlink,
-    .sync = m_sync,
-    .fsync = m_fsync,
+    .sync = c_sync,
+    .fsync = c_fsync,
 };
 
 static const wfs_backend_desc counting_desc = {

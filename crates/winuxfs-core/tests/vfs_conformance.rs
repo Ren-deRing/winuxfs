@@ -73,6 +73,10 @@ impl Counting {
         self.counter(b"memfs_counting_refs_forgotten")
     }
 
+    fn syncs(&self) -> u64 {
+        self.counter(b"memfs_counting_syncs")
+    }
+
     fn mutations(&self) -> u64 {
         self.counter(b"memfs_counting_mutations")
     }
@@ -805,6 +809,7 @@ fn readonly_vfs_fsync_and_set_mode_never_call_backend() {
         mkfile(&w, b"/f", b"content");
     }
     let before = c.mutations();
+    let syncs_before = c.syncs();
     let v = Vfs::new(m.clone(), opts(false, true));
     let (h, _) = v.open(b"/f").unwrap();
     v.fsync(h, false).unwrap();
@@ -812,4 +817,11 @@ fn readonly_vfs_fsync_and_set_mode_never_call_backend() {
     assert_eq!(v.set_mode(h, 0o444), Err(Errno::EROFS));
     v.close(h);
     assert_eq!(c.mutations(), before);
+    assert_eq!(c.syncs(), syncs_before);
+    // The counter works: a writable Vfs does reach the backend's fsync.
+    let w = Vfs::new(m.clone(), opts(false, false));
+    let (h, _) = w.open(b"/f").unwrap();
+    w.fsync(h, false).unwrap();
+    w.close(h);
+    assert!(c.syncs() > syncs_before);
 }

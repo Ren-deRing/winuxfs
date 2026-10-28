@@ -451,6 +451,9 @@ fn zeroed_stat() -> abi::wfs_stat {
     unsafe { MaybeUninit::zeroed().assume_init() }
 }
 
+/// Exclusive upper bound of readdir cookies (docs/abi.md).
+const COOKIE_LIMIT: u64 = 1 << 63;
+
 struct ReaddirCtx {
     out: Vec<DirEntry>,
     max: usize,
@@ -481,6 +484,12 @@ unsafe extern "C" fn readdir_cb(ctx: *mut c_void, ent: *const abi::wfs_dirent) -
             std::slice::from_raw_parts(e.name.cast::<u8>(), e.name_len as usize).to_vec()
         };
         let ftype = FileType::from_abi(e.ftype).map_err(|_| ())?;
+        // ABI rule: cookies are < 2^63. The Windows adapter reserves the top
+        // of the range for its "." / ".." markers; a larger cookie would make
+        // a listing restart forever, so it is a malformed entry (EIO).
+        if e.next_cookie >= COOKIE_LIMIT {
+            return Err(());
+        }
         Ok(DirEntry {
             cookie: e.next_cookie,
             ino: e.ino,

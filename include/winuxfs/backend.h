@@ -55,7 +55,7 @@ typedef struct {
     wfs_err_t (*setattr)(wfs_fs *, wfs_ino_t, const wfs_stat *, uint32_t set_mask);
     wfs_err_t (*lookup)(wfs_fs *, wfs_ino_t dir, const char *name, uint32_t len, wfs_ino_t *out, wfs_stat *st);
     void      (*forget)(wfs_fs *, wfs_ino_t, uint64_t nlookup);
-    wfs_err_t (*readdir)(wfs_fs *, wfs_ino_t dir, uint64_t cookie, wfs_dirent_cb, void *ctx);   /* cookie 0 = 처음 */
+    wfs_err_t (*readdir)(wfs_fs *, wfs_ino_t dir, uint64_t cookie, wfs_dirent_cb, void *ctx);   /* cookie 0 = 처음. next_cookie는 반드시 < 2^63 (이상이면 호스트가 EIO 처리) */
     wfs_err_t (*read)(wfs_fs *, wfs_ino_t, uint64_t off, void *buf, size_t len, size_t *done);
     wfs_err_t (*write)(wfs_fs *, wfs_ino_t, uint64_t off, const void *buf, size_t len, size_t *done);
     wfs_err_t (*create)(wfs_fs *, wfs_ino_t dir, const char *name, uint32_t len, uint32_t ftype,

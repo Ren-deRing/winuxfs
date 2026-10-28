@@ -258,7 +258,6 @@ fn rename_over_existing_fails_without_replace() {
     assert_eq!(err.kind(), ErrorKind::AlreadyExists, "{err:?}");
     assert_eq!(fs::read(root("a")).unwrap(), b"AAA");
     assert_eq!(fs::read(root("b")).unwrap(), b"B");
-    const MOVEFILE_REPLACE_EXISTING: u32 = 1;
     move_file(&a, &b, MOVEFILE_REPLACE_EXISTING).unwrap();
     assert!(!root("a").exists());
     assert_eq!(fs::read(root("b")).unwrap(), b"AAA");
@@ -278,6 +277,98 @@ fn rename_over_existing_fails_without_replace() {
         fs::rename(root("nope"), root("x")).unwrap_err().kind(),
         ErrorKind::NotFound
     );
+}
+
+const MOVEFILE_REPLACE_EXISTING: u32 = 1;
+
+#[test]
+fn rename_onto_open_target_with_replace() {
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ};
+    let m = mount();
+    fs::write(root("src"), b"NEW").unwrap();
+    fs::write(root("dst"), b"OLD").unwrap();
+    let old = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .open(root("dst"))
+        .unwrap();
+    let r = move_file(
+        &format!("{DRIVE}\\src"),
+        &format!("{DRIVE}\\dst"),
+        MOVEFILE_REPLACE_EXISTING,
+    );
+    eprintln!("rename onto open target: {r:?}");
+    drop(old);
+    // Safety property, whatever Windows decided: whichever data is at "dst"
+    // afterwards is intact, and closing the old handle never removed it.
+    match r {
+        Ok(()) => {
+            assert_eq!(fs::read(root("dst")).unwrap(), b"NEW");
+            assert_eq!(vfs_read(&m.vfs, b"/dst").unwrap(), b"NEW");
+            assert!(!root("src").exists());
+        }
+        Err(_) => {
+            assert_eq!(fs::read(root("dst")).unwrap(), b"OLD");
+            assert_eq!(fs::read(root("src")).unwrap(), b"NEW");
+        }
+    }
+    // Same again with delete-on-close on the old handle.
+    fs::write(root("src2"), b"NEW2").unwrap();
+    fs::write(root("dst2"), b"OLD2").unwrap();
+    let old = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .open(root("dst2"))
+        .unwrap();
+    let del = fs::remove_file(root("dst2"));
+    let r = move_file(
+        &format!("{DRIVE}\\src2"),
+        &format!("{DRIVE}\\dst2"),
+        MOVEFILE_REPLACE_EXISTING,
+    );
+    eprintln!("delete-pending then rename: delete={del:?} rename={r:?}");
+    drop(old);
+    if r.is_ok() {
+        assert_eq!(
+            fs::read(root("dst2")).unwrap(),
+            b"NEW2",
+            "the new file must survive the old handle's delete-on-close"
+        );
+        assert_eq!(vfs_read(&m.vfs, b"/dst2").unwrap(), b"NEW2");
+    } else {
+        assert_eq!(fs::read(root("src2")).unwrap(), b"NEW2");
+    }
+}
+
+#[test]
+fn rename_directory_into_own_descendant_fails() {
+    let m = mount();
+    fs::create_dir(root("dir1\\sub")).unwrap();
+    let r = fs::rename(root("dir1"), root("dir1\\sub\\dir1"));
+    assert!(r.is_err(), "{r:?}");
+    assert_eq!(fs::read(root("dir1\\nested.txt")).unwrap(), b"nested");
+    assert!(root("dir1\\sub").is_dir());
+    assert_eq!(vfs_read(&m.vfs, b"/dir1/nested.txt").unwrap(), b"nested");
+    assert_eq!(names(&root("dir1")), ["nested.txt", "sub"]);
+}
+
+#[test]
+fn replace_directory_with_file_or_file_with_directory_is_denied() {
+    let m = mount();
+    fs::create_dir(root("dd")).unwrap();
+    fs::write(root("ff"), b"F").unwrap();
+    let (dd, ff) = (format!("{DRIVE}\\dd"), format!("{DRIVE}\\ff"));
+    let hello = format!("{DRIVE}\\hello.txt");
+    // A file onto a directory.
+    let e = move_file(&ff, &dd, MOVEFILE_REPLACE_EXISTING).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::PermissionDenied, "{e:?}");
+    // A directory onto a file.
+    let e = move_file(&dd, &hello, MOVEFILE_REPLACE_EXISTING).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::PermissionDenied, "{e:?}");
+    assert!(root("dd").is_dir());
+    assert_eq!(fs::read(root("ff")).unwrap(), b"F");
+    assert_eq!(fs::read(root("hello.txt")).unwrap(), b"hello");
+    assert_eq!(vfs_read(&m.vfs, b"/hello.txt").unwrap(), b"hello");
 }
 
 #[test]
@@ -565,9 +656,8 @@ fn flush_volume_and_file() {
         .read(true)
         .write(true)
         .open(format!("\\\\.\\{DRIVE}"));
-    if let Ok(v) = v {
-        v.sync_all().unwrap();
-    }
+    let v = v.expect("open the volume (the VM user must be an administrator)");
+    v.sync_all().unwrap();
 }
 
 #[test]
