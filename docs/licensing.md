@@ -327,3 +327,35 @@ Bill Zissimopoulos <billziss at navimatics.com>.
 | `clap` | 4.6.7 | MIT OR Apache-2.0 |
 | `windows-sys` | 0.61.2 | MIT OR Apache-2.0 |
 | `proptest` | 1.12.0 | MIT OR Apache-2.0 |
+
+## 5. 반입한 커널 소스 (`third_party/linux-xfs/`)
+
+### 범위
+
+- 커밋 `d135ab453a7400a34930bdda1ef4bdc8acfac80e`의 `fs/xfs` 중 M2 읽기 경로에 필요한 123개 파일(81,994줄)을 **바이트 단위로 그대로** 복사했다(`tools/vendor-xfs.sh --src <fs/xfs>`). 구성: `libxfs/*.c` 29개(M2 설계 5.1), `libxfs/*.h` 전부 65개, 최상위 편집 대상 6개(M2 설계 5.3: `xfs_dir2_readdir.c`, `xfs_mount.c`, `xfs_icache.c`, `xfs_symlink.c`, `xfs_log_recover.c`, `xfs_log_priv.h`), 그리고 위 `.c`가 `#include`하는 최상위 헤더 23개(참고용. 실제 컴파일은 `backends/xfs/shim/`의 헤더를 쓴다).
+- 파일별 SHA-256과 커밋 SHA는 `third_party/linux-xfs/SOURCE`에 있다. `tools/vendor-xfs.sh --verify`(`tools/check.sh`가 실행)가 어긋남, 누락, 추가 파일을 모두 실패로 처리한다.
+- 수정이 필요하면 `third_party/linux-xfs-patches/`의 패치로만 한다. 반입 트리는 수정하지 않는다.
+- `third_party/`는 Rust 크레이트가 아니다(워크스페이스 멤버 아님). `cargo deny`/`fmt`/`clippy`에 영향이 없다.
+
+### 게이트
+
+`python3 -I tools/license-scan.py --check-allowed third_party/linux-xfs`(`tools/check.sh`가 실행)와 `tools/test_license_scan.py`의 `test_vendored_xfs_files_keep_spdx`가 모든 `.c`/`.h`의 SPDX를 허용 집합과 대조한다. 허용 집합은 반입 파일에 실제로 있는 것만이다.
+
+| SPDX (정규화 후) | 파일 수 | 원문 표기 |
+|---|---:|---|
+| `GPL-2.0-only` | 96 | `GPL-2.0` |
+| `GPL-2.0-or-later` | 14 | `GPL-2.0-or-later` |
+| `GPL-2.0+` | 12 | `GPL-2.0+` (`GPL-2.0-or-later`의 폐기된 표기) |
+| `LGPL-2.1` | 1 | `libxfs/xfs_fs.h` |
+| 표기 없음 / 그 외 | 0 | |
+| **합계** | **123** | |
+
+`GPL-3.0*`, `AGPL*`, `LGPL-3.0*`, 알 수 없는 ID, SPDX가 없는 파일은 스캔이 실패한다(테스트 `test_check_allowed_rejects_gpl3_unknown_and_missing`).
+
+### 호환성 근거
+
+- 프로젝트는 GPL-2.0-only다. `GPL-2.0-only` 파일은 그대로 같은 조건이다.
+- `GPL-2.0-or-later`(및 `GPL-2.0+`) 파일은 "GPLv2 또는 이후 버전" 중 받는 사람이 고를 수 있으므로 GPLv2를 고르면 된다. 이들을 GPL-2.0-only 코드와 하나의 결합 저작물로 배포하면 전체가 GPLv2 조건을 따르며 어떤 파일의 조건도 어기지 않는다. 이 결합물의 일부를 GPLv3로 쓰는 것은 GPL-2.0-only 파일 때문에 불가능하다.
+- `LGPL-2.1`(`xfs_fs.h`, 사용자 공간 ioctl 헤더) 파일: LGPL-2.1 3절은 해당 코드에 LGPL 대신 일반 GPL 조건(GPLv2 또는 그 이후)을 적용하도록 허용한다. GPLv2를 골라 GPL-2.0-only 결합물에 넣을 수 있다.
+- GPL-3.0 전용 코드는 반입하지 않는다. 위 게이트가 이를 강제한다.
+- 반입 파일의 SPDX 줄과 저작권 표시는 바이트 단위로 보존된다(`--verify`가 보장). 이 프로젝트의 새 파일은 `GPL-2.0-only`다.
