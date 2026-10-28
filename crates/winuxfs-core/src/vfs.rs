@@ -30,6 +30,16 @@
 //! Creates and renames in this mode are serialised so two case variants
 //! cannot be created concurrently.
 //!
+//! Rename in this mode: if the destination resolves to the source entry
+//! itself (same directory, same disk name), the entry is respelled. If it
+//! resolves to another name of the same inode (hard links), the rename is a
+//! successful no-op that keeps both names, like rename(2). If it resolves to
+//! a different entry with another spelling and `replace` is set, the source
+//! first replaces that entry under its stored name, then is respelled to
+//! the requested name. These two backend calls are not atomic: if the
+//! respelling fails after the replacement succeeded, the rename reports
+//! success and the entry keeps the replaced entry's spelling.
+//!
 //! # Backend references (who owns what)
 //! `Mount::lookup`/`Mount::create` return an inode holding one backend
 //! reference that must be forgotten exactly once. The Vfs keeps a pin table
@@ -50,7 +60,10 @@
 //!
 //! # Name cache
 //! `(parent ino, key) -> (child ino, disk name)`, where the key is the name
-//! (or its fold in case-insensitive mode). `unlink`, `rmdir` and `rename`
+//! (or its fold in case-insensitive mode). In case-insensitive mode a hit
+//! whose disk name differs from the requested component is confirmed by an
+//! exact backend lookup first, so an entry with exactly the requested name
+//! wins even when another spelling with the same fold is cached. `unlink`, `rmdir` and `rename`
 //! invalidate the affected entries (both old and new names) after the
 //! backend call, whatever its result. A global generation counter, bumped by
 //! every invalidation, keeps a lookup that raced with a namespace change from
@@ -61,7 +74,11 @@
 //! Handles are monotonically increasing `u64`s, never reused within a Vfs.
 //! All methods take `&self`; `Vfs` is `Send + Sync`. One mutex guards the pin
 //! table, cache and handle table; backend reads and writes run outside it
-//! (only `forget` is called under it). Using a handle concurrently with its
+//! (only `forget` is called under it). Known follow-up (Task 13, under
+//! load): `forget` may do backend I/O on real filesystems, and emptying a
+//! full cache forgets up to `CACHE_MAX` inodes while holding the mutex,
+//! stalling every other call meanwhile; collecting the inodes and
+//! forgetting them after unlocking would avoid that. Using a handle concurrently with its
 //! own `close` is a caller error (the backend then sees an unreferenced
 //! inode and typically reports `ENOENT`).
 //!
@@ -410,15 +427,43 @@ impl Vfs {
     /// Resolves one component below the pinned directory `dir`.
     fn child(&self, dir: &Pin<'_>, name: &[u8]) -> Result<(Pin<'_>, Vec<u8>), Errno> {
         let key = self.key(name);
-        let gen = {
+        let (gen, hit) = {
             let mut st = self.lock();
-            if let Some(e) = st.cache.get(&(dir.ino, key.clone())) {
-                let (ino, disk) = (e.ino, e.name.clone());
-                Self::pin_held(&mut st, ino);
-                return Ok((Pin { vfs: self, ino }, disk));
+            let gen = st.gen;
+            match st.cache.get(&(dir.ino, key.clone())) {
+                Some(e) if e.name == name => {
+                    let ino = e.ino;
+                    Self::pin_held(&mut st, ino);
+                    return Ok((Pin { vfs: self, ino }, name.to_vec()));
+                }
+                Some(e) => {
+                    let (ino, disk) = (e.ino, e.name.clone());
+                    Self::pin_held(&mut st, ino);
+                    (gen, Some((Pin { vfs: self, ino }, disk)))
+                }
+                None => (gen, None),
             }
-            st.gen
         };
+        if let Some((pin, disk)) = hit {
+            // Case-insensitive hit under another spelling: an entry with
+            // exactly this name wins (several names may share a fold).
+            return match self.mount.lookup(dir.ino, name) {
+                Ok(stat) => {
+                    drop(pin);
+                    let mut st = self.lock();
+                    self.adopt(&mut st, stat.ino);
+                    Ok((
+                        Pin {
+                            vfs: self,
+                            ino: stat.ino,
+                        },
+                        name.to_vec(),
+                    ))
+                }
+                Err(Errno::ENOENT) => Ok((pin, disk)),
+                Err(e) => Err(e),
+            };
+        }
         let (stat, disk) = self.lookup_name(dir.ino, name)?;
         let mut st = self.lock();
         self.adopt(&mut st, stat.ino);
@@ -665,31 +710,76 @@ impl Vfs {
             Err(Errno::ENOENT) => None,
             Err(e) => return Err(e),
         };
-        let r = match &target {
-            // Case-only rename of the entry onto itself: a plain rename to
-            // the new spelling (a no-op if the spelling is unchanged).
-            Some((t, _)) if t.ino == src.ino && odir.ino == ndir.ino => {
-                self.mount.rename(odir.ino, &odisk, ndir.ino, nlast, 0)
-            }
-            Some(_) if !replace => Err(Errno::EEXIST),
-            Some((_, tdisk)) => {
-                let r = self.mount.rename(odir.ino, &odisk, ndir.ino, tdisk, 0);
-                if r.is_ok() && tdisk.as_slice() != nlast {
-                    // Take the requested spelling.
-                    self.mount
-                        .rename(ndir.ino, tdisk, ndir.ino, nlast, abi::WFS_RENAME_NOREPLACE)
+        // Outcome for the name cache and fold index: the result, the name
+        // the source now has in ndir (if it moved), and the replaced entry
+        // (inode, disk name), if any.
+        type Outcome<'n> = (Result<(), Errno>, Option<&'n [u8]>, Option<(u64, &'n [u8])>);
+        let (r, added, replaced): Outcome<'_> = match &target {
+            // The target resolves to the source entry itself: a
+            // case-only respelling (a no-op if the spelling is unchanged).
+            Some((_, tdisk)) if odir.ino == ndir.ino && *tdisk == odisk => {
+                if nlast == odisk.as_slice() {
+                    (Ok(()), None, None)
                 } else {
-                    r
+                    let r = self.mount.rename(
+                        odir.ino,
+                        &odisk,
+                        ndir.ino,
+                        nlast,
+                        abi::WFS_RENAME_NOREPLACE,
+                    );
+                    (r, Some(nlast), None)
                 }
             }
-            None => self.mount.rename(odir.ino, &odisk, ndir.ino, nlast, flags),
+            Some(_) if !replace => (Err(Errno::EEXIST), None, None),
+            // Another name of the same inode (hard links): like
+            // rename(2), a successful no-op that keeps both names.
+            Some((t, _)) if t.ino == src.ino => (Ok(()), None, None),
+            Some((t, tdisk)) => {
+                let victim = Some((t.ino, tdisk.as_slice()));
+                match self.mount.rename(odir.ino, &odisk, ndir.ino, tdisk, 0) {
+                    Err(e) => (Err(e), None, None),
+                    Ok(()) if tdisk.as_slice() == nlast => (Ok(()), Some(nlast), victim),
+                    Ok(()) => {
+                        // Take the requested spelling. If that fails, the
+                        // replacement has still happened: report success
+                        // with the replaced entry's spelling.
+                        let respelled = self.mount.rename(
+                            ndir.ino,
+                            tdisk,
+                            ndir.ino,
+                            nlast,
+                            abi::WFS_RENAME_NOREPLACE,
+                        );
+                        let now = if respelled.is_ok() { nlast } else { tdisk };
+                        (Ok(()), Some(now), victim)
+                    }
+                }
+            }
+            None => {
+                let r = self.mount.rename(odir.ino, &odisk, ndir.ino, nlast, flags);
+                (r, Some(nlast), None)
+            }
         };
+        let names: Vec<&[u8]> = target
+            .iter()
+            .map(|(_, d)| d.as_slice())
+            .chain([nlast])
+            .collect();
         self.invalidate(odir.ino, &[&odisk]);
-        self.invalidate(ndir.ino, &[nlast]);
+        self.invalidate(ndir.ino, &names);
         let ok = r.is_ok();
-        self.ns_changed(odir.ino, ok, &[&odisk], None);
-        let replaced: Vec<&[u8]> = target.iter().map(|(_, d)| d.as_slice()).collect();
-        self.ns_changed(ndir.ino, ok, &replaced, Some(nlast));
+        if added.is_some() || !ok {
+            self.ns_changed(odir.ino, ok, &[&odisk], None);
+        }
+        let removed: Vec<&[u8]> = replaced.iter().map(|&(_, d)| d).collect();
+        if added.is_some() || !ok {
+            self.ns_changed(ndir.ino, ok, &removed, added);
+        }
+        if let Some((ino, _)) = replaced {
+            // A replaced (empty) directory's inode number may be reused.
+            self.lock().index.remove(&ino);
+        }
         r
     }
 

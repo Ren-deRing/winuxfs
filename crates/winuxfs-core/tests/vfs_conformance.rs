@@ -611,3 +611,114 @@ fn concurrent_threads_share_a_directory() {
         assert_eq!(names(&v, b"/shared"), want);
     }
 }
+
+// ---- fix round 1 ----
+
+fn read_path(v: &Vfs, p: &[u8]) -> Vec<u8> {
+    let (h, _) = v.open(p).unwrap();
+    let d = read_all(v, h);
+    v.close(h);
+    d
+}
+
+/// A case-insensitive Vfs over a directory that already holds names with
+/// equal folds (written case-sensitively): the exact name always wins, even
+/// after another spelling has been cached.
+#[test]
+fn case_insensitive_exact_match_wins_over_cache() {
+    let m = memfs();
+    {
+        let cs = Vfs::new(m.clone(), opts(false, false));
+        mkfile(&cs, b"/Foo", b"upper");
+        mkfile(&cs, b"/foo", b"lower");
+        mkdir(&cs, b"/D");
+        mkdir(&cs, b"/d");
+        mkfile(&cs, b"/Bar", b"B");
+        mkfile(&cs, b"/bar", b"b");
+    }
+    let v = Vfs::new(m, opts(true, false));
+    assert_eq!(read_path(&v, b"/Foo"), b"upper");
+    assert_eq!(read_path(&v, b"/foo"), b"lower");
+    assert_eq!(read_path(&v, b"/Foo"), b"upper");
+    // replace = false must not destroy the other file.
+    assert_eq!(v.rename(b"/Foo", b"/foo", false), Err(Errno::EEXIST));
+    assert_eq!(read_path(&v, b"/Foo"), b"upper");
+    assert_eq!(read_path(&v, b"/foo"), b"lower");
+    // unlink / rmdir hit the exact name, whatever is cached.
+    v.unlink(b"/foo").unwrap();
+    assert_eq!(read_path(&v, b"/Foo"), b"upper");
+    assert_eq!(read_path(&v, b"/FOO"), b"upper");
+    v.close(v.open(b"/D").unwrap().0);
+    v.rmdir(b"/d").unwrap();
+    assert!(names(&v, b"/").contains(&b"D".to_vec()));
+    assert_eq!(read_path(&v, b"/Bar"), b"B");
+    v.unlink(b"/bar").unwrap();
+    assert_eq!(
+        read_path(&v, b"/bar"),
+        b"B",
+        "falls back to the case variant"
+    );
+    assert_eq!(
+        names(&v, b"/"),
+        vec![b"Bar".to_vec(), b"D".to_vec(), b"Foo".to_vec()]
+    );
+}
+
+/// Hard links "a" and "B" of one inode: rename("/a", "/b") in
+/// case-insensitive mode is a no-op that keeps both names (rename(2)
+/// semantics for the same inode), and the fold index stays correct.
+#[test]
+fn case_insensitive_rename_between_hardlinks() {
+    let m = memfs();
+    let st = {
+        let cs = Vfs::new(m.clone(), opts(false, false));
+        mkfile(&cs, b"/a", b"data")
+    };
+    m.link(st.ino, ROOT_INO, b"B").unwrap();
+    let v = Vfs::new(m, opts(true, false));
+    v.rename(b"/a", b"/b", true).unwrap();
+    assert_eq!(names(&v, b"/"), vec![b"B".to_vec(), b"a".to_vec()]);
+    assert_eq!(v.rename(b"/a", b"/b", false), Err(Errno::EEXIST));
+    assert_eq!(read_path(&v, b"/b"), b"data");
+    assert_eq!(read_path(&v, b"/A"), b"data");
+    assert_eq!(names(&v, b"/"), vec![b"B".to_vec(), b"a".to_vec()]);
+}
+
+/// The open-table reference is forgotten exactly once, at the last close,
+/// not later (e.g. at drop).
+#[test]
+fn close_forgets_once_at_last_close() {
+    let c = Counting::new("vfs-close");
+    for ci in [false, true] {
+        let v = Vfs::new(c.mount(), opts(ci, false));
+        mkfile(&v, b"/u", b"x");
+        let hs: Vec<Handle> = (0..4).map(|_| v.open(b"/u").unwrap().0).collect();
+        v.unlink(b"/u").unwrap();
+        let f0 = c.forgotten();
+        for h in &hs[..3] {
+            v.close(*h);
+            assert_eq!(c.forgotten(), f0, "no forget before the last close");
+        }
+        v.close(hs[3]);
+        assert_eq!(c.forgotten(), f0 + 1, "one forget at the last close");
+        drop(v);
+        assert_eq!(c.forgotten(), c.taken());
+    }
+}
+
+#[test]
+fn case_insensitive_rename_replace_takes_requested_spelling() {
+    let v = vfs(true);
+    mkfile(&v, b"/x", b"new");
+    mkfile(&v, b"/Y", b"old");
+    v.rename(b"/x", b"/y", true).unwrap();
+    assert_eq!(names(&v, b"/"), vec![b"y".to_vec()]);
+    assert_eq!(read_path(&v, b"/Y"), b"new");
+    // Over an existing empty directory, with another spelling.
+    mkdir(&v, b"/Src");
+    mkdir(&v, b"/Dst");
+    v.rename(b"/Src", b"/dST", true).unwrap();
+    assert_eq!(names(&v, b"/"), vec![b"dST".to_vec(), b"y".to_vec()]);
+    mkfile(&v, b"/DST/In", b"i");
+    assert_eq!(read_path(&v, b"/dst/IN"), b"i");
+}
