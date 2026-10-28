@@ -5,6 +5,7 @@
 //! one `CreateFileW` fails with `ERROR_ACCESS_DENIED`, reported as `EACCES`.
 
 use std::alloc::{self, Layout};
+use std::mem::offset_of;
 use std::ptr;
 use std::sync::Arc;
 
@@ -24,7 +25,7 @@ use windows_sys::Win32::System::Ioctl::{
     IOCTL_DISK_GET_DISK_ATTRIBUTES, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
     IOCTL_DISK_SET_DISK_ATTRIBUTES, SET_DISK_ATTRIBUTES, VOLUME_DISK_EXTENTS,
 };
-use windows_sys::Win32::System::SystemInformation::GetWindowsDirectoryW;
+use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
 use windows_sys::Win32::System::IO::{DeviceIoControl, OVERLAPPED};
 use winuxfs_core::{AlignedDevice, BlockDevice, Errno};
 
@@ -68,13 +69,13 @@ impl Drop for Handle {
     }
 }
 
-fn open_path(path: &str, access: u32, flags: u32) -> Result<Handle, Errno> {
+fn open_path(path: &str, access: u32, share: u32, flags: u32) -> Result<Handle, Errno> {
     let w = wide(path);
     let h = unsafe {
         CreateFileW(
             w.as_ptr(),
             access,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            share,
             ptr::null(),
             OPEN_EXISTING,
             flags,
@@ -112,15 +113,23 @@ fn ioctl<I, O>(
     }
 }
 
-/// Numbers of the disks that hold the volume of the Windows directory.
+/// Numbers of the disks that hold the volume of the system Windows
+/// directory (`GetSystemWindowsDirectoryW`, correct also under Terminal
+/// Services). Only that volume is covered: a separate ESP or pagefile disk
+/// is not detected.
 fn system_disk_numbers() -> Result<Vec<u32>, Errno> {
     let mut dir = [0u16; 261];
-    let n = unsafe { GetWindowsDirectoryW(dir.as_mut_ptr(), dir.len() as u32) } as usize;
+    let n = unsafe { GetSystemWindowsDirectoryW(dir.as_mut_ptr(), dir.len() as u32) } as usize;
     if n < 2 || n >= dir.len() || dir[1] != u16::from(b':') {
         return Err(Errno::EIO);
     }
     let letter = char::from_u32(u32::from(dir[0])).ok_or(Errno::EIO)?;
-    let vol = open_path(&format!(r"\\.\{letter}:"), 0, 0)?;
+    let vol = open_path(
+        &format!(r"\\.\{letter}:"),
+        0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        0,
+    )?;
     // Room for 32 extents (a spanned system volume is already exotic).
     #[repr(C)]
     struct Extents {
@@ -128,13 +137,20 @@ fn system_disk_numbers() -> Result<Vec<u32>, Errno> {
         more: [DISK_EXTENT; 31],
     }
     let mut ext: Extents = unsafe { std::mem::zeroed() };
-    ioctl::<(), _>(
+    let got = ioctl::<(), _>(
         &vol,
         IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
         None,
         Some(&mut ext),
     )?;
-    let count = (ext.head.NumberOfDiskExtents as usize).min(32);
+    let head = offset_of!(VOLUME_DISK_EXTENTS, Extents);
+    if (got as usize) < head {
+        return Err(Errno::EIO);
+    }
+    let count = ext.head.NumberOfDiskExtents as usize;
+    if count == 0 || count > 32 || (got as usize) < head + count * size_of::<DISK_EXTENT>() {
+        return Err(Errno::EIO);
+    }
     let base = ptr::addr_of!(ext.head.Extents) as *const DISK_EXTENT;
     Ok((0..count)
         .map(|i| unsafe { (*base.add(i)).DiskNumber })
@@ -161,26 +177,42 @@ impl WinDisk {
     /// Opens `\\.\PhysicalDrive<number>`. The result accepts unaligned
     /// requests (it is wrapped in [`AlignedDevice`]).
     ///
-    /// In write mode the disk is first taken offline (not persistently), so
-    /// Windows dismounts its volumes and leaves it alone; when the last
-    /// reference to the device is dropped the disk is brought back online,
-    /// but only if this call took it offline. Write mode is refused with
-    /// `EBUSY` for the disk that holds the Windows system volume. Without an
-    /// administrator token the open fails with `EACCES`.
+    /// Write mode is exclusive: the drive is opened sharing read access only,
+    /// so a second write-mode open of the same disk (from this or another
+    /// process) fails with `EBUSY` while the first device is alive; readers
+    /// may still open it. Order: system-disk guard, open the handle (the
+    /// exclusion point; a refused open changes nothing), read the geometry,
+    /// then, if the disk is online, take it offline (not persistently) so
+    /// Windows dismounts its volumes and leaves it alone. The open handle
+    /// stays valid after the disk goes offline. When the last reference to
+    /// the device is dropped the disk is brought back online, but only if
+    /// this call took it offline.
+    ///
+    /// Write mode is refused with `EBUSY` for the disk that holds the
+    /// Windows system volume (only that disk; see `system_disk_numbers`).
+    /// Without an administrator token the open fails with `EACCES`.
     pub fn open(number: u32, read_only: bool) -> Result<Arc<dyn BlockDevice>, Errno> {
         if !read_only && system_disk_numbers()?.contains(&number) {
             return Err(Errno::EBUSY);
         }
         let path = format!(r"\\.\PhysicalDrive{number}");
-        let (access, flags) = if read_only {
-            (GENERIC_READ, FILE_FLAG_NO_BUFFERING)
+        // A reader must share write access (a writer may hold the disk); a
+        // writer shares read only, which denies every other writer
+        // (ERROR_SHARING_VIOLATION -> EBUSY) before any state is changed.
+        let (access, share, flags) = if read_only {
+            (
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                FILE_FLAG_NO_BUFFERING,
+            )
         } else {
             (
                 GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ,
                 FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
             )
         };
-        let handle = open_path(&path, access, flags)?;
+        let handle = open_path(&path, access, share, flags)?;
 
         #[repr(C)]
         struct Geometry {
@@ -188,12 +220,17 @@ impl WinDisk {
             spare: [u8; 256],
         }
         let mut geo: Geometry = unsafe { std::mem::zeroed() };
-        ioctl::<(), _>(
+        let got = ioctl::<(), _>(
             &handle,
             IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
             None,
             Some(&mut geo),
         )?;
+        // DiskSize follows Geometry (and so BytesPerSector); both must be
+        // inside the returned bytes.
+        if (got as usize) < offset_of!(DISK_GEOMETRY_EX, DiskSize) + size_of::<i64>() {
+            return Err(Errno::EIO);
+        }
         let sector = geo.g.Geometry.BytesPerSector;
         let size = u64::try_from(geo.g.DiskSize).map_err(|_| Errno::EIO)?;
         if sector == 0 || !sector.is_power_of_two() || sector as usize > BUF_ALIGN {
@@ -209,12 +246,15 @@ impl WinDisk {
         };
         if !read_only {
             let mut cur = GET_DISK_ATTRIBUTES::default();
-            ioctl::<(), _>(
+            let got = ioctl::<(), _>(
                 &disk.handle,
                 IOCTL_DISK_GET_DISK_ATTRIBUTES,
                 None,
                 Some(&mut cur),
             )?;
+            if (got as usize) < size_of::<GET_DISK_ATTRIBUTES>() {
+                return Err(Errno::EIO);
+            }
             if cur.Attributes & DISK_ATTRIBUTE_OFFLINE == 0 {
                 set_offline(&disk.handle, true)?;
                 disk.restore_online = true;

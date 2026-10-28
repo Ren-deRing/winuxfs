@@ -171,6 +171,33 @@ fn disk_returns_online_after_drop() {
 }
 
 #[test]
+fn second_writer_is_busy() {
+    let _g = lock();
+    let n = pattern_disk();
+    let before = is_offline(n);
+    let first = WinDisk::open(n, false).unwrap();
+    assert!(is_offline(n));
+    // A second writer is refused and leaves the offline state alone.
+    assert_eq!(WinDisk::open(n, false).err(), Some(Errno::EBUSY));
+    assert!(
+        is_offline(n),
+        "failed second open changed the offline state"
+    );
+    // Readers may still open the disk next to the writer.
+    let reader = WinDisk::open(n, true).unwrap();
+    assert_eq!(block_number(&*reader, 100), 100);
+    drop(reader);
+    assert!(is_offline(n));
+    drop(first);
+    assert_eq!(is_offline(n), before);
+    // Once the first writer is gone, write mode works again.
+    let again = WinDisk::open(n, false).unwrap();
+    assert!(is_offline(n));
+    drop(again);
+    assert_eq!(is_offline(n), before);
+}
+
+#[test]
 fn system_disk_write_refused() {
     let _g = lock();
     let n = system_disk();
