@@ -100,3 +100,16 @@ fn volume_params_flag_bits() {
     assert_eq!(volume_flags::POST_DISPOSITION_WHEN_NECESSARY_ONLY, 1 << 30);
     assert_eq!(volume_flags_v1::EA_TIMEOUT_VALID, 1 << 4);
 }
+
+#[test]
+fn open_file_info_layout() {
+    // The file info (0..72), then the normalized-name buffer pointer (72)
+    // and its size in bytes, a u16 (80); padded to 8.
+    assert_eq!(offset_of!(FSP_FSCTL_OPEN_FILE_INFO, file_info), 0);
+    assert_eq!(offset_of!(FSP_FSCTL_OPEN_FILE_INFO, normalized_name), 72);
+    assert_eq!(
+        offset_of!(FSP_FSCTL_OPEN_FILE_INFO, normalized_name_size),
+        80
+    );
+    assert_eq!(size_of::<FSP_FSCTL_OPEN_FILE_INFO>(), 88);
+}
