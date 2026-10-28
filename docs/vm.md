@@ -220,3 +220,58 @@ Verified 2026-10-28 (build 26300):
   each test deletes leftover files of an earlier run before it starts.
   `ATTACH_VIRTUAL_DISK_FLAG_NO_LOCAL_HOST` cannot be used: the disk is then
   not surfaced, and `GetVirtualDiskPhysicalPath` fails with error 55.
+
+## M1 acceptance observations
+
+Milestone 1 acceptance (`tools/check.sh --vm`, see below) was run on
+2026-10-28 against the `clean` snapshot. The plan asks for a manual Explorer
+check; the scripted equivalent is `tools/m1-acceptance.bat`, which mounts
+memfs with the CLI and exercises it with `cmd.exe` in one logon session (a
+drive letter exists only in the session of the mounting process, see above).
+Output observed in the VM (build 26300, WinFsp 2.1), with the drive letter
+`Y:` (never `Z:`, which is the Samba share):
+
+- `winuxfs mount Y: none --type memfs` appeared within the first poll;
+  `vol Y:` printed `Volume in drive Y is memfs`.
+- `mkdir Y:\docs`, `mkdir Y:\docs\sub`, and two `echo ... > file` writes
+  succeeded. `dir Y:\ /s` listed `docs`, `docs\a.txt` (20 bytes),
+  `docs\sub\b.txt` (13 bytes), `.` and `..` in the subfolders, and
+  1,073,733,632 bytes free (memfs's 1 GiB cap).
+- `type` printed back `hello from winuxfs` and `second file`.
+- `ren Y:\docs\a.txt renamed.txt` and `ren Y:\docs\sub inner`: `dir` showed
+  the new names with the same sizes, and `type` on the new paths returned the
+  same contents.
+- `move Y:\docs\renamed.txt Y:\moved.txt` moved the file across folders
+  (`1 file(s) moved`; 20 bytes at the root).
+- `del`, `rmdir /s /q` and `rmdir` removed everything; the final `dir Y:\`
+  printed `File Not Found` (empty volume).
+- `winuxfs unmount Y:` printed `Unmounted Y:.`; `Y:` was gone afterwards and
+  the mount process exited with the same message.
+
+### `tools/check.sh --vm`
+
+Runs the host checks (`cargo fmt --check`, clippy with `-D warnings`, tests,
+the Python tests, `cargo deny check`), then `tools/build.sh windows`, restores
+the `clean` snapshot, attaches the 64 MiB pattern disk (`tools/mkdisk.py`),
+pushes `winuxfs.exe`, the memfs and testplug DLLs and every test executable
+of `winuxfs-win` to `C:\t16`, and runs each one over SSH. Any failure gives a
+nonzero exit; the VM is stopped at the end only if the script started it.
+In a git worktree there is no `vm/` state: set `WINUXFS_VMCTL` to the main
+checkout's `tools/vmctl.py`. Result of the run: all of `e2e_cli` (9),
+`e2e_conformance` (3), `e2e_disk` (9, 1 ignored helper), `e2e_read` (17),
+`e2e_write` (23), `ffi_layout` (8) and `ffi_smoke` (5) passed.
+
+### Visual Explorer check (manual)
+
+1. `tools/vmctl.py up`, then open <http://127.0.0.1:8006> in a browser and
+   log in to the desktop.
+2. Copy `winuxfs.exe` and `winuxfs_backend_memfs.dll` into one folder in the
+   VM (for example `tools/vmctl.py push` them, then copy from
+   `\\host.lan\Data\...`).
+3. In a terminal in the VM, run
+   `winuxfs mount Y: none --type memfs --plugin-dir .` and leave it open.
+   Use `Y:`, not `Z:`.
+4. In Explorer, open `Y:`; create a folder and a text file, rename both,
+   delete them. Press Ctrl-C in the terminal (or run `winuxfs unmount Y:`)
+   to unmount.
+5. `tools/vmctl.py down`. To discard changes, `tools/vmctl.py restore clean`.
