@@ -23,7 +23,9 @@
  *     input cookie, ino 0, empty name, name with NUL, name with '/', 256-byte
  *     name, 255-byte name (21, valid). lookup(1,"cyc") = dir 22 and
  *     lookup(1,"dots") = dir 23 list cookie chains 1,2,1 (looping forever).
+ *   Mount option "unmount=err": the backend unmount (after freeing) returns EIO.
  *   testplug_unmount_count() counts unmount calls.
+ *   testplug_calls() counts getattr/lookup/forget/readdir/read/statfs calls.
  *   testplug_bad_forgets() sums forget(n) calls on the bogus inodes 7 and 8.
  *   testplug_accepted_after_bad() counts callbacks after the bad readdir(6)
  *     entry that returned 0 (i.e. asked for more).
@@ -48,12 +50,13 @@ static void nap(void) { Sleep(2); }
 static void nap(void) { struct timespec t = {0, 2000000}; nanosleep(&t, 0); }
 #endif
 
-struct wfs_fs { char content[6]; int root_mode; };
+struct wfs_fs { char content[6]; int root_mode; int unmount_err; };
 enum { ROOT_DIR = 0, ROOT_FILE, ROOT_ERR };
 
-static atomic_int unmounts, inflight, overlaps, bad_forgets, accepted_after_bad;
+static atomic_int calls, unmounts, inflight, overlaps, bad_forgets, accepted_after_bad;
 
 WFS_EXPORT int testplug_unmount_count(void) { return atomic_load(&unmounts); }
+WFS_EXPORT int testplug_calls(void) { return atomic_load(&calls); }
 WFS_EXPORT int testplug_overlaps(void) { return atomic_load(&overlaps); }
 WFS_EXPORT int testplug_bad_forgets(void) { return atomic_load(&bad_forgets); }
 WFS_EXPORT int testplug_accepted_after_bad(void) { return atomic_load(&accepted_after_bad); }
@@ -74,6 +77,7 @@ static wfs_err_t t_mount(const wfs_host_api *h, wfs_blkdev *d[WFS_DEV_COUNT], co
     wfs_fs *fs = malloc(sizeof *fs);
     if (!fs) return -WFS_ENOMEM;
     fs->root_mode = ROOT_DIR;
+    fs->unmount_err = o && strcmp(o, "unmount=err") == 0;
     if (o && strcmp(o, "root=file") == 0) fs->root_mode = ROOT_FILE;
     if (o && strcmp(o, "root=err") == 0) fs->root_mode = ROOT_ERR;
     if (o && strcmp(o, "nullfs") == 0) { free(fs); return 0; } /* bogus: rc 0, *out untouched */
@@ -84,11 +88,18 @@ static wfs_err_t t_mount(const wfs_host_api *h, wfs_blkdev *d[WFS_DEV_COUNT], co
     return 0;
 }
 
-static wfs_err_t t_unmount(wfs_fs *fs) { free(fs); atomic_fetch_add(&unmounts, 1); return 0; }
+static wfs_err_t t_unmount(wfs_fs *fs)
+{
+    int err = fs->unmount_err;
+    free(fs);
+    atomic_fetch_add(&unmounts, 1);
+    return err ? -WFS_EIO : 0;
+}
 
 static wfs_err_t t_statfs(wfs_fs *fs, wfs_statfs *s)
 {
     (void)fs;
+    atomic_fetch_add(&calls, 1);
     memset(s, 0, sizeof *s);
     s->total_bytes = 4096; s->free_bytes = s->avail_bytes = 0;
     s->total_inodes = 2; s->block_size = 512; s->name_max = 255;
@@ -107,6 +118,7 @@ static void fill(wfs_ino_t ino, wfs_stat *s)
 
 static wfs_err_t t_getattr(wfs_fs *fs, wfs_ino_t ino, wfs_stat *s)
 {
+    atomic_fetch_add(&calls, 1);
     if (ino == 1 && fs->root_mode == ROOT_ERR) return -WFS_EIO;
     if (ino == 1 && fs->root_mode == ROOT_FILE) { fill(2, s); s->ino = 1; return 0; }
     if (ino == 22 || ino == 23) { fill(1, s); s->ino = ino; return 0; }
@@ -127,6 +139,7 @@ static wfs_err_t t_getattr(wfs_fs *fs, wfs_ino_t ino, wfs_stat *s)
 static wfs_err_t t_lookup(wfs_fs *fs, wfs_ino_t dir, const char *n, uint32_t l, wfs_ino_t *out, wfs_stat *s)
 {
     (void)fs;
+    atomic_fetch_add(&calls, 1);
     if (dir == 2) return -WFS_ENOTDIR;
     if (dir == 1 && l == 5 && memcmp(n, "badft", 5) == 0) {
         fill(2, s); s->ino = 7; s->ftype = 99; *out = 7;
@@ -147,6 +160,7 @@ static wfs_err_t t_lookup(wfs_fs *fs, wfs_ino_t dir, const char *n, uint32_t l, 
 static void t_forget(wfs_fs *fs, wfs_ino_t i, uint64_t n)
 {
     (void)fs;
+    atomic_fetch_add(&calls, 1);
     if (i == 7 || i == 8) atomic_fetch_add(&bad_forgets, (int)n);
 }
 
@@ -170,6 +184,7 @@ static wfs_err_t t_create(wfs_fs *fs, wfs_ino_t dir, const char *n, uint32_t l, 
 static wfs_err_t t_readdir(wfs_fs *fs, wfs_ino_t dir, uint64_t cookie, wfs_dirent_cb cb, void *ctx)
 {
     (void)fs;
+    atomic_fetch_add(&calls, 1);
     if (dir == 5) {
         for (uint64_t i = 0; i < 1000; i++) {
             wfs_dirent e = { .next_cookie = i + 1, .ino = 2, .ftype = WFS_FT_REG, .name_len = 1, .name = "x" };
@@ -244,6 +259,7 @@ static wfs_err_t t_readdir(wfs_fs *fs, wfs_ino_t dir, uint64_t cookie, wfs_diren
 
 static wfs_err_t t_read(wfs_fs *fs, wfs_ino_t ino, uint64_t off, void *buf, size_t len, size_t *done)
 {
+    atomic_fetch_add(&calls, 1);
     if (ino == 4) { *done = len + 1; return 0; }
     if (ino == 1) return -WFS_EISDIR;
     if (ino != 2) return -WFS_ENOENT;
