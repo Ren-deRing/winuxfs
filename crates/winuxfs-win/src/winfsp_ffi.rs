@@ -2,12 +2,17 @@
 //! Hand-written declarations for the part of the WinFsp user-mode API that
 //! winuxfs uses.
 //!
-//! These are original declarations written from WinFsp's public API
-//! documentation (<https://winfsp.dev/doc/>) and the documented binary
-//! interface of `winfsp-x64.dll`. No WinFsp header text is included or
-//! generated here (see docs/licensing.md, section 3). Type names follow the
-//! WinFsp names so that the code can be checked against the documentation;
-//! field names are Rust-style.
+//! Provenance: these declarations are written by hand in this repository's
+//! own style. The author of this module read the public WinFsp v2.1 headers
+//! to learn the layouts, flag bits and callback signatures (so this is not
+//! "from public documentation alone"), and the author of the adapter also
+//! read WinFsp's `fsop.c`, `dirctl.c` and `create.c` to learn behaviour. No
+//! WinFsp source text was copied or generated (reviewers found no verbatim
+//! runs); WinFsp headers are neither included nor used for bindgen. The
+//! layout facts (offsets, flag values) necessarily match the headers. See
+//! docs/licensing.md, section 3. Type names follow the WinFsp names so that
+//! the code can be checked against the documentation; field names are
+//! Rust-style.
 //!
 //! This module has no Windows dependency: the types are plain data and are
 //! also compiled on Linux so that the layout tests run on the build host.

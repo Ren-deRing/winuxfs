@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """Build the block-device test pattern image.
 
 Every 4096-byte block starts with its block number as an 8-byte

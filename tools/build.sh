@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # Builds the Rust workspace and the C backend plugins (into target/plugins).
 set -euo pipefail
 cd "$(dirname "$0")/.."

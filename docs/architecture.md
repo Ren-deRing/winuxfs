@@ -77,13 +77,34 @@ Known gaps, from the review ledger:
 - Plugin `SINGLE_THREADED` lock is per loaded plugin object, not per dlopen
   instance; readdir entries with `ino == 0` are not checked.
 - Once the CLI's Ctrl handler is installed, Ctrl-C cannot interrupt a blocking
-  device open or probe; `unmount X:` exits 0 silently when the old process
-  still holds its stop event.
+  device open or probe.
 - `--log` / `--rt` cannot select a partition.
 - Disk access: write mode sets the disk offline non-persistently (a killed
-  process leaves it offline until reboot); 4096-byte-sector devices are not
+  process leaves it offline until reboot; see "Operational notes" below); 4096-byte-sector devices are not
   exercised end to end; the bounce buffer is allocated per I/O.
 - VM rig: `install.bat` still runs `sc query WinFsp`; snapshot/restore are not
   atomic; no checksums for the downloaded MSIs.
 - `tools/test_part_xcheck.sh` (sgdisk cross-check) has never run on this host.
 - WinFsp license option A-D is undecided (README, `docs/licensing.md`).
+
+## Operational notes
+
+- **Plugin directory and privileges.** Backend plugins are loaded from
+  `<exe>/plugins` (plus any `WINUXFS_PLUGIN_PATH`) into the winuxfs process,
+  which is elevated when it mounts a physical disk. A plugin is native code
+  that runs with those privileges, so the directory must not be writable by
+  unprivileged users: install winuxfs under `C:\Program Files` (or another
+  administrator-only location) and do not set `WINUXFS_PLUGIN_PATH` to a
+  user-writable directory.
+- **Killed process and an offline disk.** Write mounts of a physical disk set
+  it offline (non-persistently) and bring it online again when the mount ends
+  normally, including Ctrl-C and `winuxfs unmount`. If the process is killed
+  (`taskkill /f`, power loss of the session), the disk stays offline and the
+  next write mount reports it as already offline without restoring it. Recover
+  by hand from an elevated prompt:
+  `powershell -Command "Set-Disk -Number N -IsOffline $false"` or, in
+  `diskpart`, `select disk N` then `online disk`. A `winuxfs online` helper
+  is not provided in M1.
+- **`unmount` of nothing.** `winuxfs unmount X:` exits with the usage error
+  code and prints "Nothing is mounted by winuxfs on X:" when no process serves
+  X: (also when only a stale stop event of a killed process remains).

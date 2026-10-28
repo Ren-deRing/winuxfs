@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Usage: tools/check.sh [--vm]
 #   (no flag)  fast host checks.
 #   --vm       the same, then the full Milestone 1 acceptance: Windows
 #              cross-build, VM restored to snapshot `clean`, every Windows
-#              test executable of winuxfs-win run in the VM (e2e_*, ffi_*).
+#              test executable (integration tests e2e_*, ffi_* and the
+#              lib/bin unit tests of winuxfs-win and winuxfs-cli) run in the VM.
 #              WINUXFS_VMCTL overrides the vmctl.py to use (a worktree has no
 #              vm/ state; point it at the main checkout's tools/vmctl.py).
 vm=0
@@ -19,6 +21,19 @@ cargo clippy --workspace -- -D warnings
 cargo test --workspace
 python3 -m unittest tools/test_license_scan.py
 python3 -m unittest tools/test_mkdisk.py
+# Windows-only code is never compiled by the host run above: check and lint
+# it for the Windows target too (skipped with a note if the target or the
+# mingw linker is missing).
+WINTARGET=x86_64-pc-windows-gnu
+if rustup target list --installed 2>/dev/null | grep -qx "$WINTARGET" \
+    && command -v x86_64-w64-mingw32-gcc >/dev/null; then
+  for p in winuxfs-core winuxfs-conformance winuxfs-win winuxfs-cli; do
+    cargo check -p "$p" --target "$WINTARGET" --all-targets
+    cargo clippy -p "$p" --target "$WINTARGET" --all-targets -- -D warnings
+  done
+else
+  echo "NOTE: Windows target checks skipped ($WINTARGET or x86_64-w64-mingw32-gcc not installed)"
+fi
 # Both need the winuxfs binary, which cargo test above builds.
 export WINUXFS_BIN="${CARGO_TARGET_DIR:-target}/debug/winuxfs"
 python3 -m unittest tools/test_cli_errors.py
@@ -44,11 +59,12 @@ echo "== Windows cross-build"
 tools/build.sh windows
 WIN=target/x86_64-pc-windows-gnu/debug
 make -C backends/testplug CC="${MINGW_CC:-x86_64-w64-mingw32-gcc}" EXT=dll OUT="$PWD/target/test-plugins-win"
-# Test executables of winuxfs-win (e2e_*, ffi_*), located via cargo's JSON.
+# Test executables (integration tests and the lib/bin unit tests) of
+# winuxfs-win and winuxfs-cli, located via cargo's JSON.
 STAGE=target/vm-stage
 rm -rf "$STAGE"
 mkdir -p "$STAGE/testplug"
-cargo test -p winuxfs-win --target x86_64-pc-windows-gnu --no-run \
+cargo test -p winuxfs-win -p winuxfs-cli --target x86_64-pc-windows-gnu --no-run \
   --message-format=json > target/vm-tests.json
 python3 -I - target/vm-tests.json "$STAGE" <<'PY'
 import json, shutil, sys
@@ -59,8 +75,15 @@ for line in open(sys.argv[1]):
     except ValueError:
         continue
     if m.get("reason") == "compiler-artifact" and m.get("executable") \
-            and m["target"]["kind"] == ["test"]:
-        shutil.copy2(m["executable"], f"{sys.argv[2]}/{m['target']['name']}.exe")
+            and m["profile"]["test"]:
+        # winuxfs-cli's integration tests are host tests (they build a C
+        # plugin with make): only its unit tests run in the VM.
+        if "winuxfs-cli" in m["package_id"] and m["target"]["kind"] == ["test"]:
+            continue
+        # The file name carries cargo's hash, so the unit-test executable of
+        # the winuxfs bin cannot collide with winuxfs.exe.
+        dst = m["executable"].rsplit("/", 1)[-1]
+        shutil.copy2(m["executable"], f"{sys.argv[2]}/{dst}")
         n += 1
 if n == 0:
     sys.exit("no test executables found")

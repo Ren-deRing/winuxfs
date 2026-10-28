@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 """Unit tests for tools/vmctl.py that run without a VM.
 
 Run with: python3 -m unittest tools/test_vmctl.py

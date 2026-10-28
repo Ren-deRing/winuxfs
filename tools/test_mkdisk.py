@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 """Tests for tools/mkdisk.py.
 
 Run from the repo root:  python3 -m unittest tools/test_mkdisk.py

@@ -45,7 +45,7 @@ mount use `Y:` and `X:`, never `Z:` (the VM's share). No Wine is used.
 
 ## License
 
-The project is licensed GPL-2.0-only, to match the Linux XFS code that
+License: GPL-2.0-only, see `LICENSE`. The project is licensed GPL-2.0-only, to match the Linux XFS code that
 Milestone 2 ports (a scan of kernel `fs/xfs` found only GPL-2.0-only,
 GPL-2.0-or-later and one LGPL-2.1 file; details in `docs/licensing.md`).
 GPL-3.0-only code is not mixed into the project or its binaries, and the

@@ -1,3 +1,4 @@
+REM SPDX-License-Identifier: GPL-2.0-only
 @echo off
 rem Scripted equivalent of the Explorer check (docs/vm.md, "M1 acceptance
 rem observations"). Run in the VM from the directory holding winuxfs.exe and

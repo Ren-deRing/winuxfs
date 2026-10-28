@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """Control the winuxfs Windows test VM (dockur/windows under podman).
 
 Subcommands: up, down, kill, run, push, attach-disk, snapshot, restore, status.
