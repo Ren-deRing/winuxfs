@@ -342,7 +342,7 @@ mod win {
     use winuxfs_win::{mount_vfs, MountOptions, WinFsp};
 
     use super::{MountArgs, OpenDevices};
-    use crate::common::{errno_text, CliError, EXIT_PRIVILEGE};
+    use crate::common::{errno_text, finish_vfs, CliError, EXIT_PRIVILEGE};
 
     /// How long `unmount` waits for the serving process to finish.
     const UNMOUNT_TIMEOUT_MS: u32 = 30_000;
@@ -576,7 +576,8 @@ mod win {
     /// WaitForSingleObject cannot unwind, and nothing here can panic.
     ///
     /// Ctrl-C/Ctrl-Break: signal stop and report the event as handled; the
-    /// main thread unmounts and exits with 0. Close/logoff/shutdown: the
+    /// main thread unmounts and exits with 0 (or EXIT_UNMOUNT if the final
+    /// write-back failed). Close/logoff/shutdown: the
     /// process ends when this returns, so wait (bounded) for teardown.
     unsafe extern "system" fn on_ctrl(kind: u32) -> BOOL {
         let stop = STOP.load(Ordering::SeqCst);
@@ -636,6 +637,8 @@ mod win {
             .mount(devs.devices(), &a.options)
             .map_err(|e| mount_failed(a, backend, e))?;
         let vfs = Arc::new(Vfs::new(Arc::new(mount), vfs_opts));
+        // The adapter holds one reference; ours ends the session below.
+        let session = vfs.clone();
         if claim.stop_requested() {
             return cancelled(claim);
         }
@@ -662,7 +665,13 @@ mod win {
         // Ordered teardown: mount point and dispatcher (closing the Vfs
         // handles Windows still held), Vfs and backend Mount, devices.
         drop(fs);
+        // The dispatcher is stopped and the handles are closed: now write
+        // everything back. A failure is the exit code, but the devices are
+        // still released.
+        let r = finish_vfs(&session, &claim.mount_point);
+        drop(session);
         drop(devs);
+        r?;
         say(format_args!("Unmounted {}.", claim.mount_point));
         Ok(())
     }

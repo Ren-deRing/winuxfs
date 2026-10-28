@@ -555,10 +555,16 @@ unsafe extern "C" fn readdir_cb(ctx: *mut c_void, ent: *const abi::wfs_dirent) -
 }
 
 impl Mount {
-    /// Calls into the backend, holding the serial lock if required.
-    fn call<R>(&self, f: impl FnOnce() -> R) -> R {
+    /// Calls into the backend, holding the serial lock if required. After
+    /// `unmount` the backend is gone: the call is refused with `EIO`
+    /// without reaching it. (The flag is checked under the serial lock that
+    /// `unmount` also takes, so a call cannot overlap the unmount itself.)
+    fn call<R>(&self, f: impl FnOnce() -> R) -> Result<R, Errno> {
         let _g = self.inner.guard();
-        f()
+        if self.unmounted.load(Ordering::SeqCst) {
+            return Err(Errno::EIO);
+        }
+        Ok(f())
     }
 
     fn ops(&self) -> &abi::wfs_ops {
@@ -568,7 +574,7 @@ impl Mount {
     pub fn getattr(&self, ino: u64) -> Result<Stat, Errno> {
         let f = self.ops().getattr.ok_or(Errno::ENOSYS)?;
         let mut st = zeroed_stat();
-        ret(self.call(|| unsafe { f(self.fs, ino, &mut st) }))?;
+        ret(self.call(|| unsafe { f(self.fs, ino, &mut st) })?)?;
         Stat::from_abi(&st)
     }
 
@@ -578,7 +584,9 @@ impl Mount {
         let len = entry_name_len(name)?;
         let mut st = zeroed_stat();
         let mut ino = 0;
-        ret(self.call(|| unsafe { f(self.fs, dir, name.as_ptr().cast(), len, &mut ino, &mut st) }))?;
+        ret(
+            self.call(|| unsafe { f(self.fs, dir, name.as_ptr().cast(), len, &mut ino, &mut st) })?
+        )?;
         self.child_stat(ino, &st)
     }
 
@@ -604,7 +612,8 @@ impl Mount {
 
     pub fn forget(&self, ino: u64, n: u64) {
         if let Some(f) = self.ops().forget {
-            self.call(|| unsafe { f(self.fs, ino, n) });
+            // After unmount there is nothing left to release.
+            let _ = self.call(|| unsafe { f(self.fs, ino, n) });
         }
     }
 
@@ -622,7 +631,7 @@ impl Mount {
             seen: HashSet::new(),
         };
         let p = &mut ctx as *mut ReaddirCtx as *mut c_void;
-        let r = self.call(|| unsafe { f(self.fs, dir, cookie, Some(readdir_cb), p) });
+        let r = self.call(|| unsafe { f(self.fs, dir, cookie, Some(readdir_cb), p) })?;
         ret(r)?;
         if ctx.bad {
             return Err(Errno::EIO);
@@ -635,7 +644,7 @@ impl Mount {
         let mut done = 0usize;
         let len = buf.len();
         let p = buf.as_mut_ptr().cast();
-        ret(self.call(|| unsafe { f(self.fs, ino, off, p, len, &mut done) }))?;
+        ret(self.call(|| unsafe { f(self.fs, ino, off, p, len, &mut done) })?)?;
         if done > len {
             return Err(Errno::EIO);
         }
@@ -646,7 +655,7 @@ impl Mount {
         let f = self.ops().write.ok_or(Errno::ENOSYS)?;
         let mut done = 0usize;
         let len = buf.len();
-        ret(self.call(|| unsafe { f(self.fs, ino, off, buf.as_ptr().cast(), len, &mut done) }))?;
+        ret(self.call(|| unsafe { f(self.fs, ino, off, buf.as_ptr().cast(), len, &mut done) })?)?;
         if done > len {
             return Err(Errno::EIO);
         }
@@ -680,20 +689,20 @@ impl Mount {
                 &mut ino,
                 &mut st,
             )
-        }))?;
+        })?)?;
         self.child_stat(ino, &st)
     }
 
     pub fn unlink(&self, dir: u64, name: &[u8]) -> Result<(), Errno> {
         let f = self.ops().unlink.ok_or(Errno::ENOSYS)?;
         let len = entry_name_len(name)?;
-        ret(self.call(|| unsafe { f(self.fs, dir, name.as_ptr().cast(), len) }))
+        ret(self.call(|| unsafe { f(self.fs, dir, name.as_ptr().cast(), len) })?)
     }
 
     pub fn rmdir(&self, dir: u64, name: &[u8]) -> Result<(), Errno> {
         let f = self.ops().rmdir.ok_or(Errno::ENOSYS)?;
         let len = entry_name_len(name)?;
-        ret(self.call(|| unsafe { f(self.fs, dir, name.as_ptr().cast(), len) }))
+        ret(self.call(|| unsafe { f(self.fs, dir, name.as_ptr().cast(), len) })?)
     }
 
     pub fn rename(
@@ -717,21 +726,21 @@ impl Mount {
                 nl,
                 flags,
             )
-        }))
+        })?)
     }
 
     /// Applies the fields of `attrs` selected by `mask` (`WFS_SET_*`).
     pub fn setattr(&self, ino: u64, attrs: &Stat, mask: u32) -> Result<(), Errno> {
         let f = self.ops().setattr.ok_or(Errno::ENOSYS)?;
         let st = attrs.to_abi();
-        ret(self.call(|| unsafe { f(self.fs, ino, &st, mask) }))
+        ret(self.call(|| unsafe { f(self.fs, ino, &st, mask) })?)
     }
 
     pub fn statfs(&self) -> Result<Statfs, Errno> {
         let f = self.ops().statfs.ok_or(Errno::ENOSYS)?;
         // SAFETY: wfs_statfs is plain integers; all-zero is valid.
         let mut s: abi::wfs_statfs = unsafe { MaybeUninit::zeroed().assume_init() };
-        ret(self.call(|| unsafe { f(self.fs, &mut s) }))?;
+        ret(self.call(|| unsafe { f(self.fs, &mut s) })?)?;
         Ok(Statfs {
             total_bytes: s.total_bytes,
             free_bytes: s.free_bytes,
@@ -745,12 +754,12 @@ impl Mount {
 
     pub fn sync(&self) -> Result<(), Errno> {
         let f = self.ops().sync.ok_or(Errno::ENOSYS)?;
-        ret(self.call(|| unsafe { f(self.fs) }))
+        ret(self.call(|| unsafe { f(self.fs) })?)
     }
 
     pub fn fsync(&self, ino: u64, datasync: bool) -> Result<(), Errno> {
         let f = self.ops().fsync.ok_or(Errno::ENOSYS)?;
-        ret(self.call(|| unsafe { f(self.fs, ino, datasync as c_int) }))
+        ret(self.call(|| unsafe { f(self.fs, ino, datasync as c_int) })?)
     }
 
     /// Adds the name `name` in `ndir` for the existing inode `ino`. Returns no
@@ -758,7 +767,7 @@ impl Mount {
     pub fn link(&self, ino: u64, ndir: u64, name: &[u8]) -> Result<(), Errno> {
         let f = self.ops().link.ok_or(Errno::ENOSYS)?;
         let len = entry_name_len(name)?;
-        ret(self.call(|| unsafe { f(self.fs, ino, ndir, name.as_ptr().cast(), len) }))
+        ret(self.call(|| unsafe { f(self.fs, ino, ndir, name.as_ptr().cast(), len) })?)
     }
 
     /// Creates a symlink; like `create`, the result carries one reference.
@@ -788,7 +797,7 @@ impl Mount {
                 &mut ino,
                 &mut st,
             )
-        }))?;
+        })?)?;
         self.child_stat(ino, &st)
     }
 
@@ -800,7 +809,7 @@ impl Mount {
         let mut len = 0usize;
         let cap = buf.len();
         let p = buf.as_mut_ptr().cast();
-        ret(self.call(|| unsafe { f(self.fs, ino, p, cap, &mut len) }))?;
+        ret(self.call(|| unsafe { f(self.fs, ino, p, cap, &mut len) })?)?;
         if len > cap {
             return Err(Errno::EIO);
         }
@@ -822,7 +831,10 @@ impl Mount {
             return Ok(());
         }
         let r = match self.inner.ops.unmount {
-            Some(f) => ret(self.call(|| unsafe { f(self.fs) })),
+            Some(f) => {
+                let _g = self.inner.guard();
+                ret(unsafe { f(self.fs) })
+            }
             None => Ok(()),
         };
         let mut flush = Ok(());

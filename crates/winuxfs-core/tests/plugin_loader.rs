@@ -5,6 +5,7 @@ use std::sync::Arc;
 use winuxfs_abi as abi;
 use winuxfs_core::hostapi::{host_api, BlkHandle};
 use winuxfs_core::plugin::*;
+use winuxfs_core::vfs::{Vfs, VfsOptions};
 use winuxfs_core::*;
 
 fn testplug() -> std::path::PathBuf {
@@ -688,4 +689,50 @@ fn unmount_flushes_writable_devices_only() {
         drop(m);
         assert_eq!(d.flushes.load(SeqCst), expect, "flush happens once");
     }
+}
+
+#[test]
+fn no_backend_call_after_unmount() {
+    let p = private_copy(&testplug(), "no-call-after-unmount");
+    let b = load_plugin(&p).unwrap();
+    let h = open_hooks(&p);
+    let m = b.mount(no_devs(), "").unwrap();
+    assert!(m.getattr(1).is_ok());
+    assert_eq!(m.unmount(), Ok(()));
+    let before = hook(&h, b"testplug_calls");
+    assert!(before > 0);
+    assert_eq!(m.getattr(1).err(), Some(Errno::EIO));
+    assert_eq!(m.lookup(1, b"hello").err(), Some(Errno::EIO));
+    assert_eq!(m.readdir(1, 0, 10).err(), Some(Errno::EIO));
+    assert_eq!(m.read(2, 0, &mut [0u8; 6]).err(), Some(Errno::EIO));
+    assert_eq!(m.statfs().err(), Some(Errno::EIO));
+    m.forget(2, 1);
+    assert_eq!(m.unmount(), Ok(()));
+    assert_eq!(hook(&h, b"testplug_calls"), before, "backend reached");
+    drop(m);
+    assert_eq!(hook(&h, b"testplug_calls"), before);
+    assert_eq!(hook(&h, b"testplug_unmount_count"), 1, "double unmount");
+}
+
+#[test]
+fn vfs_unmount_reports_backend_error_and_blocks_later_calls() {
+    let p = private_copy(&testplug(), "vfs-unmount-err");
+    let b = load_plugin(&p).unwrap();
+    let h = open_hooks(&p);
+    let m = Arc::new(b.mount(no_devs(), "unmount=err").unwrap());
+    let vfs = Vfs::new(
+        m.clone(),
+        VfsOptions {
+            case_insensitive: false,
+            read_only: true,
+        },
+    );
+    assert_eq!(vfs.unmount(), Err(Errno::EIO));
+    assert_eq!(vfs.unmount(), Ok(()));
+    let before = hook(&h, b"testplug_calls");
+    assert_eq!(m.getattr(1).err(), Some(Errno::EIO));
+    assert_eq!(hook(&h, b"testplug_calls"), before);
+    drop(vfs);
+    drop(m);
+    assert_eq!(hook(&h, b"testplug_unmount_count"), 1);
 }

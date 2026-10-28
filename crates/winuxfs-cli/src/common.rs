@@ -12,6 +12,11 @@ use winuxfs_core::{BlockDevice, Errno};
 pub const EXIT_USAGE: i32 = 1;
 /// Exit code: the mount itself failed.
 pub const EXIT_MOUNT: i32 = 2;
+/// Exit code: the file system was served, but the final unmount (writing
+/// back data, flushing the devices) failed. Same value as [`EXIT_MOUNT`]:
+/// both mean the mount lifecycle failed.
+#[cfg(any(windows, test))]
+pub const EXIT_UNMOUNT: i32 = 2;
 /// Exit code: the user lacks the rights to open a device.
 pub const EXIT_PRIVILEGE: i32 = 3;
 
@@ -33,12 +38,35 @@ impl CliError {
         }
     }
 
+    #[cfg(any(windows, test))]
+    pub fn unmount(msg: impl Into<String>) -> CliError {
+        CliError {
+            code: EXIT_UNMOUNT,
+            msg: msg.into(),
+        }
+    }
+
     pub fn mount(msg: impl Into<String>) -> CliError {
         CliError {
             code: EXIT_MOUNT,
             msg: msg.into(),
         }
     }
+}
+
+/// Ends the Vfs session. Call it only after the WinFsp dispatcher is
+/// stopped and the handles Windows still held are closed (the `MountedFs`
+/// drop), and before the devices are closed. A failure (writing back,
+/// backend unmount or device flush) becomes an `EXIT_UNMOUNT` error.
+#[cfg(any(windows, test))]
+pub fn finish_vfs(vfs: &winuxfs_core::vfs::Vfs, mountpoint: &str) -> Result<(), CliError> {
+    vfs.unmount().map_err(|e| {
+        CliError::unmount(format!(
+            "Unmounting {mountpoint} failed ({}): data may not have been written back, \
+             so check the file system before using it again.",
+            errno_text(e)
+        ))
+    })
 }
 
 /// A few words for an errno, for messages.
@@ -110,8 +138,9 @@ pub fn open_error(name: &str, e: Errno) -> CliError {
             "Device {name} was not found: check the path or the disk number."
         )),
         Errno::EBUSY => CliError::mount(format!(
-            "Device {name} is in use by another program or holds the Windows \
-             system volume: close the program, or use --ro to open it read-only."
+            "Device {name} is in use by another program, is mounted read-write by \
+             another winuxfs, or holds the Windows system volume: close the program \
+             or unmount it, or use --ro if no winuxfs holds it read-write."
         )),
         e => CliError::usage(format!(
             "Opening device {name} failed ({}): check that it is a disk, a VHD/VHDX \
@@ -223,6 +252,65 @@ pub fn select_partition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // These tests build the plugin with make, which the Windows VM lacks.
+
+    /// Mounts the test plugin (built with make) with `opts` and wraps it.
+    #[cfg(not(windows))]
+    fn testplug_vfs(opts: &str) -> winuxfs_core::vfs::Vfs {
+        use winuxfs_core::plugin::{load_plugin, Devices};
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let out = root.join("target/cli-unit-plugins");
+        let ext = if cfg!(windows) { "dll" } else { "so" };
+        let st = std::process::Command::new("make")
+            .args(["-s", "-C"])
+            .arg(root.join("backends/testplug"))
+            .arg(format!("EXT={ext}"))
+            .arg(format!("OUT={}", out.display()))
+            .status()
+            .expect("run make");
+        assert!(st.success());
+        let b = load_plugin(&out.join(format!("winuxfs_backend_testplug.{ext}"))).unwrap();
+        let devs = Devices {
+            data: None,
+            log: None,
+            rt: None,
+        };
+        let m = b.mount(devs, opts).unwrap();
+        winuxfs_core::vfs::Vfs::new(
+            Arc::new(m),
+            winuxfs_core::vfs::VfsOptions {
+                case_insensitive: false,
+                read_only: false,
+            },
+        )
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn finish_vfs_reports_a_failed_backend_unmount() {
+        let v = testplug_vfs("unmount=err");
+        let e = finish_vfs(&v, "X:").unwrap_err();
+        assert_eq!(e.code, EXIT_UNMOUNT);
+        assert!(e.msg.starts_with("Unmounting X: failed"), "{}", e.msg);
+        assert_eq!(e.msg.matches(". ").count(), 0, "one sentence: {}", e.msg);
+        // A second call (and the drop) are quiet.
+        assert_eq!(finish_vfs(&v, "X:"), Ok(()));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn finish_vfs_ok_when_the_backend_unmounts_cleanly() {
+        let v = testplug_vfs("");
+        assert_eq!(finish_vfs(&v, "X:"), Ok(()));
+    }
+
+    #[test]
+    fn ebusy_message_names_both_causes() {
+        let e = open_error("d", Errno::EBUSY);
+        assert!(e.msg.contains("mounted read-write by another winuxfs"));
+        assert!(e.msg.contains("--ro"));
+    }
 
     #[test]
     fn guid_text_is_mixed_endian() {
