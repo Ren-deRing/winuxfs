@@ -637,6 +637,20 @@ impl Vfs {
         }
     }
 
+    /// Attributes of the entry `name` (an exact disk name, as `read_dir`
+    /// returns it) in the open directory `dir`, without opening it: the
+    /// backend reference taken by the lookup is forgotten before returning.
+    /// `name` must be a single component (`EINVAL` otherwise).
+    pub fn stat_at(&self, dir: Handle, name: &[u8]) -> Result<Stat, Errno> {
+        if name.is_empty() || name == b"." || name == b".." || name.contains(&b'/') {
+            return Err(Errno::EINVAL);
+        }
+        let ino = self.ino_of(dir)?;
+        let st = self.mount.lookup(ino, name)?;
+        self.mount.forget(st.ino, 1);
+        Ok(st)
+    }
+
     /// Resolves the disk name of `name` in `dir` (only differs from `name`
     /// in case-insensitive mode). The returned pin keeps the child alive
     /// while the caller operates on it.

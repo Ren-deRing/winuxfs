@@ -108,7 +108,13 @@ share `Data` on host name `host.lan`: in the VM it is `\\host.lan\Data`, also
 mapped as drive `Z:` and a `Shared` desktop shortcut for the logged-on user.
 `Z:` is not visible in SSH sessions (verified), so over SSH use the UNC path.
 (Plan Task 12 mentions `dir Z:\`; there `Z:` means a drive winuxfs mounts, and
-it should pick a free letter other than the desktop's share mapping.)
+it should pick a free letter other than the desktop's share mapping; the
+adapter tests use `Y:`.) A drive letter that a non-service process mounts
+through WinFsp exists only in that process's logon session, and every SSH
+connection is a new logon session, so `vmctl.py run -- dir Y:\` from a second
+connection is not expected to see a mount held by another (WinFsp defines
+the letter with `DefineDosDevice`; not verified separately); `tests/e2e_read.rs` runs
+`cmd /c dir Y:\` from inside the test process instead.
 
 **Second disk.** `DISK2_SIZE` + a `/storage2` mount makes dockur create
 `/storage2/data2.img` (raw; `.qcow2` with `DISK_FMT=qcow2`). If

@@ -13,6 +13,7 @@ winuxfs-core = { path = "../winuxfs-core" }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_Storage_Vhd",
     "Win32_System_IO",
@@ -20,4 +21,5 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
+    "Win32_System_Threading",
 ] }
