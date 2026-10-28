@@ -20,6 +20,16 @@ cargo fmt --check
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
 tools/vendor-xfs.sh --verify
+if command -v gcc >/dev/null; then
+  make -s -C backends/xfs test-shim
+else
+  echo "SKIPPED: backends/xfs shim test (gcc not installed)"
+fi
+if command -v x86_64-w64-mingw32-gcc >/dev/null; then
+  make -s -C backends/xfs CROSS=x86_64-w64-mingw32- test-shim-build
+else
+  echo "SKIPPED: backends/xfs mingw shim build (x86_64-w64-mingw32-gcc not installed)"
+fi
 python3 -I tools/license-scan.py --check-allowed third_party/linux-xfs
 python3 -m unittest tools/test_license_scan.py
 python3 -m unittest tools/test_mkdisk.py
