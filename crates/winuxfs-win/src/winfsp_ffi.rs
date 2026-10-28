@@ -11,12 +11,18 @@
 //!
 //! This module has no Windows dependency: the types are plain data and are
 //! also compiled on Linux so that the layout tests run on the build host.
-//! Only 64-bit targets are supported; `tests/ffi_layout.rs` pins every size.
+//! Only 64-bit targets are supported (a `compile_error!` enforces it). The
+//! sizes WinFsp guarantees are checked at compile time below, and
+//! `tests/ffi_layout.rs` also pins the field offsets.
 // The callback table spells out each C signature in place so it can be
 // compared with the documentation slot by slot.
 #![allow(non_camel_case_types, clippy::type_complexity)]
 
 use core::ffi::c_void;
+use core::mem::size_of;
+
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("winuxfs supports only 64-bit targets (the WinFsp layouts here are 64-bit)");
 
 /// Windows `NTSTATUS`.
 pub type NTSTATUS = i32;
@@ -215,6 +221,11 @@ type FsPtr = *mut FSP_FILE_SYSTEM;
 
 /// The callback table. WinFsp calls through these from its dispatcher
 /// threads; `None` means "not supported". The table is fixed at 64 slots.
+///
+/// Lifetime: `FspFileSystemCreate` stores the pointer to this table, it does
+/// not copy it. The table must therefore stay at the same address, unchanged,
+/// until `FspFileSystemDelete` has returned for that file system (the adapter
+/// keeps it boxed inside its `MountedFs`).
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct FSP_FILE_SYSTEM_INTERFACE {
@@ -468,3 +479,11 @@ pub type FspFileSystemStopDispatcherFn = unsafe extern "system" fn(*mut FSP_FILE
 /// transferred in/out)`; returns false when the buffer is full.
 pub type FspFileSystemAddDirInfoFn =
     unsafe extern "system" fn(*mut FSP_FSCTL_DIR_INFO, *mut c_void, u32, *mut u32) -> BOOLEAN;
+
+// ---- sizes guaranteed by WinFsp (checked at compile time) ----
+const _: () = assert!(size_of::<FSP_FSCTL_VOLUME_PARAMS>() == 504);
+const _: () = assert!(size_of::<FSP_FSCTL_VOLUME_INFO>() == 88);
+const _: () = assert!(size_of::<FSP_FSCTL_FILE_INFO>() == 72);
+const _: () = assert!(size_of::<FSP_FSCTL_DIR_INFO>() == 104);
+const _: () = assert!(size_of::<FSP_FILE_SYSTEM_INTERFACE>() == 64 * size_of::<usize>());
+const _: () = assert!(core::mem::offset_of!(FSP_FILE_SYSTEM, user_context) == 8);

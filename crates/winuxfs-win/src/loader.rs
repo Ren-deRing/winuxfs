@@ -2,19 +2,29 @@
 //! Runtime loading of `winfsp-x64.dll`.
 //!
 //! winuxfs never links against WinFsp's import library: the DLL is found
-//! through the WinFsp install directory and loaded with `LoadLibraryW`, and
+//! through the WinFsp install directory and loaded by its absolute path with
+//! `LoadLibraryExW` (restricted search: the DLL's own directory and the
+//! default safe directories, never the current directory or `PATH`), and
 //! each function is looked up with `GetProcAddress` (docs/licensing.md,
 //! section 3). WinFsp itself is not bundled; the user installs it.
+//!
+//! The function pointers are private: they are only reachable through
+//! methods on [`WinFsp`], whose clones share one reference-counted module,
+//! so no pointer can outlive the `FreeLibrary` call.
 
 use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use windows_sys::Win32::Foundation::{FreeLibrary, GetLastError, HMODULE};
 use windows_sys::Win32::Storage::FileSystem::{
     GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO,
 };
-use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows_sys::Win32::System::LibraryLoader::{
+    GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+};
 use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
 
 use crate::winfsp_ffi::*;
@@ -73,11 +83,22 @@ fn registry_install_dir() -> Option<PathBuf> {
 }
 
 /// Finds `<InstallDir>\bin\winfsp-x64.dll`. `WINUXFS_WINFSP_DIR`, when set,
-/// replaces the registry lookup (used by tests and unusual installs).
+/// replaces the registry lookup (used by tests and unusual installs); it
+/// must be an absolute path (`C:\...` or `\\server\share\...`), otherwise
+/// [`WinFspError::InvalidOverride`]. A registry value that is not absolute
+/// is treated as "not installed".
 pub(crate) fn locate_dll() -> Result<PathBuf, WinFspError> {
     let dir = match std::env::var_os(WINFSP_DIR_ENV) {
-        Some(d) if !d.is_empty() => PathBuf::from(d),
-        _ => registry_install_dir().ok_or(WinFspError::NotInstalled)?,
+        Some(d) if !d.is_empty() => {
+            let d = PathBuf::from(d);
+            if !d.is_absolute() {
+                return Err(WinFspError::InvalidOverride);
+            }
+            d
+        }
+        _ => registry_install_dir()
+            .filter(|d| d.is_absolute())
+            .ok_or(WinFspError::NotInstalled)?,
     };
     let dll = dir.join("bin").join(DLL_NAME);
     if dll.is_file() {
@@ -89,30 +110,44 @@ pub(crate) fn locate_dll() -> Result<PathBuf, WinFspError> {
 
 /// A loaded `winfsp-x64.dll` and the entry points winuxfs uses.
 ///
-/// The function pointers stay valid for as long as this value lives; the DLL
-/// is released on drop, so anything that may still call into WinFsp
-/// (a running dispatcher, a live `FSP_FILE_SYSTEM`) must be torn down first.
+/// Cloning is cheap and shares the module; the DLL is released when the
+/// last clone is dropped. Anything that may still call into WinFsp (a
+/// running dispatcher, a live `FSP_FILE_SYSTEM`) must hold a clone, which
+/// is how the WinFsp adapter keeps the DLL loaded until it is torn down.
+#[derive(Clone)]
 pub struct WinFsp {
+    inner: Arc<Loaded>,
+}
+
+struct Loaded {
     module: HMODULE,
     dll_path: PathBuf,
-    pub file_system_create: FspFileSystemCreateFn,
-    pub file_system_delete: FspFileSystemDeleteFn,
-    pub file_system_set_mount_point: FspFileSystemSetMountPointFn,
-    pub file_system_remove_mount_point: FspFileSystemRemoveMountPointFn,
-    pub file_system_start_dispatcher: FspFileSystemStartDispatcherFn,
-    pub file_system_stop_dispatcher: FspFileSystemStopDispatcherFn,
-    pub file_system_add_dir_info: FspFileSystemAddDirInfoFn,
+    file_system_create: FspFileSystemCreateFn,
+    file_system_delete: FspFileSystemDeleteFn,
+    file_system_set_mount_point: FspFileSystemSetMountPointFn,
+    file_system_remove_mount_point: FspFileSystemRemoveMountPointFn,
+    file_system_start_dispatcher: FspFileSystemStartDispatcherFn,
+    file_system_stop_dispatcher: FspFileSystemStopDispatcherFn,
+    file_system_add_dir_info: FspFileSystemAddDirInfoFn,
 }
 
 // SAFETY: a module handle and plain function pointers into a loaded DLL may
 // be used from any thread; WinFsp's API is thread-safe for these calls.
-unsafe impl Send for WinFsp {}
-unsafe impl Sync for WinFsp {}
+unsafe impl Send for Loaded {}
+unsafe impl Sync for Loaded {}
+
+impl Drop for Loaded {
+    fn drop(&mut self) {
+        // SAFETY: module came from LoadLibraryExW; the fn pointers are only
+        // reachable through this value, which is going away.
+        unsafe { FreeLibrary(self.module) };
+    }
+}
 
 impl std::fmt::Debug for WinFsp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WinFsp")
-            .field("dll_path", &self.dll_path)
+            .field("dll_path", &self.inner.dll_path)
             .finish_non_exhaustive()
     }
 }
@@ -122,10 +157,7 @@ impl std::fmt::Debug for WinFsp {
 /// # Safety
 /// `F` must be a function pointer type matching the export's real signature.
 unsafe fn resolve<F: Copy>(module: HMODULE, name: &'static str) -> Result<F, WinFspError> {
-    debug_assert_eq!(
-        std::mem::size_of::<F>(),
-        std::mem::size_of::<unsafe extern "system" fn()>()
-    );
+    const { assert!(std::mem::size_of::<F>() == std::mem::size_of::<unsafe extern "system" fn()>()) };
     let cname: Vec<u8> = name.bytes().chain(Some(0)).collect();
     // SAFETY: module is a live handle and cname is NUL-terminated.
     let proc = unsafe { GetProcAddress(module, cname.as_ptr()) };
@@ -139,20 +171,29 @@ unsafe fn resolve<F: Copy>(module: HMODULE, name: &'static str) -> Result<F, Win
 impl WinFsp {
     /// Locates and loads the installed WinFsp DLL and resolves every entry
     /// point. Fails with [`WinFspError::NotInstalled`] when WinFsp is not
-    /// found and [`WinFspError::MissingSymbol`] when the DLL lacks a function.
+    /// found, [`WinFspError::InvalidOverride`] when `WINUXFS_WINFSP_DIR` is
+    /// not absolute and [`WinFspError::MissingSymbol`] when the DLL lacks a
+    /// function.
     pub fn load() -> Result<WinFsp, WinFspError> {
         let dll_path = locate_dll()?;
         let wpath = wide(&dll_path);
-        // SAFETY: wpath is a NUL-terminated absolute path.
-        let module = unsafe { LoadLibraryW(wpath.as_ptr()) };
+        // SAFETY: wpath is a NUL-terminated absolute path; the flags limit
+        // the DLL's own dependencies to its directory and the safe defaults.
+        let module = unsafe {
+            LoadLibraryExW(
+                wpath.as_ptr(),
+                std::ptr::null_mut(),
+                LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+            )
+        };
         if module.is_null() {
-            return Err(last_error("LoadLibraryW"));
+            return Err(last_error("LoadLibraryExW"));
         }
         // SAFETY: each type alias in winfsp_ffi matches the documented
         // signature of the export with the same name.
         let resolved = unsafe {
             (|| {
-                Ok::<_, WinFspError>(WinFsp {
+                Ok::<_, WinFspError>(Loaded {
                     module,
                     dll_path: dll_path.clone(),
                     file_system_create: resolve(module, "FspFileSystemCreate")?,
@@ -168,24 +209,111 @@ impl WinFsp {
                 })
             })()
         };
-        if resolved.is_err() {
-            // SAFETY: module came from LoadLibraryW and nothing from it is
-            // retained on this path.
-            unsafe { FreeLibrary(module) };
+        match resolved {
+            Ok(inner) => Ok(WinFsp {
+                inner: Arc::new(inner),
+            }),
+            Err(e) => {
+                // SAFETY: module came from LoadLibraryExW and nothing from it
+                // is retained on this path.
+                unsafe { FreeLibrary(module) };
+                Err(e)
+            }
         }
-        resolved
     }
 
     /// Full path of the loaded DLL.
     pub fn dll_path(&self) -> &Path {
-        &self.dll_path
+        &self.inner.dll_path
     }
-}
 
-impl Drop for WinFsp {
-    fn drop(&mut self) {
-        // SAFETY: module came from LoadLibraryW; the fn pointers die with self.
-        unsafe { FreeLibrary(self.module) };
+    /// `FspFileSystemCreate`.
+    ///
+    /// # Safety
+    /// `device` is a NUL-terminated UTF-16 string; `params` and `out` are
+    /// valid. `interface` must stay valid and unchanged until the file
+    /// system is deleted: WinFsp keeps the pointer, it does not copy the
+    /// table.
+    pub unsafe fn file_system_create(
+        &self,
+        device: PWSTR,
+        params: *const FSP_FSCTL_VOLUME_PARAMS,
+        interface: *const FSP_FILE_SYSTEM_INTERFACE,
+        out: *mut *mut FSP_FILE_SYSTEM,
+    ) -> NTSTATUS {
+        // SAFETY: forwarded to the caller.
+        unsafe { (self.inner.file_system_create)(device, params, interface, out) }
+    }
+
+    /// `FspFileSystemDelete` (also removes the mount point).
+    ///
+    /// # Safety
+    /// `fs` came from [`Self::file_system_create`] and is not used again.
+    pub unsafe fn file_system_delete(&self, fs: *mut FSP_FILE_SYSTEM) {
+        // SAFETY: forwarded to the caller.
+        unsafe { (self.inner.file_system_delete)(fs) }
+    }
+
+    /// `FspFileSystemSetMountPoint`.
+    ///
+    /// # Safety
+    /// `fs` is live; `mount_point` is NUL-terminated UTF-16 or null.
+    pub unsafe fn file_system_set_mount_point(
+        &self,
+        fs: *mut FSP_FILE_SYSTEM,
+        mount_point: PWSTR,
+    ) -> NTSTATUS {
+        // SAFETY: forwarded to the caller.
+        unsafe { (self.inner.file_system_set_mount_point)(fs, mount_point) }
+    }
+
+    /// `FspFileSystemRemoveMountPoint` (a no-op when none is set).
+    ///
+    /// # Safety
+    /// `fs` is live.
+    pub unsafe fn file_system_remove_mount_point(&self, fs: *mut FSP_FILE_SYSTEM) {
+        // SAFETY: forwarded to the caller.
+        unsafe { (self.inner.file_system_remove_mount_point)(fs) }
+    }
+
+    /// `FspFileSystemStartDispatcher` (0 threads = WinFsp's default).
+    ///
+    /// # Safety
+    /// `fs` is live and its callbacks are ready to be called.
+    pub unsafe fn file_system_start_dispatcher(
+        &self,
+        fs: *mut FSP_FILE_SYSTEM,
+        threads: u32,
+    ) -> NTSTATUS {
+        // SAFETY: forwarded to the caller.
+        unsafe { (self.inner.file_system_start_dispatcher)(fs, threads) }
+    }
+
+    /// `FspFileSystemStopDispatcher`: returns after every dispatcher thread
+    /// (and so every running callback) has finished.
+    ///
+    /// # Safety
+    /// `fs` is live; not called from a dispatcher thread.
+    pub unsafe fn file_system_stop_dispatcher(&self, fs: *mut FSP_FILE_SYSTEM) {
+        // SAFETY: forwarded to the caller.
+        unsafe { (self.inner.file_system_stop_dispatcher)(fs) }
+    }
+
+    /// `FspFileSystemAddDirInfo`: appends `entry` (or the end marker when
+    /// null) to `buf` at offset `*transferred`; false when it does not fit.
+    ///
+    /// # Safety
+    /// `buf` has `len` writable bytes; `entry` is null or a complete entry
+    /// whose `size` covers its name; `transferred` is valid.
+    pub unsafe fn add_dir_info(
+        &self,
+        entry: *mut FSP_FSCTL_DIR_INFO,
+        buf: *mut core::ffi::c_void,
+        len: u32,
+        transferred: *mut u32,
+    ) -> bool {
+        // SAFETY: forwarded to the caller.
+        unsafe { (self.inner.file_system_add_dir_info)(entry, buf, len, transferred) != 0 }
     }
 }
 

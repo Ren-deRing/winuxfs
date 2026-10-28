@@ -50,3 +50,52 @@ fn missing_install_dir_reports_not_installed() {
     );
     assert!(matches!(ver, Err(WinFspError::NotInstalled)), "{ver:?}");
 }
+
+#[test]
+fn relative_override_is_rejected() {
+    let _g = env_guard();
+    for dir in ["WinFsp", r"\Program Files (x86)\WinFsp", r"C:WinFsp"] {
+        std::env::set_var(WINFSP_DIR_ENV, dir);
+        let res = WinFsp::load();
+        std::env::remove_var(WINFSP_DIR_ENV);
+        assert!(
+            matches!(res, Err(WinFspError::InvalidOverride)),
+            "{dir}: {:?}",
+            res.err()
+        );
+    }
+}
+
+#[test]
+fn add_dir_info_wrapper_writes_end_marker() {
+    let _g = env_guard();
+    std::env::remove_var(WINFSP_DIR_ENV);
+    let fsp = WinFsp::load().unwrap();
+    let mut buf = [0xAAu8; 16];
+    let mut done = 0u32;
+    // SAFETY: a null entry asks for the end marker; buf has 16 bytes.
+    let ok = unsafe {
+        fsp.add_dir_info(
+            std::ptr::null_mut(),
+            buf.as_mut_ptr().cast(),
+            buf.len() as u32,
+            &mut done,
+        )
+    };
+    assert!(ok);
+    assert_eq!(done, 2);
+    assert_eq!(&buf[..3], &[0, 0, 0xAA]);
+    // A clone keeps the DLL loaded after the original is dropped.
+    let clone = fsp.clone();
+    drop(fsp);
+    let mut done = 0u32;
+    // SAFETY: as above.
+    assert!(unsafe {
+        clone.add_dir_info(
+            std::ptr::null_mut(),
+            buf.as_mut_ptr().cast(),
+            buf.len() as u32,
+            &mut done,
+        )
+    });
+}

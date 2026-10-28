@@ -47,6 +47,8 @@ pub const WINFSP_NOTICE: &str =
 pub enum WinFspError {
     /// No install directory was found, or it has no `bin\winfsp-x64.dll`.
     NotInstalled,
+    /// `WINUXFS_WINFSP_DIR` is set to a path that is not absolute.
+    InvalidOverride,
     /// The DLL lacks a required export.
     MissingSymbol(&'static str),
     /// A Win32 call failed with this error code.
@@ -60,6 +62,9 @@ impl std::fmt::Display for WinFspError {
                 f,
                 "WinFsp is not installed (install it from https://winfsp.dev/rel/)"
             ),
+            WinFspError::InvalidOverride => {
+                write!(f, "{WINFSP_DIR_ENV} must be an absolute path")
+            }
             WinFspError::MissingSymbol(s) => write!(f, "winfsp-x64.dll has no export {s}"),
             WinFspError::Os { what, code } => write!(f, "{what} failed: Win32 error {code}"),
         }
