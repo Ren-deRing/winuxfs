@@ -19,6 +19,8 @@ esac
 cargo fmt --check
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
+tools/vendor-xfs.sh --verify
+python3 -I tools/license-scan.py --check-allowed third_party/linux-xfs
 python3 -m unittest tools/test_license_scan.py
 python3 -m unittest tools/test_mkdisk.py
 # Windows-only code is never compiled by the host run above: check and lint
