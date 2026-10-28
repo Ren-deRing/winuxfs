@@ -10,3 +10,4 @@ vm/snapshots/
 vm/.ssh/
 .worktrees/
 __pycache__/
+tests/xfs/images/
