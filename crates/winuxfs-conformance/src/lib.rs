@@ -336,23 +336,7 @@ pub fn conf_case_insensitive_collision(fs: &dyn PathFs, dir: &str) {
 /// Maps a Linux errno to a portable `io::Error` (by kind, not by raw OS
 /// code, whose numbering differs on Windows).
 pub fn errno_to_io(e: Errno) -> io::Error {
-    let k = match e.0 {
-        1 | 13 => ErrorKind::PermissionDenied,
-        2 => ErrorKind::NotFound,
-        16 => ErrorKind::ResourceBusy,
-        17 => ErrorKind::AlreadyExists,
-        20 => ErrorKind::NotADirectory,
-        21 => ErrorKind::IsADirectory,
-        22 => ErrorKind::InvalidInput,
-        27 => ErrorKind::FileTooLarge,
-        28 => ErrorKind::StorageFull,
-        30 => ErrorKind::ReadOnlyFilesystem,
-        36 => ErrorKind::InvalidFilename,
-        38 => ErrorKind::Unsupported,
-        39 => ErrorKind::DirectoryNotEmpty,
-        _ => ErrorKind::Other,
-    };
-    io::Error::new(k, format!("errno {}", e.0))
+    io::Error::new(e.io_kind(), format!("errno {}", e.0))
 }
 
 /// [`PathFs`] over a [`Vfs`]; paths are UTF-8 Vfs paths (leading `/`).
