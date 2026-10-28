@@ -4,6 +4,7 @@ pub mod hostapi;
 pub mod namemap;
 pub mod part;
 pub mod plugin;
+pub mod vfs;
 
 pub use block::{AlignedDevice, BlockDevice, FileDevice, MemDevice};
 pub use error::Errno;

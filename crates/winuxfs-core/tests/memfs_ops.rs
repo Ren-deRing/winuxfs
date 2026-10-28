@@ -610,3 +610,31 @@ fn concurrent_creates_distinct_names() {
     let inos: HashSet<_> = ents.iter().map(|e| e.ino).collect();
     assert_eq!(inos.len(), 4000);
 }
+
+#[test]
+fn case_only_different_names_coexist() {
+    let m = memfs();
+    let a = mkfile(&m, ROOT_INO, b"a");
+    let b = mkfile(&m, ROOT_INO, b"A");
+    assert_ne!(a.ino, b.ino);
+    assert_eq!(m.lookup(ROOT_INO, b"a").unwrap().ino, a.ino);
+    assert_eq!(m.lookup(ROOT_INO, b"A").unwrap().ino, b.ino);
+    assert_eq!(names(&m, ROOT_INO), vec![b"A".to_vec(), b"a".to_vec()]);
+    m.unlink(ROOT_INO, b"a").unwrap();
+    assert_eq!(m.lookup(ROOT_INO, b"A").unwrap().ino, b.ino);
+}
+
+#[test]
+fn rename_between_hardlinks_is_a_noop() {
+    let m = memfs();
+    let d = mkdir(&m, ROOT_INO, b"d");
+    let f = mkfile(&m, ROOT_INO, b"one");
+    m.link(f.ino, d.ino, b"two").unwrap();
+    assert_eq!(m.getattr(f.ino).unwrap().nlink, 2);
+    m.rename(ROOT_INO, b"one", d.ino, b"two", 0).unwrap();
+    // Both names survive and still refer to the same inode.
+    assert_eq!(m.lookup(ROOT_INO, b"one").unwrap().ino, f.ino);
+    assert_eq!(m.lookup(d.ino, b"two").unwrap().ino, f.ino);
+    assert_eq!(m.getattr(f.ino).unwrap().nlink, 2);
+    assert_eq!(names(&m, d.ino), vec![b"two".to_vec()]);
+}

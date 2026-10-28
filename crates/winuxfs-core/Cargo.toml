@@ -11,3 +11,4 @@ winuxfs-abi = { path = "../winuxfs-abi" }
 
 [dev-dependencies]
 proptest = "1"
+winuxfs-conformance = { path = "../winuxfs-conformance" }

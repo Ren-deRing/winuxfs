@@ -1,0 +1,10 @@
+[package]
+name = "winuxfs-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Shared path-level filesystem conformance suite (Vfs and std::fs)"
+
+[dependencies]
+winuxfs-core = { path = "../winuxfs-core" }
