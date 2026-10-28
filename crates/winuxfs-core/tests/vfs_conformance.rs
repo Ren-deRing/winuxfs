@@ -722,3 +722,27 @@ fn case_insensitive_rename_replace_takes_requested_spelling() {
     mkfile(&v, b"/DST/In", b"i");
     assert_eq!(read_path(&v, b"/dst/IN"), b"i");
 }
+
+/// `stat_at` reads a directory entry's attributes by name (what a directory
+/// listing needs) without opening it, and leaves no backend reference.
+#[test]
+fn stat_at_reads_entry_without_keeping_references() {
+    let c = Counting::new("vfs-stat-at");
+    let m = c.mount();
+    let v = Vfs::new(m.clone(), opts(false, false));
+    mkdir(&v, b"/d");
+    let f = mkfile(&v, b"/d/f", b"hello");
+    let (dh, _) = v.open(b"/d").unwrap();
+    let before = c.taken() - c.forgotten();
+    let st = v.stat_at(dh, b"f").unwrap();
+    assert_eq!((st.ino, st.size, st.ftype), (f.ino, 5, FileType::Reg));
+    assert_eq!(v.stat_at(dh, b"nope").unwrap_err(), Errno::ENOENT);
+    for bad in [&b""[..], b".", b"..", b"a/b"] {
+        assert_eq!(v.stat_at(dh, bad).unwrap_err(), Errno::EINVAL, "{bad:?}");
+    }
+    assert_eq!(c.taken() - c.forgotten(), before);
+    assert_eq!(v.stat_at(Handle(999_999), b"f").unwrap_err(), EBADF);
+    v.close(dh);
+    drop(v);
+    assert_eq!(c.forgotten(), c.taken());
+}
