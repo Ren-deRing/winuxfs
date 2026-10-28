@@ -667,6 +667,13 @@ mod win {
         Ok(())
     }
 
+    /// The error for a mount point that no winuxfs process serves.
+    pub(super) fn nothing_mounted(mp_text: &str) -> CliError {
+        CliError::usage(format!(
+            "Nothing is mounted by winuxfs on {mp_text}: check the mount point."
+        ))
+    }
+
     pub fn unmount(mp_text: &str) -> Result<(), CliError> {
         let mp = mount_point(mp_text)?;
         let stop_name = object_name("stop", &mp);
@@ -677,10 +684,7 @@ mod win {
             if unsafe { GetLastError() } == ERROR_ACCESS_DENIED {
                 return Err(elevated(mp_text));
             }
-            return Err(CliError::usage(format!(
-                "Nothing is mounted by winuxfs on {mp_text} in this Windows session: check \
-                 the mount point."
-            )));
+            return Err(nothing_mounted(mp_text));
         }
         let stop = OwnedHandle(stop);
         let live_name = object_name("live", &mp);
@@ -689,8 +693,9 @@ mod win {
         // SAFETY: stop is a valid event handle with EVENT_MODIFY_STATE.
         unsafe { SetEvent(stop.0) };
         if live.is_null() {
-            // The serving process is already gone.
-            return Ok(());
+            // The serving process is gone and only a stale (leaked) stop
+            // event is left: nothing to unmount.
+            return Err(nothing_mounted(&mp.arg));
         }
         let live = OwnedHandle(live);
         // SAFETY: valid mutex handle.
@@ -714,6 +719,13 @@ mod win {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn nothing_mounted_message_and_code() {
+            let e = nothing_mounted("X:");
+            assert!(e.msg.starts_with("Nothing is mounted by winuxfs on X:"));
+            assert_eq!(e.code, 1);
+        }
 
         #[test]
         fn mount_point_forms() {
