@@ -107,6 +107,19 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(e["/sparse.bin"]["sha256"], "skipped")
         self.assertNotEqual(e["/a.txt"]["sha256"], "skipped")
 
+    def test_sparse_islands_hash_matches_dense_hash(self):
+        # one-page islands separated by one-page holes (the fixtures' extent
+        # files): the buffered-reader bug hashed the wrong bytes here
+        p = os.path.join(self.root, "islands.bin")
+        with open(p, "wb") as f:
+            for i in range(64):
+                f.seek(i * 8192)
+                f.write(b"i%d:" % i + bytes(range(16)))
+        with open(p, "rb") as f:
+            want = hashlib.sha256(f.read()).hexdigest()
+        e = xfs_manifest.build(self.root)["entries"]["/islands.bin"]
+        self.assertEqual(e["sha256"], want)
+
 
 if __name__ == "__main__":
     unittest.main()

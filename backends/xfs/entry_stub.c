@@ -54,6 +54,15 @@ static wfs_err_t x_readdir(wfs_fs *fs, wfs_ino_t dir, uint64_t cookie, wfs_diren
 	return -WFS_ENOSYS;
 }
 
+static wfs_err_t x_read(wfs_fs *fs, wfs_ino_t ino, uint64_t off, void *buf, size_t len, size_t *done)
+{
+	return wfs_xfs_op_read((struct wfs_xfs *)fs, ino, off, buf, len, done);
+}
+static wfs_err_t x_readlink(wfs_fs *fs, wfs_ino_t ino, char *buf, size_t cap, size_t *len)
+{
+	return wfs_xfs_op_readlink((struct wfs_xfs *)fs, ino, buf, cap, len);
+}
+
 static const wfs_ops ops = {
 	.probe = x_probe,
 	.mount = x_mount,
@@ -63,6 +72,8 @@ static const wfs_ops ops = {
 	.lookup = x_lookup,
 	.forget = x_forget,
 	.readdir = x_readdir,
+	.read = x_read,
+	.readlink = x_readlink,
 };
 
 static const wfs_backend_desc desc = {

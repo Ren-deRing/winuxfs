@@ -14,5 +14,10 @@ struct wfs_xfs;
 
 wfs_err_t wfs_xfs_op_getattr(struct wfs_xfs *x, wfs_ino_t ino, wfs_stat *st);
 void wfs_xfs_op_forget(struct wfs_xfs *x, wfs_ino_t ino, uint64_t nlookup);
+/* read.c (Task 10, design 8.5/8.6) */
+wfs_err_t wfs_xfs_op_read(struct wfs_xfs *x, wfs_ino_t ino, uint64_t off, void *buf,
+			  size_t len, size_t *done);
+wfs_err_t wfs_xfs_op_readlink(struct wfs_xfs *x, wfs_ino_t ino, char *buf, size_t cap,
+			      size_t *len);
 
 #endif

@@ -86,7 +86,7 @@ LIBXFS_NAMES = xfs_sb xfs_ag xfs_group xfs_types xfs_bit xfs_ialloc xfs_ialloc_b
 LIBXFS_OBJ = $(addprefix $(OUT)/libxfs/,$(addsuffix .o,$(LIBXFS_NAMES)))
 # Backend code (entry, stubs, later tasks' files); mk/*.mk fragments append to
 # BACKEND_SRC (prerequisite lists expand at parse time, so add files here, not in mk/). Weak PENDING stubs live in stubs_pending.c.
-BACKEND_SRC += entry_stub.c stubs_ro.c buf.c logcheck.c mount.c options.c icache.c inomap.c
+BACKEND_SRC += entry_stub.c stubs_ro.c buf.c logcheck.c mount.c options.c icache.c inomap.c read.c
 BACKEND_OBJ = $(addprefix $(OUT)/be/,$(BACKEND_SRC:.c=.o))
 # PENDING stubs: one object per stub in an archive that is searched last, so
 # a real definition in any directly linked object replaces the stub.
@@ -101,9 +101,11 @@ PIC = $(if $(CROSS),,-fPIC)
 VIS = -fvisibility=hidden
 # Hidden visibility everywhere; only wfs_backend_entry is exported
 # (WFS_EXPORT in entry_stub.c).
+# -fno-sanitize=alignment: kernel on-disk unions (xfs_btree_ptr __be64 inside
+# 4-byte aligned blocks) are accessed unaligned by design on x86/ARM64.
 $(OUT)/libxfs/%.o: $(KERNEL_XFS_SRC)/libxfs/%.c $(SHIM_HDR) Makefile
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(PIC) $(VIS) $(INC) $(KINC) -c -o $@ $<
+	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(if $(SAN),-fno-sanitize=alignment) $(PIC) $(VIS) $(INC) $(KINC) -c -o $@ $<
 $(OUT)/shim/%.o: shim/%.c $(SHIM_HDR) Makefile
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(SANFLAGS) $(PIC) $(VIS) $(INC) -c -o $@ $<
