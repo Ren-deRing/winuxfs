@@ -89,6 +89,20 @@ fn list_backends_shows_memfs() {
 }
 
 #[test]
+fn list_backends_shows_xfs() {
+    let dir = plugins("xfs");
+    let o = winuxfs()
+        .arg("list-backends")
+        .arg("--plugin-dir")
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}", stderr_of(&o));
+    let out = stdout_of(&o);
+    assert!(out.contains("xfs"), "{out}");
+}
+
+#[test]
 fn list_backends_reports_bad_plugin() {
     let bad = plugins("bad");
     let good = plugins("memfs");

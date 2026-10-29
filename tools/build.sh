@@ -8,12 +8,14 @@ case "${1:-linux}" in
   linux)
     cargo build --workspace
     for p in "${PLUGINS[@]}"; do make -C "backends/$p" CC="${CC:-cc}" EXT=so; done
+    make -C backends/xfs CC="${CC:-cc}" plugin
     ;;
   windows)
     cargo build --workspace --target x86_64-pc-windows-gnu
     for p in "${PLUGINS[@]}"; do
       make -C "backends/$p" CC="${MINGW_CC:-x86_64-w64-mingw32-gcc}" EXT=dll
     done
+    make -C backends/xfs CROSS=x86_64-w64-mingw32- plugin
     ;;
   *) echo "usage: $0 [linux|windows]" >&2; exit 2 ;;
 esac
