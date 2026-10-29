@@ -7,6 +7,9 @@
 # KERNEL_XFS_SRC: tree holding libxfs/ (vendored: ../../third_party/linux-xfs,
 # or a pinned kernel checkout's fs/xfs). The on-disk struct check test is
 # compiled only when it exists, and SKIPPED visibly otherwise.
+# Parallel by default (the libxfs objects are independent); JOBS=1 forces serial.
+JOBS ?= $(shell nproc 2>/dev/null || echo 4)
+MAKEFLAGS += -j$(JOBS)
 CROSS ?=
 CC = $(CROSS)gcc
 OUT ?= ../../target/xfs-shim$(if $(CROSS),-win,)
@@ -83,7 +86,7 @@ LIBXFS_NAMES = xfs_sb xfs_ag xfs_group xfs_types xfs_bit xfs_ialloc xfs_ialloc_b
 LIBXFS_OBJ = $(addprefix $(OUT)/libxfs/,$(addsuffix .o,$(LIBXFS_NAMES)))
 # Backend code (entry, stubs, later tasks' files); mk/*.mk fragments append to
 # BACKEND_SRC (prerequisite lists expand at parse time, so add files here, not in mk/). Weak PENDING stubs live in stubs_pending.c.
-BACKEND_SRC += entry_stub.c stubs_ro.c buf.c logcheck.c mount.c options.c
+BACKEND_SRC += entry_stub.c stubs_ro.c buf.c logcheck.c mount.c options.c icache.c inomap.c
 BACKEND_OBJ = $(addprefix $(OUT)/be/,$(BACKEND_SRC:.c=.o))
 # PENDING stubs: one object per stub in an archive that is searched last, so
 # a real definition in any directly linked object replaces the stub.

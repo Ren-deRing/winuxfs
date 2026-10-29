@@ -40,6 +40,7 @@
 #include "xfs_cksum.h"
 #include "xfs_error.h"
 #include "logcheck.h"
+#include "icache.h"
 #include <stdarg.h>
 #include <stdio.h>
 
@@ -96,17 +97,40 @@ static void wfs_xfs_hostlog(const wfs_host_api *api, int level, const char *fmt,
 
 /* ---------------------------------------------------------------- hooks -- */
 
-/* PENDING(T8): the inode cache and the root inode (mount step 7). */
+/*
+ * Mount step 7: create the inode cache and pin the root. The transient
+ * reference is dropped again; the pin keeps m_rootip valid until unload.
+ */
 int wfs_xfs_load_root(struct wfs_xfs *x)
 {
-	(void)x;
-	return -ENOSYS;
+	struct xfs_inode *ip;
+	int error;
+
+	error = wfs_xfs_icache_create(x);
+	if (error)
+		return error;
+	error = wfs_xfs_iget(x, x->mp.m_sb.sb_rootino, &ip);
+	if (error == -EINVAL || error == -ENOENT)
+		error = -EFSCORRUPTED;	/* the superblock points at a non-inode */
+	if (error)
+		return error;
+	if (!S_ISDIR(VFS_I(ip)->i_mode)) {
+		xfs_irele(ip);
+		return -EFSCORRUPTED;
+	}
+	wfs_xfs_ipin(ip);
+	x->mp.m_rootip = ip;
+	x->root_loaded = true;
+	xfs_irele(ip);
+	return 0;
 }
 
-/* PENDING(T8): drop the root pin and free the inode cache. */
+/* Drop the root pin and free the inode cache; safe if load_root never ran. */
 void wfs_xfs_unload_root(struct wfs_xfs *x)
 {
-	(void)x;
+	x->mp.m_rootip = NULL;
+	x->root_loaded = false;
+	wfs_xfs_icache_destroy(x);
 }
 
 /* ------------------------------------------------- libxfs-called helpers -- */
@@ -686,9 +710,7 @@ wfs_err_t wfs_xfs_mount(const wfs_host_api *api, wfs_blkdev *const devs[WFS_DEV_
 	}
 	/* 7 */
 	error = wfs_xfs_load_root(x);
-	if (error == -ENOSYS)
-		error = 0;	/* Task 6 placeholder; Task 8 returns real results */
-	else if (error)
+	if (error)
 		goto fail;
 	/* 8 */
 	error = check_summary_counts(x);

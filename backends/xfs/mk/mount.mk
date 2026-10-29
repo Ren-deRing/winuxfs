@@ -7,7 +7,9 @@
 # SKIPPED visibly when gcc, kernel tree, mkfs.xfs, xfs_db or zstd is missing.
 $(OUT)/be/mount.o $(OUT)/be/options.o $(OUT)/be/logcheck.o: LIBXFS_BE_WNO = $(LIBXFS_WNO)
 MOUNT_TEST = $(OUT)/test_mount$(EXE)
-FIXDIR ?= ../../target/xfs-fixtures
+# One absolute cache shared by all worktrees (gen-fixtures.sh cd's to the repo
+# root, so a relative path resolved differently there and for `touch` below).
+FIXDIR ?= $(abspath $(shell git rev-parse --git-common-dir 2>/dev/null)/../target/xfs-fixtures)
 ROOTFIX ?= ../../tests/xfs/root-fixtures
 BE_NOENTRY = $(filter-out $(OUT)/be/entry_stub.o,$(BACKEND_OBJ))
 $(MOUNT_TEST): tests/test_mount.c $(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) mount.h wfs_xfs.h Makefile mk/mount.mk | $(OUT)

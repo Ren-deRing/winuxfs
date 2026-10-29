@@ -27,8 +27,6 @@ int xfs_buf_delwri_submit(struct list_head *);
 int xfs_dec_freecounter(struct xfs_mount *, int, uint64_t, bool);
 void xfs_trans_log_inode(struct xfs_trans *, struct xfs_inode *, unsigned);
 void xfs_fs_mark_sick(struct xfs_mount *, unsigned);
-int xfs_trans_metafile_iget(struct xfs_trans *, uint64_t, int, struct xfs_inode **);
-void xfs_ilock(struct xfs_inode *, unsigned);
 bool xfs_log_check_lsn(struct xfs_mount *, int64_t);
 bool xfs_attr_check_namespace(unsigned);
 
@@ -63,12 +61,10 @@ int main(void)
 
 	/* PENDING stubs: error, logged once. */
 	nlogs = 0;
-	CHECK(xfs_trans_metafile_iget(NULL, 1, 0, NULL) == -ENOSYS);
-	CHECK(xfs_trans_metafile_iget(NULL, 1, 0, NULL) == -ENOSYS);
-	CHECK(nlogs == 1);
-	CHECK(strstr(last, "xfs_trans_metafile_iget") != NULL);
-	xfs_ilock(NULL, 0);
 	CHECK(xfs_log_check_lsn(NULL, 1));
+	CHECK(xfs_log_check_lsn(NULL, 1));
+	CHECK(nlogs == 1);
+	CHECK(strstr(last, "xfs_log_check_lsn") != NULL);
 
 	/* repeated ro calls are bounded (10 log lines per function) */
 	nlogs = 0;

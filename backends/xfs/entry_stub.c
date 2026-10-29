@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Backend descriptor "xfs". probe/mount/unmount are real (Task 6, mount.c);
- * statfs/getattr/lookup/readdir stay -ENOSYS until Tasks 8-9, the rest of the
+ * statfs/lookup/readdir stay -ENOSYS until Tasks 9/11 (getattr/forget: Task 8), the rest of the
  * required-op skeleton likewise. The single exported symbol stays.
  */
 #include "winuxfs/backend.h"
 #include "winuxfs/errno.h"
 #include "mount.h"
+#include "ops.h"
 
 #ifdef _WIN32
 #define WFS_EXPORT __declspec(dllexport)
@@ -31,12 +32,11 @@ static wfs_err_t x_mount(const wfs_host_api *api, wfs_blkdev *devs[WFS_DEV_COUNT
 
 static wfs_err_t x_unmount(wfs_fs *fs) { return wfs_xfs_unmount((struct wfs_xfs *)fs); }
 
-/* The loader requires these ops. PENDING(T8, T9): real implementations. */
+/* The loader requires these ops. PENDING(T9, T11): statfs, lookup, readdir. */
 static wfs_err_t x_statfs(wfs_fs *fs, wfs_statfs *st) { (void)fs; (void)st; return -WFS_ENOSYS; }
 static wfs_err_t x_getattr(wfs_fs *fs, wfs_ino_t ino, wfs_stat *st)
 {
-	(void)fs; (void)ino; (void)st;
-	return -WFS_ENOSYS;
+	return wfs_xfs_op_getattr((struct wfs_xfs *)fs, ino, st);
 }
 static wfs_err_t x_lookup(wfs_fs *fs, wfs_ino_t dir, const char *name, uint32_t len,
 			  wfs_ino_t *out, wfs_stat *st)
@@ -46,7 +46,7 @@ static wfs_err_t x_lookup(wfs_fs *fs, wfs_ino_t dir, const char *name, uint32_t 
 }
 static void x_forget(wfs_fs *fs, wfs_ino_t ino, uint64_t nlookup)
 {
-	(void)fs; (void)ino; (void)nlookup;
+	wfs_xfs_op_forget((struct wfs_xfs *)fs, ino, nlookup);
 }
 static wfs_err_t x_readdir(wfs_fs *fs, wfs_ino_t dir, uint64_t cookie, wfs_dirent_cb cb, void *ctx)
 {
