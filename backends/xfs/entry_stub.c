@@ -41,8 +41,7 @@ static wfs_err_t x_getattr(wfs_fs *fs, wfs_ino_t ino, wfs_stat *st)
 static wfs_err_t x_lookup(wfs_fs *fs, wfs_ino_t dir, const char *name, uint32_t len,
 			  wfs_ino_t *out, wfs_stat *st)
 {
-	(void)fs; (void)dir; (void)name; (void)len; (void)out; (void)st;
-	return -WFS_ENOSYS;
+	return wfs_xfs_op_lookup((struct wfs_xfs *)fs, dir, name, len, out, st);
 }
 static void x_forget(wfs_fs *fs, wfs_ino_t ino, uint64_t nlookup)
 {
@@ -50,8 +49,7 @@ static void x_forget(wfs_fs *fs, wfs_ino_t ino, uint64_t nlookup)
 }
 static wfs_err_t x_readdir(wfs_fs *fs, wfs_ino_t dir, uint64_t cookie, wfs_dirent_cb cb, void *ctx)
 {
-	(void)fs; (void)dir; (void)cookie; (void)cb; (void)ctx;
-	return -WFS_ENOSYS;
+	return wfs_xfs_op_readdir((struct wfs_xfs *)fs, dir, cookie, cb, ctx);
 }
 
 static const wfs_ops ops = {

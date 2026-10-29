@@ -18,7 +18,7 @@ Rules:
 - Prefer a shim in `backends/xfs/shim/` over a patch; every patch is a
   maintenance cost at each kernel rebase.
 
-Current patches: none.
+Current patches: 0001-readdir-no-cookie-mask (applied to xfs_dir2_readdir.c by backends/xfs/mk/dir.mk).
 
 Rebasing to a new kernel commit: update `COMMIT` and the file lists in
 `tools/vendor-xfs.sh`, run `tools/vendor-xfs.sh --src <fs/xfs checkout>`,

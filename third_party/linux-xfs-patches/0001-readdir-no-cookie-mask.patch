@@ -1,0 +1,67 @@
+Remove the 31-bit mask from the readdir cookies (M2 design 8.4).
+
+Why: the kernel truncates ctx->pos to 31 bits for 32-bit loff_t NFS clients;
+the backend ABI cookie is 64 bit (< 2^63), and a directory data area above
+16 GiB would otherwise fold cookies onto each other and break resume.
+Why not a shim: the mask is a literal in seven assignments of ctx->pos.
+Upstream: no (kernel behaviour is deliberate there).
+
+--- a/xfs_dir2_readdir.c
++++ b/xfs_dir2_readdir.c
+@@ -83,7 +83,7 @@
+ 	 * Put . entry unless we're starting past it.
+ 	 */
+ 	if (ctx->pos <= dot_offset) {
+-		ctx->pos = dot_offset & 0x7fffffff;
++		ctx->pos = dot_offset;
+ 		if (!dir_emit(ctx, ".", 1, I_INO(dp), DT_DIR))
+ 			return 0;
+ 	}
+@@ -93,7 +93,7 @@
+ 	 */
+ 	if (ctx->pos <= dotdot_offset) {
+ 		ino = xfs_dir2_sf_get_parent_ino(sfp);
+-		ctx->pos = dotdot_offset & 0x7fffffff;
++		ctx->pos = dotdot_offset;
+ 		if (!dir_emit(ctx, "..", 2, ino, DT_DIR))
+ 			return 0;
+ 	}
+@@ -115,7 +115,7 @@
+ 
+ 		ino = xfs_dir2_sf_get_ino(mp, sfp, sfep);
+ 		filetype = xfs_dir2_sf_get_ftype(mp, sfep);
+-		ctx->pos = off & 0x7fffffff;
++		ctx->pos = off;
+ 		if (XFS_IS_CORRUPT(dp->i_mount,
+ 				   !xfs_dir2_namecheck(sfep->name,
+ 						       sfep->namelen))) {
+@@ -205,7 +205,7 @@
+ 
+ 		cook = xfs_dir2_db_off_to_dataptr(geo, geo->datablk, offset);
+ 
+-		ctx->pos = cook & 0x7fffffff;
++		ctx->pos = cook;
+ 		filetype = xfs_dir2_data_get_ftype(dp->i_mount, dep);
+ 		/*
+ 		 * If it didn't fit, set the final offset to here & return.
+@@ -465,7 +465,7 @@
+ 		length = xfs_dir2_data_entsize(mp, dep->namelen);
+ 		filetype = xfs_dir2_data_get_ftype(mp, dep);
+ 
+-		ctx->pos = xfs_dir2_byte_to_dataptr(curoff) & 0x7fffffff;
++		ctx->pos = xfs_dir2_byte_to_dataptr(curoff);
+ 		if (XFS_IS_CORRUPT(dp->i_mount,
+ 				   !xfs_dir2_namecheck(dep->name,
+ 						       dep->namelen))) {
+@@ -491,9 +491,9 @@
+ 	 * All done.  Set output offset value to current offset.
+ 	 */
+ 	if (curoff > xfs_dir2_dataptr_to_byte(XFS_DIR2_MAX_DATAPTR))
+-		ctx->pos = XFS_DIR2_MAX_DATAPTR & 0x7fffffff;
++		ctx->pos = XFS_DIR2_MAX_DATAPTR;
+ 	else
+-		ctx->pos = xfs_dir2_byte_to_dataptr(curoff) & 0x7fffffff;
++		ctx->pos = xfs_dir2_byte_to_dataptr(curoff);
+ 	if (bp)
+ 		xfs_trans_brelse(args->trans, bp);
+ 	return error;

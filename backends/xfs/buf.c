@@ -465,17 +465,33 @@ static int buf_io(struct wfs_xbuf *wb)
 	return 0;
 }
 
+/* Set by icache.c once the group xarrays can be used (NULL in the buffer cache unit test). */
+struct xfs_perag *(*wfs_xfs_pag_get)(struct xfs_mount *mp, xfs_daddr_t daddr);
+void (*wfs_xfs_pag_put)(struct xfs_perag *pag);
+
 /* Runs ops->verify_read on bp; the result is whatever the verifier left in
  * b_error (set by itself or by xfs_verifier_error). Negative errno. */
 static int run_verify(struct xfs_buf *bp, const struct xfs_buf_ops *ops)
 {
+	struct xfs_mount *mp = bp->b_mount;
+	struct xfs_perag *pag = NULL;
 	int err;
 
+	/*
+	 * The kernel sets b_pag when it looks the buffer up; multi-block btree
+	 * levels (large inobts) verify their siblings against it.
+	 */
+	if (ops && ops->verify_read && mp && wfs_xfs_pag_get && bp->b_target == mp->m_ddev_targp)
+		pag = wfs_xfs_pag_get(mp, bp->b_maps[0].bm_bn);
+	bp->b_pag = pag;
 	bp->b_error = 0;
 	if (ops && ops->verify_read) {
 		bp->b_ops = ops;
 		ops->verify_read(bp);
 	}
+	bp->b_pag = NULL;
+	if (pag)
+		wfs_xfs_pag_put(pag);
 	err = bp->b_error;
 	bp->b_error = 0;
 	return err > 0 ? -err : err;

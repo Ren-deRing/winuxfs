@@ -31,4 +31,9 @@ int wfs_xfs_buftarg_bind(struct xfs_buftarg *bt, struct wfs_xfs_bcache *c,
 		int role);
 void wfs_xfs_buftarg_unbind(struct xfs_buftarg *bt);
 
+/* b_pag provider for the verifiers (btree sibling checks); see buf.c. */
+struct xfs_perag;
+extern struct xfs_perag *(*wfs_xfs_pag_get)(struct xfs_mount *mp, xfs_daddr_t daddr);
+extern void (*wfs_xfs_pag_put)(struct xfs_perag *pag);
+
 #endif
