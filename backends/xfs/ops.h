@@ -13,6 +13,8 @@
 struct wfs_xfs;
 
 wfs_err_t wfs_xfs_op_getattr(struct wfs_xfs *x, wfs_ino_t ino, wfs_stat *st);
+/* Task 11: sb counters (trusted or AG sums, fixed at mount) -> wfs_statfs. */
+wfs_err_t wfs_xfs_op_statfs(struct wfs_xfs *x, wfs_statfs *st);
 void wfs_xfs_op_forget(struct wfs_xfs *x, wfs_ino_t ino, uint64_t nlookup);
 
 #endif
