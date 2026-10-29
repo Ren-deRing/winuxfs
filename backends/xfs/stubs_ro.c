@@ -500,6 +500,9 @@ void xfs_trans_buf_copy_type(struct xfs_buf *dst_bp, struct xfs_buf *src_bp)
 
 void xfs_trans_buf_set_type(struct xfs_trans *a0, struct xfs_buf *a1, enum xfs_blft a2)
 {
+	/* the kernel does nothing without a transaction; reads here run with tp == NULL */
+	if (!a0)
+		return;
 	WFS_STUB_RO();
 }
 
