@@ -14,6 +14,7 @@
 void *wfs_alloc(size_t size, gfp_t flags);
 void wfs_free(void *p);
 void wfs_mem_set_cap(size_t cap);	/* 0 = unlimited */
+size_t wfs_mem_cap_hits(void);	/* allocations refused because of the cap (fuzz: over-allocation) */
 size_t wfs_mem_used(void);		/* live bytes incl. 16-byte headers */
 
 static inline void *kmalloc(size_t n, gfp_t f) { return wfs_alloc(n, f); }

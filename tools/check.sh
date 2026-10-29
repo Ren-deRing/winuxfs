@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: GPL-2.0-only
 set -euo pipefail
 cd "$(dirname "$0")/.."
-# Usage: tools/check.sh [--vm]
-#   (no flag)  fast host checks.
+# Usage: tools/check.sh [--vm] [--fuzz]
+#   (no flag)  fast host checks (including test-fuzz: corpus + clean walk, seconds).
+#   --fuzz     the same, then `make fuzz-sample`: the seed-fixed 1% sample of all
+#              sector mutations in both CRC modes (about a minute; the full set is
+#              `make -C backends/xfs fuzz-full`, for nightly runs).
 #   --vm       the same, then the full Milestone 1 acceptance: Windows
 #              cross-build, VM restored to snapshot `clean`, every Windows
 #              test executable (integration tests e2e_*, ffi_* and the
@@ -11,11 +14,14 @@ cd "$(dirname "$0")/.."
 #              WINUXFS_VMCTL overrides the vmctl.py to use (a worktree has no
 #              vm/ state; point it at the main checkout's tools/vmctl.py).
 vm=0
-case "${1:-}" in
-  "") ;;
-  --vm) vm=1 ;;
-  *) echo "usage: $0 [--vm]" >&2; exit 2 ;;
-esac
+fuzz=0
+for a in "$@"; do
+  case "$a" in
+    --vm) vm=1 ;;
+    --fuzz) fuzz=1 ;;
+    *) echo "usage: $0 [--vm] [--fuzz]" >&2; exit 2 ;;
+  esac
+done
 cargo fmt --check
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
@@ -44,6 +50,8 @@ if command -v gcc >/dev/null && command -v mkfs.xfs >/dev/null && command -v xfs
   make -s -C backends/xfs test-read-san
   make -s -C backends/xfs test-concurrent-san
   make -s -C backends/xfs test-concurrent-tsan
+  make -s -C backends/xfs test-fuzz
+  if [ "$fuzz" = 1 ]; then make -s -C backends/xfs fuzz-sample; fi
 else
   echo "SKIPPED: backends/xfs mount tests (gcc, mkfs.xfs and xfs_db needed; install xfsprogs)"
 fi
