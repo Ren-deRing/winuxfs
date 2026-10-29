@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 static int failures, checks, skipped;
@@ -988,8 +989,8 @@ int main(int argc, char **argv)
 		fprintf(stderr, "cannot create the base image\n");
 		return 2;
 	}
-#define RUN(t, ...) do { int f0 = failures; t(__VA_ARGS__); \
-	printf("%s %s\n", failures == f0 ? "PASS" : "FAIL", #t); } while (0)
+#define RUN(t, ...) do { int f0 = failures; time_t t0 = time(NULL); t(__VA_ARGS__); \
+	printf("%s %s (%lds)\n", failures == f0 ? "PASS" : "FAIL", #t, (long)(time(NULL) - t0)); } while (0)
 	RUN(mounts_every_fixture_image, fixdir);
 	RUN(mounts_root_fixtures, rootdir);
 	RUN(rejects_v4);

@@ -55,6 +55,14 @@
  */
 static const wfs_host_api *g_log_api;
 static int g_log_users;
+static volatile int g_log_gate;	/* serialises attach/detach (count + hook change together) */
+
+static void log_gate_lock(void)
+{
+	while (__sync_lock_test_and_set(&g_log_gate, 1))
+		;
+}
+static void log_gate_unlock(void) { __sync_lock_release(&g_log_gate); }
 
 static void shim_to_host(int level, const char *msg)
 {
@@ -67,17 +75,22 @@ static void shim_to_host(int level, const char *msg)
 
 static void log_attach(const wfs_host_api *api)
 {
-	if (__atomic_fetch_add(&g_log_users, 1, __ATOMIC_ACQ_REL) == 0)
+	log_gate_lock();
+	if (g_log_users++ == 0) {
 		__atomic_store_n(&g_log_api, api, __ATOMIC_RELEASE);
-	wfs_log_set_hook(shim_to_host);
+		wfs_log_set_hook(shim_to_host);
+	}
+	log_gate_unlock();
 }
 
 static void log_detach(void)
 {
-	if (__atomic_sub_fetch(&g_log_users, 1, __ATOMIC_ACQ_REL) == 0) {
+	log_gate_lock();
+	if (--g_log_users == 0) {
 		wfs_log_set_hook(NULL);
 		__atomic_store_n(&g_log_api, NULL, __ATOMIC_RELEASE);
 	}
+	log_gate_unlock();
 }
 
 static void wfs_xfs_hostlog(const wfs_host_api *api, int level, const char *fmt, ...)
@@ -286,6 +299,16 @@ static int check_policy(struct wfs_xfs *x, const struct xfs_sb *sb)
  */
 static int prevalidate_sb(struct wfs_xfs *x, const struct xfs_sb *sb)
 {
+	/*
+	 * The per-AG structures (~250 B each) are allocated before AG 0 is read;
+	 * a hostile agcount on a huge sparse device would otherwise cost GBs.
+	 * Real filesystems have hundreds of AGs at most.
+	 */
+	if (sb->sb_agcount > WFS_XFS_MAX_AGCOUNT) {
+		LOGMSG(x, 0, "xfs: unsupported: %u allocation groups (limit %u)",
+		       sb->sb_agcount, WFS_XFS_MAX_AGCOUNT);
+		return -EFSCORRUPTED;
+	}
 	if (sb->sb_blocklog < XFS_MIN_BLOCKSIZE_LOG || sb->sb_blocklog > XFS_MAX_BLOCKSIZE_LOG ||
 	    sb->sb_blocksize != (1u << sb->sb_blocklog) ||
 	    sb->sb_sectlog < XFS_MIN_SECTORSIZE_LOG || sb->sb_sectlog > XFS_MAX_SECTORSIZE_LOG ||
@@ -745,7 +768,8 @@ wfs_err_t wfs_xfs_probe(const wfs_host_api *api, wfs_blkdev *const devs[WFS_DEV_
 	uint32_t ss;
 	int err;
 
-	if (!api || !devs || !(dev = devs[WFS_DEV_DATA]) || !api->blk_read)
+	if (!api || !devs || !(dev = devs[WFS_DEV_DATA]) || !api->blk_read ||
+	    !api->blk_size || !api->blk_sector_size)
 		return -WFS_EINVAL;
 	ss = api->blk_sector_size(dev);
 	if (ss < 512 || ss > 32768 || (ss & (ss - 1)) || api->blk_size(dev) < ss)

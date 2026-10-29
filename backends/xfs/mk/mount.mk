@@ -16,7 +16,8 @@ $(MOUNT_TEST): tests/test_mount.c $(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PEN
 	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(INC) $(KINC) -I. -o $@ tests/test_mount.c \
 		$(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
 
-$(FIXDIR)/.done:
+# Regenerate when the generator or the manifest tool changes.
+$(FIXDIR)/.done: ../../tools/gen-fixtures.sh ../../tools/xfs_manifest.py
 	../../tools/gen-fixtures.sh --out $(FIXDIR) && touch $@
 
 test-mount:
@@ -28,6 +29,8 @@ else ifeq ($(shell command -v mkfs.xfs),)
 	@echo "SKIPPED: test-mount (mkfs.xfs not installed: install xfsprogs)"
 else ifeq ($(shell command -v xfs_db),)
 	@echo "SKIPPED: test-mount (xfs_db not installed: install xfsprogs)"
+else ifeq ($(shell command -v xfs_repair && command -v xfs_logprint && command -v python3),)
+	@echo "SKIPPED: test-mount (fixture generation needs xfs_repair, xfs_logprint and python3)"
 else
 	$(MAKE) --no-print-directory $(MOUNT_TEST) $(FIXDIR)/.done
 	$(MOUNT_TEST) $(FIXDIR) $(ROOTFIX)

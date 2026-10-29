@@ -20,6 +20,7 @@ struct wfs_xfs;
 #define WFS_XFS_INODECACHE_MIN		64u
 #define WFS_XFS_INODECACHE_MAX		(1u << 24)
 #define WFS_XFS_INODECACHE_DEF		16384u
+#define WFS_XFS_MAX_AGCOUNT		(1u << 20)	/* hostile-sb guard, see prevalidate_sb */
 
 struct wfs_xfs_options {
 	bool		norecovery;		/* mount a dirty log without replay */

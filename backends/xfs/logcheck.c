@@ -1269,7 +1269,7 @@ static wfs_log_reader_provider g_provider;
 void
 wfs_log_set_reader_provider(wfs_log_reader_provider fn)
 {
-	g_provider = fn;
+	__atomic_store_n(&g_provider, fn, __ATOMIC_RELEASE);
 }
 
 int
@@ -1279,8 +1279,10 @@ xfs_log_mount_ro_check(struct xfs_mount *mp, bool norecovery, bool *dirty_out)
 	struct wfs_log_reader	r;
 	uint32_t		sect;
 	int			error;
+	wfs_log_reader_provider	provider;
 
-	if (!g_provider)
+	provider = __atomic_load_n(&g_provider, __ATOMIC_ACQUIRE);
+	if (!provider)
 		return -EINVAL;
 	memset(&p, 0, sizeof(p));
 	memset(&r, 0, sizeof(r));
@@ -1296,7 +1298,7 @@ xfs_log_mount_ro_check(struct xfs_mount *mp, bool norecovery, bool *dirty_out)
 	p.logbsize = mp->m_sb.sb_logsunit > 1 ? mp->m_sb.sb_logsunit : 0;
 	memcpy(p.uuid, &mp->m_sb.sb_uuid, sizeof(p.uuid));
 
-	error = g_provider(mp, &r);
+	error = provider(mp, &r);
 	if (error)
 		return error;
 	return wfs_log_check(&p, &r, norecovery, dirty_out);
