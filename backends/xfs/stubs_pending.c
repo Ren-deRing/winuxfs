@@ -71,26 +71,7 @@
 
 /* ---- PENDING(T5): none left, buf.c defines them ---- */
 
-/* ---- PENDING(T6) ---- */
-
-/* PENDING(T6) */
-#if defined(WFS_PENDING_ALL) || defined(WFS_ONLY_xfs_metadir_load)
-WFS_WEAK int xfs_metadir_load(struct xfs_trans *tp, struct xfs_inode *dp, const char *path, enum xfs_metafile_type metafile_type, struct xfs_inode **ipp)
-{
-	WFS_STUB_PENDING();
-	return -ENOSYS;
-}
-#endif
-
-/* PENDING(T6) */
-#if defined(WFS_PENDING_ALL) || defined(WFS_ONLY_xfs_set_inode_alloc)
-WFS_WEAK xfs_agnumber_t xfs_set_inode_alloc(struct xfs_mount *mp, xfs_agnumber_t agcount)
-{
-	WFS_STUB_PENDING();
-	/* Only matters for inode allocation; every AG is usable for reads. */
-	return agcount;
-}
-#endif
+/* ---- PENDING(T6): none left, mount.c defines them ---- */
 
 /* ---- PENDING(T7) ---- */
 

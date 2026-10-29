@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Skeleton backend descriptor "xfs" (Task 4). probe says "not XFS" and mount
- * is -ENOSYS until Task 6 replaces these with real code; the descriptor and
- * the single exported symbol stay.
+ * Backend descriptor "xfs". probe/mount/unmount are real (Task 6, mount.c);
+ * statfs/getattr/lookup/readdir stay -ENOSYS until Tasks 8-9, the rest of the
+ * required-op skeleton likewise. The single exported symbol stays.
  */
 #include "winuxfs/backend.h"
 #include "winuxfs/errno.h"
+#include "mount.h"
 
 #ifdef _WIN32
 #define WFS_EXPORT __declspec(dllexport)
@@ -13,24 +14,24 @@
 #define WFS_EXPORT __attribute__((visibility("default")))
 #endif
 
-/* PENDING(T6): probe/mount/unmount are replaced by mount.c. */
 static wfs_err_t x_probe(const wfs_host_api *api, wfs_blkdev *devs[WFS_DEV_COUNT])
 {
-	(void)api; (void)devs;
-	return -WFS_EINVAL;
+	return wfs_xfs_probe(api, devs);
 }
 
 static wfs_err_t x_mount(const wfs_host_api *api, wfs_blkdev *devs[WFS_DEV_COUNT],
 			 const char *options, wfs_fs **out)
 {
-	(void)api; (void)devs; (void)options;
-	*out = NULL;
-	return -WFS_ENOSYS;
+	struct wfs_xfs *x = NULL;
+	wfs_err_t err = wfs_xfs_mount(api, devs, options, &x);
+
+	*out = err ? NULL : (wfs_fs *)x;
+	return err;
 }
 
-/* The loader requires these ops even though mount never succeeds yet.
- * PENDING(T6, T8, T9): replaced by the real implementations. */
-static wfs_err_t x_unmount(wfs_fs *fs) { (void)fs; return -WFS_ENOSYS; }
+static wfs_err_t x_unmount(wfs_fs *fs) { return wfs_xfs_unmount((struct wfs_xfs *)fs); }
+
+/* The loader requires these ops. PENDING(T8, T9): real implementations. */
 static wfs_err_t x_statfs(wfs_fs *fs, wfs_statfs *st) { (void)fs; (void)st; return -WFS_ENOSYS; }
 static wfs_err_t x_getattr(wfs_fs *fs, wfs_ino_t ino, wfs_stat *st)
 {
@@ -69,8 +70,8 @@ static const wfs_backend_desc desc = {
 	.size = sizeof(wfs_backend_desc),
 	.name = "xfs",
 	.caps = WFS_CAP_READONLY | WFS_CAP_HARDLINK | WFS_CAP_SYMLINK,
-	.dev_allowed = 0,
-	.dev_required = 0,
+	.dev_allowed = (1u << WFS_DEV_DATA) | (1u << WFS_DEV_LOG) | (1u << WFS_DEV_RT),
+	.dev_required = 1u << WFS_DEV_DATA,
 	.ops = &ops,
 };
 

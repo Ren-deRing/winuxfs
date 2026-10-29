@@ -38,6 +38,7 @@
 #include "xfs_trans_resv.h"
 #include "xfs_mount.h"
 #include "xfs_error.h"
+#include "xfs_trans.h"
 
 #define NSHARD		64
 #define NBUCKET		512		/* per shard */
@@ -854,4 +855,28 @@ void wfs_xfs_buftarg_unbind(struct xfs_buftarg *bt)
 {
 	kfree(bt->bt_priv);
 	bt->bt_priv = NULL;
+}
+
+/*
+ * Read path "transaction" buffer glue (Task 6). libxfs reads metadata with
+ * xfs_trans_read_buf()/xfs_trans_brelse() passing tp == NULL when no
+ * transaction is involved; the port never creates a transaction (xfs_trans_alloc
+ * fails with -EROFS), so these are the plain cache calls. A non-NULL tp is a
+ * write-path caller and is refused.
+ */
+int xfs_trans_read_buf_map(struct xfs_mount *mp, struct xfs_trans *tp,
+		struct xfs_buftarg *target, struct xfs_buf_map *map, int nmaps,
+		xfs_buf_flags_t flags, struct xfs_buf **bpp,
+		const struct xfs_buf_ops *ops)
+{
+	*bpp = NULL;
+	if (tp)
+		return -EROFS;
+	return xfs_buf_read_map(target, map, nmaps, flags, bpp, ops, NULL);
+}
+
+void xfs_trans_brelse(struct xfs_trans *tp, struct xfs_buf *bp)
+{
+	if (!tp)
+		xfs_buf_relse(bp);
 }
