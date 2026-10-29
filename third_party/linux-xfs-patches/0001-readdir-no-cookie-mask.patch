@@ -1,9 +1,12 @@
+SPDX-License-Identifier: GPL-2.0
 Remove the 31-bit mask from the readdir cookies (M2 design 8.4).
 
 Why: the kernel truncates ctx->pos to 31 bits for 32-bit loff_t NFS clients;
 the backend ABI cookie is 64 bit (< 2^63), and a directory data area above
 16 GiB would otherwise fold cookies onto each other and break resume.
 Why not a shim: the mask is a literal in seven assignments of ctx->pos.
+Note: the file has nine masked sites; this patch removes the seven on the entry path.
+The remaining `& 0x7fffffff` ones (end-of-directory ctx->pos) never reach the ABI.
 Upstream: no (kernel behaviour is deliberate there).
 
 --- a/xfs_dir2_readdir.c

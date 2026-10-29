@@ -195,6 +195,9 @@ static void ent_free(struct ic_ent *e)
 	kfree(e);
 }
 
+/* At most 8M extents (~128 MiB of iext tree) per fork of one inode. */
+#define WFS_XFS_MAX_EXTENTS	((uint64_t)8 << 20)
+
 /* Load the on-disk inode into e. Kernel errno on failure. */
 static int ent_load(struct wfs_xfs *x, struct ic_ent *e)
 {
@@ -221,6 +224,22 @@ static int ent_load(struct wfs_xfs *x, struct ic_ent *e)
 	xfs_trans_brelse(NULL, bp);
 	if (error)
 		goto out_put;
+
+	/*
+	 * Ceiling on the in-memory extent map (design 7.2, review M2-final I2).
+	 * di_nextents is only bounded by di_nblocks, so a crafted inode can claim
+	 * billions of extents; the iext tree costs ~16 bytes each and the loader
+	 * allocates with __GFP_NOFAIL. Refuse such an inode up front.
+	 */
+	if (!error && ((uint64_t)xfs_ifork_nextents(&ip->i_df) > WFS_XFS_MAX_EXTENTS ||
+		       (uint64_t)xfs_ifork_nextents(&ip->i_af) > WFS_XFS_MAX_EXTENTS)) {
+		xfs_warn(mp, "inode %llu: %llu extents exceed the %llu extent limit",
+			 (unsigned long long)ino,
+			 (unsigned long long)xfs_ifork_nextents(&ip->i_df),
+			 (unsigned long long)WFS_XFS_MAX_EXTENTS);
+		error = -EFSCORRUPTED;
+		goto out_put;
+	}
 
 	/* should be an allocated inode (xfs_iget_check_free_state) */
 	if (VFS_I(ip)->i_mode == 0)

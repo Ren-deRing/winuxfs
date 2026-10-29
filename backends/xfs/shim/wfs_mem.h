@@ -4,7 +4,10 @@
  * cap (fuzzing: wfs_mem_set_cap(n) makes any allocation that would push the
  * live total above n fail with NULL; 0 = unlimited). Every block carries a
  * 16-byte header holding its size, so kfree needs no size argument.
- * __GFP_NOFAIL is not honoured: callers keep their NULL checks (design 3.3).
+ * Every mount adds a budget (wfs_mem_mount_budget) that acts as the cap while no
+ * explicit cap is set. __GFP_NOFAIL requests are never answered with NULL:
+ * they may use a reserve above the cap, and a miss logs and abort()s (see
+ * wfs_mem.c and docs/xfs-backend.md "Allocation failure").
  */
 #ifndef WFS_SHIM_MEM_H
 #define WFS_SHIM_MEM_H
@@ -13,7 +16,8 @@
 
 void *wfs_alloc(size_t size, gfp_t flags);
 void wfs_free(void *p);
-void wfs_mem_set_cap(size_t cap);	/* 0 = unlimited */
+void wfs_mem_set_cap(size_t cap);	/* 0 = unlimited (falls back to the mount budgets) */
+void wfs_mem_mount_budget(int64_t delta);	/* +budget at mount, -budget at unmount */
 size_t wfs_mem_cap_hits(void);	/* allocations refused because of the cap (fuzz: over-allocation) */
 size_t wfs_mem_used(void);		/* live bytes incl. 16-byte headers */
 

@@ -1,3 +1,4 @@
+SPDX-License-Identifier: GPL-2.0
 Bound the leaf entry address in directory lookup (M2 task 13, fuzz finding).
 
 Why: xfs_dir2_leaf_lookup_int() and xfs_dir2_leafn_lookup_for_entry() turn the

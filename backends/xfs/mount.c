@@ -39,6 +39,7 @@
 #include "xfs_inode.h"
 #include "xfs_cksum.h"
 #include "xfs_error.h"
+#include "xfs_log.h"
 #include "logcheck.h"
 #include "icache.h"
 #include <stdarg.h>
@@ -666,6 +667,8 @@ static void free_mount(struct wfs_xfs *x)
 	if (x->bcache)
 		wfs_xfs_bcache_destroy(x->bcache);
 	log_detach();
+	if (x->mem_budget)
+		wfs_mem_mount_budget(-(int64_t)x->mem_budget);
 	kfree(x);
 }
 
@@ -712,6 +715,16 @@ wfs_err_t wfs_xfs_mount(const wfs_host_api *api, wfs_blkdev *const devs[WFS_DEV_
 		mp->m_features |= XFS_FEAT_NORECOVERY;
 
 	wfs_xfs_blk_init_host(&x->blk, api, devs);
+	/*
+	 * Allocation cap for this mount: buffer cache + inode cache (8 KiB per
+	 * entry covers inode, forks and a modest extent map) + 1 GiB of headroom
+	 * for in-flight operations. Hostile growth past it fails the allocation
+	 * (checked sites) instead of consuming the host's memory; see wfs_mem.c
+	 * for __GFP_NOFAIL.
+	 */
+	x->mem_budget = x->opts.bufcache_bytes + (uint64_t)x->opts.inodecache_entries * 8192 +
+			((uint64_t)1 << 30);
+	wfs_mem_mount_budget((int64_t)x->mem_budget);
 	x->bcache = wfs_xfs_bcache_create(&x->blk, (size_t)x->opts.bufcache_bytes);
 	if (!x->bcache) {
 		error = -ENOMEM;
@@ -804,4 +817,21 @@ wfs_err_t wfs_xfs_probe(const wfs_host_api *api, wfs_blkdev *const devs[WFS_DEV_
 	if ((be16_to_cpu(dsb->sb_versionnum) & XFS_SB_VERSION_NUMBITS) != XFS_SB_VERSION_5)
 		return -WFS_EINVAL;
 	return 0;
+}
+
+/*
+ * xfs_log_check_lsn: the AGF/AGFL verifiers ask whether a metadata LSN lies
+ * ahead of the log head (an inconsistency left by xfs_repair -L). This mount
+ * is read-only and never replays or writes the log, so the check is not
+ * enforced: a metadata block is accepted whatever LSN it carries. That is the
+ * safe direction for reading (the check is a diagnostic, never a bounds
+ * property of the data) and a real definition, not a placeholder, so nothing is
+ * logged per mount. A stricter check would need the log head, which a
+ * norecovery mount may not have; revisit if a write backend lands (M3).
+ */
+bool xfs_log_check_lsn(struct xfs_mount *mp, xfs_lsn_t lsn)
+{
+	(void)mp;
+	(void)lsn;
+	return true;
 }

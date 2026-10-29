@@ -68,7 +68,9 @@ fuzz-build-libfuzzer: $(FUZZER)
 fuzz-libfuzzer:
 	$(MAKE) --no-print-directory fuzz-build-libfuzzer CC=clang FUZZ_NOCRC=1 LIBXFS_WNO='$(LIBXFS_WNO) -Wno-error' \
 		SAN=1 FUZZ_BUILD=1 OUT=$(OUT)-fuzzer \
-		SANFLAGS='-fsanitize=address,undefined,fuzzer-no-link -fno-sanitize-recover=all -fno-sanitize=alignment -fno-omit-frame-pointer'
+		SANFLAGS='-fsanitize=address,undefined,fuzzer-no-link -fno-sanitize-recover=all -fno-sanitize=alignment,pointer-overflow -fno-omit-frame-pointer'
+	@# pointer-overflow: libxfs forms `hdr + 1` on a NULL if_data for a zero-length local attr fork
+	@# (xfs_attr_sf.h:41, never dereferenced): a clang-only false positive that stops the first run.
 	@echo "run: WFS_FUZZ_BASE=$(FUZZ_BASE) $(OUT)-fuzzer/fuzz_mount_walk <corpus-dir> -max_len=2048"
 
 .PHONY: test-fuzz fuzz-sample fuzz-full fuzz-libfuzzer fuzz-run-test fuzz-run-sample fuzz-build-libfuzzer

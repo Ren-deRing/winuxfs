@@ -75,14 +75,4 @@
 
 /* ---- PENDING(T7) ---- */
 
-/* PENDING(T7) */
-#if defined(WFS_PENDING_ALL) || defined(WFS_ONLY_xfs_log_check_lsn)
-WFS_WEAK bool xfs_log_check_lsn(struct xfs_mount *a0, xfs_lsn_t a1)
-{
-	WFS_STUB_PENDING();
-	/* Permissive until logcheck.c knows the log head: a verified LSN is
-	 * accepted. */
-	return true;
-}
-#endif
-
+/* No PENDING stubs are left: xfs_log_check_lsn is a real definition in mount.c. */

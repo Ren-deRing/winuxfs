@@ -5,7 +5,11 @@
 # btree forks and symlinks) and the minimized bad inputs, each a few sectors
 # on top of that base (.wsd).
 #
-# Usage: tools/gen-fuzz-corpus.sh [MUTATE_RUNNER]   (default: built by make in backends/xfs)
+# Usage: tools/gen-fuzz-corpus.sh [--extra] [MUTATE_RUNNER]   (default: built by make in backends/xfs)
+#   --extra  keep the committed base-small.wsi and every other input, rebuild
+#            only the inputs of the extra_deltas() group below from an image
+#            materialised out of that base (no mkfs; the base is unchanged, so a
+#            new input does not rewrite the whole corpus).
 # Needs mkfs.xfs, xfs_db (-x), python3. Output is committed; tests do not need
 # xfsprogs. bad-*: the walk must report an error code; reg-*: only no
 # crash/hang/over-allocation (the answer may be success).
@@ -15,6 +19,8 @@ for t in mkfs.xfs xfs_db python3 truncate; do
   command -v "$t" >/dev/null || { echo "SKIPPED: $t missing (install xfsprogs)" >&2; exit 77; }
 done
 OUT=tests/xfs/corpus
+EXTRA=0
+if [ "${1:-}" = "--extra" ]; then EXTRA=1; shift; fi
 RUNNER=${1:-}
 if [ -z "$RUNNER" ]; then
   make -s -C backends/xfs fuzz-run-test SAN=1 FUZZ_BUILD=1 OUT=../../target/xfs-shim-fz CORPUS=/nonexistent FUZZ_BASE=/nonexistent >/dev/null 2>&1 || true
@@ -24,8 +30,9 @@ fi
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/fuzzcorpus.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$OUT"
-rm -f "$OUT"/*.wsi "$OUT"/*.wsd
+[ "$EXTRA" = 1 ] || rm -f "$OUT"/*.wsi "$OUT"/*.wsd
 
+if [ "$EXTRA" = 0 ]; then
 python3 -I - "$WORK/src" <<'PY'
 import os, random, sys
 root = sys.argv[1]
@@ -55,6 +62,24 @@ PY
 truncate -s 300M "$WORK/clean.img"
 mkfs.xfs -q -f -b size=1024 -p "$WORK/src" "$WORK/clean.img"
 "$RUNNER" --pack "$WORK/clean.img" "$OUT/base-small.wsi"
+else
+# materialise the committed base: its sectors on a sparse image of the same size
+python3 -I - "$OUT/base-small.wsi" "$WORK/clean.img" <<'PY'
+import struct, sys
+d = open(sys.argv[1], "rb").read()
+assert d[:8] == b"WFSIMG01"
+size = struct.unpack("<Q", d[8:16])[0]
+n = struct.unpack("<I", d[32:36])[0]
+with open(sys.argv[2], "wb") as f:
+    f.truncate(size)
+    p = 36
+    for _ in range(n):
+        role, no = struct.unpack("<IQ", d[p:p + 12])
+        if role == 0:
+            f.seek(no * 512); f.write(d[p + 12:p + 524])
+        p += 524
+PY
+fi
 
 # delta NAME CMD...: copy the clean image, run xfs_db -x with CMD (each a -c
 # argument), store the sectors that differ as NAME.wsd.
@@ -94,6 +119,7 @@ PY
   rm -f "$img"
 }
 
+main_deltas() {
 # Dir block chain / tree: a node entry that points back at its own block, a
 # leafn sibling link that points at itself.
 delta bad-dir-node-cycle 'path /dir_node' 'dblock 33554432' 'write -d nbtree[0].before 33554432' 'write -d nbtree[1].before 33554432'
@@ -138,4 +164,30 @@ delta bad-sb-agcount 'sb 0' 'write -d agcount 1000000'
 delta bad-agi-root 'agi 0' 'write -d root 4294967295'
 delta bad-sb-dirblklog 'sb 0' 'write -d dirblklog 30'
 delta bad-sb-inodelog 'sb 0' 'write -d inodelog 20'
+}
+
+# Inputs added after the base was committed; they only need sectors the clean
+# walk already reads, so `--extra` can add them without touching the base.
+# bmbt leaves of /ext/bmbt.bin are fsblocks 31 and 105 (rightsib 31 -> 105). Plain
+# `write` / `write -d` recompute the CRC, so the checks reached are the structural ones.
+extra_deltas() {
+# bmbt sibling cycle 31 -> 105 -> 31 that is valid for every check but the extent order,
+# with di_nextents / di_nblocks claiming far more extents than the two leaves hold
+# (review I2: unbounded incore extent map). 4M stays under the inode-load ceiling,
+# so the order check (patch 0003) is what stops it; 2^32 is stopped by the ceiling.
+delta bad-bmbt-sibling-cycle-nextents 'path /ext/bmbt.bin' 'fsblock 105' 'type bmapbtd' 'write rightsib 31' \
+  'path /ext/bmbt.bin' 'write core.nextents 4000000' 'write core.nblocks 4000255'
+delta bad-bmbt-sibling-cycle-bignextents 'path /ext/bmbt.bin' 'fsblock 105' 'type bmapbtd' 'write rightsib 31' \
+  'path /ext/bmbt.bin' 'write core.nextents 4294967000' 'write core.nblocks 4294967255'
+# Block-form directory lookup (xfs_dir2_block.c:749 is not patched): the verifier must reject a
+# leaf `address` pointing at the end of the 4096-byte block (offset 4088); write -d keeps a good CRC
+# so the data-block verifier's structure check (not the CRC) has to catch it.
+delta bad-block-dir-address-block-end 'path /dir_block' 'dblock 0' 'write -d bleaf[3].address 511' 'write -d bleaf[50].address 511'
+}
+
+main_deltas_run() {
+  [ "$EXTRA" = 1 ] || main_deltas
+  extra_deltas
+}
+main_deltas_run
 ls "$OUT" | wc -l

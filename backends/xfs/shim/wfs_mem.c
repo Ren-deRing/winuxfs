@@ -1,13 +1,47 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "wfs_shim.h"
 #include <stdio.h>
+#include <stdlib.h>
 
 #define HDR 16u
 static size_t g_used;
-static size_t g_cap;
+static size_t g_cap;		/* explicit cap (tests, fuzzing); 0 = none */
+static size_t g_mount_cap;	/* sum of the budgets of the live mounts */
 static size_t g_cap_hits;
 
 void wfs_mem_set_cap(size_t cap) { __atomic_store_n(&g_cap, cap, __ATOMIC_SEQ_CST); }
+void wfs_mem_mount_budget(int64_t delta)
+{
+	if (delta >= 0)
+		__atomic_fetch_add(&g_mount_cap, (size_t)delta, __ATOMIC_SEQ_CST);
+	else
+		__atomic_fetch_sub(&g_mount_cap, (size_t)-delta, __ATOMIC_SEQ_CST);
+}
+/* The explicit cap wins; otherwise the live mounts' budgets (0 mounts = unlimited). */
+static size_t effective_cap(void)
+{
+	size_t c = __atomic_load_n(&g_cap, __ATOMIC_SEQ_CST);
+
+	return c ? c : __atomic_load_n(&g_mount_cap, __ATOMIC_SEQ_CST);
+}
+
+/*
+ * __GFP_NOFAIL: libxfs callers (xfs_iext_*, xfs_inode_fork, xfs_da_btree)
+ * dereference the result without a check. Returning NULL would be a wild
+ * dereference of the host process, so such a request is served even above
+ * the cap, up to a reserve (cap/8 + 64 MiB). If that is exhausted or malloc
+ * itself fails the process is genuinely out of memory: the miss is logged
+ * through the host log and the process aborts deterministically (no NULL
+ * dereference, no silently corrupted state). The cap and the per-inode extent
+ * ceiling (icache.c) are what keep a hostile image away from this point.
+ */
+static void nofail_fatal(size_t size)
+{
+	xfs_printk_level(KERN_EMERG, NULL,
+			 "out of memory: __GFP_NOFAIL allocation of %zu bytes cannot be satisfied (live %zu); aborting",
+			 size, wfs_mem_used());
+	abort();
+}
 size_t wfs_mem_cap_hits(void) { return __atomic_load_n(&g_cap_hits, __ATOMIC_SEQ_CST); }
 size_t wfs_mem_used(void) { return __atomic_load_n(&g_used, __ATOMIC_SEQ_CST); }
 
@@ -16,13 +50,20 @@ void *wfs_alloc(size_t size, gfp_t flags)
 	size_t total, cap, cur;
 	unsigned char *p;
 
-	if (__builtin_add_overflow(size, HDR, &total))
+	if (__builtin_add_overflow(size, HDR, &total)) {
+		if (flags & __GFP_NOFAIL)
+			nofail_fatal(size);
 		return NULL;
-	cap = __atomic_load_n(&g_cap, __ATOMIC_SEQ_CST);
+	}
+	cap = effective_cap();
+	if (cap && (flags & __GFP_NOFAIL))
+		cap += cap / 8 + ((size_t)64 << 20);	/* emergency reserve */
 	cur = __atomic_load_n(&g_used, __ATOMIC_SEQ_CST);
 	do {	/* reserve first so concurrent allocators cannot overshoot */
 		if (cap && (total > cap || cur > cap - total)) {
 			__atomic_fetch_add(&g_cap_hits, 1, __ATOMIC_SEQ_CST);
+			if (flags & __GFP_NOFAIL)
+				nofail_fatal(size);
 			return NULL;
 		}
 	} while (!__atomic_compare_exchange_n(&g_used, &cur, cur + total, 0,
@@ -30,6 +71,8 @@ void *wfs_alloc(size_t size, gfp_t flags)
 	p = (flags & __GFP_ZERO) ? calloc(1, total) : malloc(total);
 	if (!p) {
 		__atomic_fetch_sub(&g_used, total, __ATOMIC_SEQ_CST);
+		if (flags & __GFP_NOFAIL)
+			nofail_fatal(size);
 		return NULL;
 	}
 	memcpy(p, &total, sizeof(total));

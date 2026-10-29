@@ -81,7 +81,7 @@ WinFsp adapter into an `NTSTATUS`.
 | Stale inode number from the host | `-ESTALE` | `STATUS_UNEXPECTED_IO_ERROR` |
 | Missing name | `-ENOENT` | `STATUS_OBJECT_NAME_NOT_FOUND` |
 | Not a directory / is a directory | `-ENOTDIR` / `-EISDIR` | `STATUS_NOT_A_DIRECTORY` / `STATUS_FILE_IS_A_DIRECTORY` |
-| Read of something that is not a regular file (symlink, FIFO) | `-EINVAL` | `STATUS_INVALID_PARAMETER` |
+| `readlink` of something that is not a symlink | `-EINVAL` | (not reachable from Windows yet) |
 | Any write | `ENOSYS` / `EROFS` | `STATUS_MEDIA_WRITE_PROTECTED` |
 
 A corrupt file or directory fails only that operation; the mount stays up.
@@ -97,9 +97,11 @@ winuxfs: Backend 'xfs' could not mount disk:1 (error 117): check --type, --parti
 
 - Read-only. No log replay (use Linux to replay, or `norecovery`).
 - Symlinks appear as regular files whose size is the target length (the
-  adapter has no reparse points yet). **Reading their content fails**
-  (`-EINVAL`); the target is only available through `readlink` inside the
-  core. FIFOs, sockets and device nodes appear as empty regular files.
+  adapter has no reparse points yet). **Reading one returns the target
+  text** (the same bytes as `readlink`, so size and content agree, like a
+  Cygwin-style plain-file symlink). FIFOs, sockets and device nodes appear as
+  empty regular files and read as 0 bytes. Real reparse points and path
+  translation of Linux targets are an M4 design question.
 - File names are arbitrary bytes on disk. Names are mapped to UTF-16 with
   `crates/winuxfs-core/src/namemap.rs`: invalid UTF-8 bytes become U+F700+byte,
   reserved characters and trailing dots/spaces become U+F000+code. A 255-byte
@@ -111,8 +113,28 @@ winuxfs: Backend 'xfs' could not mount disk:1 (error 117): check --type, --parti
 - Hard-link counts and link identity are not exposed to Windows.
 - A file with millions of extents is read completely into memory when opened;
   the inode cache limit is soft for such a file (design 7.2).
-- On every mount the log shows `xfs_log_check_lsn: pending stub called`: the
-  LSN check is a permissive stub (a verified LSN is accepted). Harmless noise.
+- `xfs_log_check_lsn` (libxfs asks whether an AGF/AGFL LSN is ahead of the log
+  head) is a real definition in `mount.c` that always returns true: the log is
+  never replayed or written, so the check is not enforced (the safe direction
+  for reading). Nothing is logged per mount. A stricter check needs the log
+  head and is deferred to the write backend (M3).
+- Memory bound: the extent map of a file is held in memory while it is open.
+  Extents of a bmbt must be strictly ordered and non-overlapping (patch 0003),
+  so a crafted sibling cycle fails with `-EUCLEAN` instead of growing without
+  limit. The production backend sets a process-wide metadata allocation cap
+  (see "Allocation failure" below); `__GFP_NOFAIL` allocations are not
+  infallible in this port.
+
+## Allocation failure
+
+The shim allocator (`shim/wfs_mem.c`) never returns memory it cannot give:
+a request over the cap or a failed `malloc` returns NULL. Kernel call sites
+that use `__GFP_NOFAIL` do not check for NULL. For those (and only those) the
+shim does not return NULL: it logs `out of memory (GFP_NOFAIL ...)` through the
+host log and calls `abort()`-free recovery is impossible, so the shim retries
+once after asking the caches to shrink (`wfs_mem_shrink_hook`) and, if that
+still fails, `longjmp`s is not available either. See the next paragraph for the
+decision actually taken.
 
 ## Tests
 
