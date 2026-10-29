@@ -13,7 +13,7 @@
  * entries are never evicted, so a host holding more inodes than the limit
  * (or one huge extent tree) exceeds it until the references are dropped.
  *
- * Locking: one mutex per shard guards that shard's hash chains, LRU and the
+ * Locking: one lock per shard (a mutex in the shim) guards that shard's hash chains, LRU and the
  * reference counts; the mutex is held across the disk read of a miss, so a
  * miss stalls only the other lookups of the same shard (design 7.2 accepts
  * this for M2). The buffer cache has its own locks and never calls back, so
@@ -47,7 +47,7 @@ void wfs_xfs_ilookup_ref(struct xfs_inode *ip);
 /* forget(): drops `n` lookup references; no I/O. Unknown inode: ignored. */
 void wfs_xfs_iforget(struct wfs_xfs *x, xfs_ino_t ino, uint64_t n);
 
-/* Pin (root) / unpin. ip must be held. */
+/* Pin (root; never unpinned, the cache is destroyed at unmount). ip must be held. */
 void wfs_xfs_ipin(struct xfs_inode *ip);
 
 /* Statistics for tests. */
@@ -60,6 +60,10 @@ uint64_t wfs_xfs_icache_nlookup(struct wfs_xfs *x);	/* sum of lookup refs */
 /* design 8.1; both return 0 or -WFS_ESTALE/-WFS_EINVAL (backend codes). */
 wfs_ino_t wfs_xfs_ino_to_wfs(const struct xfs_mount *mp, xfs_ino_t ino);
 int wfs_xfs_ino_from_wfs(const struct xfs_mount *mp, wfs_ino_t w, xfs_ino_t *out);
+
+/* iget error mapping by origin of the number (see inomap.c). */
+int wfs_xfs_host_iget_err(int error);	/* host-supplied ino: stale handle -> ESTALE */
+int wfs_xfs_dirent_iget_err(int error);	/* dirent target: unallocated -> EUCLEAN */
 
 /* design 8.2: fill *st from a held inode. -WFS_EUCLEAN for an unknown type. */
 int wfs_xfs_fill_stat(struct xfs_inode *ip, wfs_stat *st);

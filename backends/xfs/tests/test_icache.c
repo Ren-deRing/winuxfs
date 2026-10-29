@@ -7,6 +7,9 @@
  */
 #include "wfs_xfs.h"
 #include "icache.h"
+#include "xfs_cksum.h"
+#include "xfs_sb.h"
+#include <pthread.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -164,7 +167,7 @@ static int mk_proto(const char *img, int many)
 		   "f1 ---4644 1234 5678 %s\n"
 		   "sub d--750 3 4\n inner ---600 5 6 %s\n $\n"
 		   "sl l--777 7 8 %s\n"
-		   "cdev c--666 0 0 12 34\nbdev b--660 0 0 8 1\nfifo p--644 0 0\n", src, src, src);
+		   "cdev c--666 0 0 12 34\ncdev2 c--666 0 0 300 70000\nbdev b--660 0 0 8 1\nfifo p--644 0 0\n", src, src, src);
 	if (many) {
 		fprintf(f, "many d--755 0 0\n");
 		for (i = 0; i < many; i++)
@@ -255,6 +258,7 @@ static void getattr_matches_xfs_db_for_fixture_paths(void)
 	check_path(&m, img_main, "/sub/inner", WFS_FT_REG);
 	check_path(&m, img_main, "/sl", WFS_FT_LNK);
 	check_path(&m, img_main, "/cdev", WFS_FT_CHR);
+	check_path(&m, img_main, "/cdev2", WFS_FT_CHR);	/* major > 255, minor > 65535 */
 	check_path(&m, img_main, "/bdev", WFS_FT_BLK);
 	check_path(&m, img_main, "/fifo", WFS_FT_FIFO);
 	CHECK_EQ(wfs_xfs_op_getattr(m.x, WFS_ROOT_INO, &st), 0);
@@ -291,7 +295,6 @@ static void cache_limit_64_inodes_still_correct(void)
 		}
 		CHECK(wfs_xfs_icache_count(m.x) <= 64);
 	}
-	if (ok < 300) fprintf(stderr, "ok=%llu base=%llu\n", (unsigned long long)ok, (unsigned long long)base);
 	CHECK(ok >= 300);
 	CHECK(wfs_xfs_icache_count(big.x) > 64);
 	CHECK(wfs_xfs_icache_refs(m.x) == 0);
@@ -361,6 +364,152 @@ static void corrupt_inode_not_cached(void)
 	mnt_close(&m);
 }
 
+/* ---- review follow-ups (T8 round 1) ---- */
+
+/* rewrite one big-endian u64 superblock field and fix the CRC */
+static int patch_sb_u64(const char *path, size_t off, uint64_t v)
+{
+	uint8_t buf[512];
+	int fd = open(path, O_RDWR), i, rc = -1;
+
+	if (fd < 0 || pread(fd, buf, sizeof(buf), 0) != (ssize_t)sizeof(buf))
+		goto out;
+	for (i = 0; i < 8; i++)
+		buf[off + i] = (uint8_t)(v >> (56 - 8 * i));
+	xfs_update_cksum((char *)buf, sizeof(buf), XFS_SB_CRC_OFF);
+	rc = pwrite(fd, buf, sizeof(buf), 0) == (ssize_t)sizeof(buf) ? 0 : -1;
+out:
+	if (fd >= 0)
+		close(fd);
+	return rc;
+}
+
+/* sb_rootino is not validated by the superblock verifier: load_root must cope */
+static void hostile_rootino_fails_mount_cleanly(void)
+{
+	static const uint64_t vals[] = { 0, 1, 5, 129, 130, 200, 1ull << 40, XFS_MAXINUMBER,
+					 XFS_MAXINUMBER + 1, UINT64_MAX };
+	char bad[600];
+	size_t i;
+
+	snprintf(bad, sizeof(bad), "%s/rootino.img", tmp);
+	for (i = 0; i < sizeof(vals) / sizeof(vals[0]); i++) {
+		struct mnt m;
+		int rc;
+
+		sh("cp --sparse=always '%s' '%s'", img_main, bad);
+		CHECK(patch_sb_u64(bad, offsetof(struct xfs_dsb, sb_rootino), vals[i]) == 0);
+		rc = mnt_open(&m, bad, NULL);
+		CHECK(rc != 0);	/* 129/130 are regular files, the rest free or out of range */
+		if (rc == 0) {
+			mnt_close(&m);
+		} else {
+			close(m.dev.fd);
+			live--;
+			CHECK(wfs_mem_used() == mem_base);
+		}
+	}
+}
+
+/* looked-up inodes stay resident (soft limit); forgetting makes them evictable */
+static void forget_makes_entries_evictable(void)
+{
+	struct mnt m;
+	struct xfs_inode *ip, *o;
+	uint64_t base = db_ino(img_many, "/many"), i, held[200];
+	int n = 0;
+
+	CHECK(mnt_open(&m, img_many, "inodecache_entries=64") == 0);
+	for (i = base + 1; i < base + 6000 && n < 200; i++) {
+		if (wfs_xfs_iget(m.x, i, &ip))
+			continue;
+		wfs_xfs_ilookup_ref(ip);
+		xfs_irele(ip);
+		held[n++] = i;
+	}
+	CHECK(n == 200);
+	CHECK(wfs_xfs_icache_count(m.x) >= 200);	/* referenced entries are never evicted */
+	CHECK(wfs_xfs_icache_nlookup(m.x) == 200);
+	for (i = 0; i < (uint64_t)n; i++)
+		wfs_xfs_op_forget(m.x, held[i], 1);
+	CHECK(wfs_xfs_icache_nlookup(m.x) == 0);
+	CHECK(wfs_xfs_icache_count(m.x) <= 64);	/* evicted as soon as they became idle */
+	CHECK(wfs_xfs_iget(m.x, held[0], &o) == 0);	/* and still readable afterwards */
+	xfs_irele(o);
+	mnt_close(&m);
+}
+
+/* concurrent getattr / lookup-ref / forget on a tiny cache; results must match a serial pass */
+struct stress {
+	struct wfs_xfs *x;
+	const uint64_t *inos;
+	int nino;
+	const wfs_stat *expect;
+	unsigned seed;
+	int bad;
+};
+static void *stress_thread(void *arg)
+{
+	struct stress *st = arg;
+	int it;
+
+	for (it = 0; it < 6000; it++) {
+		int k;
+		wfs_stat s;
+		struct xfs_inode *ip;
+
+		st->seed = st->seed * 1664525u + 1013904223u;
+		k = (int)((st->seed >> 8) % (unsigned)st->nino);
+		switch ((st->seed >> 4) & 3) {
+		case 0:
+		case 1:
+			if (wfs_xfs_op_getattr(st->x, st->inos[k], &s) ||
+			    memcmp(&s, &st->expect[k], sizeof(s)))
+				st->bad++;
+			break;
+		default:
+			if (wfs_xfs_iget(st->x, st->inos[k], &ip)) {
+				st->bad++;
+				break;
+			}
+			wfs_xfs_ilookup_ref(ip);
+			xfs_irele(ip);
+			wfs_xfs_op_forget(st->x, st->inos[k], 1);
+		}
+	}
+	return NULL;
+}
+
+static void concurrent_getattr_lookup_forget(void)
+{
+	enum { NT = 8, NI = 150 };
+	struct mnt m;
+	pthread_t th[NT];
+	struct stress st[NT];
+	uint64_t inos[NI], base = db_ino(img_many, "/many"), i;
+	wfs_stat expect[NI];
+	int n = 0, t, bad = 0;
+
+	CHECK(mnt_open(&m, img_many, "inodecache_entries=64") == 0);
+	for (i = base + 1; i < base + 6000 && n < NI; i++)
+		if (wfs_xfs_op_getattr(m.x, i, &expect[n]) == 0)
+			inos[n++] = i;
+	CHECK(n == NI);
+	for (t = 0; t < NT; t++) {
+		st[t] = (struct stress){ m.x, inos, NI, expect, 1234u + t, 0 };
+		CHECK(pthread_create(&th[t], NULL, stress_thread, &st[t]) == 0);
+	}
+	for (t = 0; t < NT; t++) {
+		pthread_join(th[t], NULL);
+		bad += st[t].bad;
+	}
+	CHECK_EQ(bad, 0);
+	CHECK(wfs_xfs_icache_refs(m.x) == 0);
+	CHECK(wfs_xfs_icache_nlookup(m.x) == 0);
+	CHECK(wfs_xfs_icache_count(m.x) <= 64);
+	mnt_close(&m);
+}
+
 int main(void)
 {
 	const char *td = getenv("TMPDIR");
@@ -387,6 +536,9 @@ int main(void)
 	RUN(cache_limit_64_inodes_still_correct);
 	RUN(forget_balances_refs);
 	RUN(corrupt_inode_not_cached);
+	RUN(hostile_rootino_fails_mount_cleanly);
+	RUN(forget_makes_entries_evictable);
+	RUN(concurrent_getattr_lookup_forget);
 	CHECK(nwrites == 0);
 	sh("rm -rf '%s'", tmp);
 	printf("test_icache: %d checks, %d failures, %d skipped\n", checks, failures, skipped);

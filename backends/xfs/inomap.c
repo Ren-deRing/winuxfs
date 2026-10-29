@@ -72,13 +72,22 @@ int wfs_xfs_fill_stat(struct xfs_inode *ip, wfs_stat *st)
 }
 
 /*
- * iget error for an inode number the HOST supplied: unallocated or out of
- * range means the handle is stale; everything else is the usual mapping.
+ * iget error -> ABI error, by where the inode number came from. -EINVAL and
+ * -ENOENT mean "not an allocated inode": for a number the HOST supplied that
+ * is a stale handle; for a number read from a directory entry the filesystem
+ * is inconsistent. Everything else (corruption, I/O, ENOMEM) maps the same.
  */
-static int host_iget_err(int error)
+int wfs_xfs_host_iget_err(int error)
 {
 	if (error == -EINVAL || error == -ENOENT)
 		return -WFS_ESTALE;
+	return wfs_xfs_err(error);
+}
+
+int wfs_xfs_dirent_iget_err(int error)
+{
+	if (error == -EINVAL || error == -ENOENT)
+		return -WFS_EUCLEAN;
 	return wfs_xfs_err(error);
 }
 
@@ -93,7 +102,7 @@ wfs_err_t wfs_xfs_op_getattr(struct wfs_xfs *x, wfs_ino_t ino, wfs_stat *st)
 		return error;
 	error = wfs_xfs_iget(x, xino, &ip);
 	if (error)
-		return host_iget_err(error);
+		return wfs_xfs_host_iget_err(error);
 	error = wfs_xfs_fill_stat(ip, st);
 	xfs_irele(ip);
 	return error;
