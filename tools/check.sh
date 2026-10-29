@@ -22,8 +22,10 @@ cargo test --workspace
 tools/vendor-xfs.sh --verify
 if command -v gcc >/dev/null; then
   make -s -C backends/xfs test-shim
+  make -s -C backends/xfs test-buf
+  make -s -C backends/xfs tsan-buf
 else
-  echo "SKIPPED: backends/xfs shim test (gcc not installed)"
+  echo "SKIPPED: backends/xfs shim and buffer cache tests (gcc not installed)"
 fi
 if command -v x86_64-w64-mingw32-gcc >/dev/null; then
   make -s -C backends/xfs CROSS=x86_64-w64-mingw32- test-shim-build

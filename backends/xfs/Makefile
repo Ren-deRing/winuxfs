@@ -82,8 +82,8 @@ LIBXFS_NAMES = xfs_sb xfs_ag xfs_group xfs_types xfs_bit xfs_ialloc xfs_ialloc_b
 	xfs_attr_leaf xfs_rtgroup xfs_metafile xfs_rmap_btree xfs_refcount_btree
 LIBXFS_OBJ = $(addprefix $(OUT)/libxfs/,$(addsuffix .o,$(LIBXFS_NAMES)))
 # Backend code (entry, stubs, later tasks' files); mk/*.mk fragments append to
-# BACKEND_SRC. Weak PENDING stubs live in stubs_pending.c.
-BACKEND_SRC += entry_stub.c stubs_ro.c
+# BACKEND_SRC (prerequisite lists expand at parse time, so add files here, not in mk/). Weak PENDING stubs live in stubs_pending.c.
+BACKEND_SRC += entry_stub.c stubs_ro.c buf.c
 BACKEND_OBJ = $(addprefix $(OUT)/be/,$(BACKEND_SRC:.c=.o))
 # PENDING stubs: one object per stub in an archive that is searched last, so
 # a real definition in any directly linked object replaces the stub.
