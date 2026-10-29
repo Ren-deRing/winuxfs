@@ -71,7 +71,91 @@ probe-libxfs:
 	  else fail=$$((fail+1)); echo "FAIL $$(basename $$f): $$(grep -m1 -E 'error' ../../target/probe.err)"; fi; \
 	done; echo "probe-libxfs: $$pass pass, $$fail fail of $$((pass+fail))"
 
-clean:
-	rm -rf ../../target/xfs-shim ../../target/xfs-shim-win
+# ---- Task 4: libxfs read path objects and the plugin ----
+# The 29 read-path libxfs files (design 5.1), compiled with kernel-code warning
+# relaxations, -ffunction-sections/-fdata-sections (in CFLAGS) so the linker
+# can --gc-sections the write path away.
+LIBXFS_NAMES = xfs_sb xfs_ag xfs_group xfs_types xfs_bit xfs_ialloc xfs_ialloc_btree \
+	xfs_alloc xfs_alloc_btree xfs_btree xfs_bmap xfs_bmap_btree xfs_iext_tree \
+	xfs_inode_buf xfs_inode_fork xfs_inode_util xfs_da_btree xfs_dir2 xfs_dir2_block \
+	xfs_dir2_data xfs_dir2_leaf xfs_dir2_node xfs_dir2_sf xfs_symlink_remote \
+	xfs_attr_leaf xfs_rtgroup xfs_metafile xfs_rmap_btree xfs_refcount_btree
+LIBXFS_OBJ = $(addprefix $(OUT)/libxfs/,$(addsuffix .o,$(LIBXFS_NAMES)))
+# Backend code (entry, stubs, later tasks' files); mk/*.mk fragments append to
+# BACKEND_SRC. Weak PENDING stubs live in stubs_pending.c.
+BACKEND_SRC += entry_stub.c stubs_ro.c
+BACKEND_OBJ = $(addprefix $(OUT)/be/,$(BACKEND_SRC:.c=.o))
+# PENDING stubs: one object per stub in an archive that is searched last, so
+# a real definition in any directly linked object replaces the stub.
+PENDING_SYMS = $(sort $(shell grep -o 'WFS_ONLY_[A-Za-z0-9_]*' stubs_pending.c | sed 's/^WFS_ONLY_//'))
+PENDING_OBJ = $(addprefix $(OUT)/pending/,$(addsuffix .o,$(PENDING_SYMS)))
+PENDING_LIB = $(OUT)/libxfs_pending.a
+SHIM_OBJ = $(patsubst shim/%.c,$(OUT)/shim/%.o,$(SHIM_SRC))
+EXT = $(if $(CROSS),dll,so)
+PLUGIN_DIR ?= ../../target/plugins$(if $(CROSS),-win,)
+PLUGIN = $(PLUGIN_DIR)/winuxfs_backend_xfs.$(EXT)
+PIC = $(if $(CROSS),,-fPIC)
+VIS = -fvisibility=hidden
+# Hidden visibility everywhere; only wfs_backend_entry is exported
+# (WFS_EXPORT in entry_stub.c).
+$(OUT)/libxfs/%.o: $(KERNEL_XFS_SRC)/libxfs/%.c $(SHIM_HDR) Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(PIC) $(VIS) $(INC) $(KINC) -c -o $@ $<
+$(OUT)/shim/%.o: shim/%.c $(SHIM_HDR) Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(SANFLAGS) $(PIC) $(VIS) $(INC) -c -o $@ $<
+# stubs include kernel headers: kernel-code warning relaxations apply
+$(OUT)/be/stubs_%.o: LIBXFS_BE_WNO = $(LIBXFS_WNO)
+$(OUT)/be/%.o: %.c $(SHIM_HDR) Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(LIBXFS_BE_WNO) $(SANFLAGS) $(PIC) $(VIS) $(INC) $(KINC) -c -o $@ $<
 
-.PHONY: all clean probe-libxfs test-shim test-shim-build probe
+$(OUT)/pending/%.o: stubs_pending.c stubs.h $(SHIM_HDR) Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(PIC) $(VIS) $(INC) $(KINC) -DWFS_ONLY_$* -c -o $@ $<
+$(PENDING_LIB): $(PENDING_OBJ)
+	rm -f $@
+	$(CROSS)ar rcs $@ $^
+
+libxfs-objs: $(LIBXFS_OBJ)
+
+$(PLUGIN): $(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB)
+	@mkdir -p $(PLUGIN_DIR)
+	$(CC) $(SANFLAGS) -shared -Wl,--gc-sections -Wl,--no-undefined -o $@ $^ $(if $(CROSS),-static -lpthread,-pthread)
+
+plugin: $(PLUGIN)
+
+# Every libxfs section kept (no gc): the linker must resolve ALL symbols of the
+# 29 files, not only those reachable from today's entry point, so later tasks
+# never meet a new unresolved symbol. Not shipped.
+FULL = $(OUT)/full_check.$(EXT)
+$(FULL): $(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB)
+	$(CC) $(SANFLAGS) -shared -Wl,--no-gc-sections -Wl,--no-undefined -o $@ $^ $(if $(CROSS),-static -lpthread,-pthread)
+
+link-full: $(FULL)
+
+# Stub behaviour test (native only): stubs return errors, log, never abort.
+STUBTEST = $(OUT)/test_stubs$(EXE)
+$(STUBTEST): tests/test_stubs.c stubs_ro.c stubs_pending.c stubs.h $(SHIM_SRC) $(SHIM_HDR) Makefile | $(OUT)
+	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) -DWFS_ASSERT_FATAL -DWFS_PENDING_ALL $(INC) $(KINC) -o $@ \
+		tests/test_stubs.c stubs_ro.c stubs_pending.c $(SHIM_SRC) $(LIBS)
+
+test-stubs: $(STUBTEST)
+ifeq ($(CROSS),)
+	$(STUBTEST)
+else
+	@echo "cross build: stub test compiled, not run (no Wine)"
+endif
+
+clean-objs:
+	rm -rf $(OUT)/libxfs
+
+test-link:
+	sh tests/test_link.sh
+
+clean:
+	rm -rf ../../target/xfs-shim ../../target/xfs-shim-win ../../target/plugins/winuxfs_backend_xfs.so ../../target/plugins-win/winuxfs_backend_xfs.dll
+
+.PHONY: all clean probe-libxfs test-shim test-shim-build probe libxfs-objs plugin link-full clean-objs test-link test-stubs
+
+-include $(wildcard $(dir $(lastword $(MAKEFILE_LIST)))mk/*.mk)
