@@ -1273,7 +1273,7 @@ wfs_log_set_reader_provider(wfs_log_reader_provider fn)
 }
 
 int
-xfs_log_mount_ro_check(struct xfs_mount *mp, bool norecovery)
+xfs_log_mount_ro_check(struct xfs_mount *mp, bool norecovery, bool *dirty_out)
 {
 	struct wfs_log_params	p;
 	struct wfs_log_reader	r;
@@ -1299,5 +1299,5 @@ xfs_log_mount_ro_check(struct xfs_mount *mp, bool norecovery)
 	error = g_provider(mp, &r);
 	if (error)
 		return error;
-	return wfs_log_check(&p, &r, norecovery, NULL);
+	return wfs_log_check(&p, &r, norecovery, dirty_out);
 }

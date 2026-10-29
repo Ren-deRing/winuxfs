@@ -227,10 +227,10 @@ static void copy_of(const char *dst) { sh("cp --sparse=always '%s' '%s'", base_i
 /* patch the superblock sector in place: value bytes at off, then fix the CRC */
 static int patch_sb(const char *path, size_t off, const void *val, size_t n, unsigned sect)
 {
-	uint8_t buf[512];
+	uint8_t buf[4096];
 	int fd = open(path, O_RDWR), rc = -1;
 
-	if (fd < 0 || sect != 512 || pread(fd, buf, sect, 0) != (ssize_t)sect)
+	if (fd < 0 || sect > sizeof(buf) || pread(fd, buf, sect, 0) != (ssize_t)sect)
 		goto out;
 	memcpy(buf + off, val, n);
 	xfs_update_cksum((char *)buf, sect, XFS_SB_CRC_OFF);
@@ -670,6 +670,44 @@ static void bad_sector_size_and_geometry_values(void)
 /* deterministic random single/double byte mutations of the sb sector, CRC
  * fixed: the result must be a defined error or a clean mount, never a crash
  * or a leak (ASan/UBSan run this too). */
+/*
+ * With the SECTORBIT feature (any 4096-sector fs) libxfs shifts by
+ * sb_logsectlog; prevalidate_sb() must reject a hostile value first (UBSan
+ * aborted on 255 before). The 512-sector base image never reaches that code.
+ */
+static void hostile_logsectlog_on_4096_sector_fs(void)
+{
+	char img[700];
+	static const uint8_t vals[] = { 16, 31, 32, 63, 255 };
+	size_t i;
+
+	NEED(tools_mkfs, "mkfs.xfs");
+	path_join(img, sizeof(img), tmp, "s4096.img");
+	if (sh("rm -f '%s' && truncate -s 300m '%s' && mkfs.xfs -q -f -m crc=1 -b size=4096 -s size=4096 '%s' >/dev/null 2>&1",
+	       img, img, img)) {
+		skipped++;
+		printf("SKIPPED %s: mkfs.xfs cannot make 4096-byte sectors\n", __func__);
+		return;
+	}
+	{
+		struct mnt m;
+
+		CHECK_RC(mnt_open(&m, img, NULL, NULL, NULL, 4096), 0);	/* the image itself is fine */
+		if (m.x)
+			mnt_unmount(&m);
+	}
+	for (i = 0; i < sizeof(vals) / sizeof(vals[0]); i++) {
+		struct mnt m;
+		int rc;
+
+		CHECK(patch_sb(img, SBOFF(sb_logsectlog), &vals[i], 1, 4096) == 0);
+		rc = mnt_open(&m, img, NULL, NULL, NULL, 4096);
+		CHECK_RC(rc, -WFS_EUCLEAN);
+		if (rc == 0)
+			mnt_unmount(&m);
+	}
+}
+
 static void superblock_mutation_fuzz(void)
 {
 	char img[700];
@@ -961,6 +999,7 @@ int main(int argc, char **argv)
 	RUN(probe_true_only_for_xfs_v5, fixdir);
 	RUN(superblock_crc_error_is_euclean);
 	RUN(bad_sector_size_and_geometry_values);
+	RUN(hostile_logsectlog_on_4096_sector_fs);
 	RUN(superblock_mutation_fuzz);
 	RUN(option_parser_rejects_bad_values);
 	RUN(dirty_log_refused_then_norecovery, rootdir);

@@ -289,6 +289,7 @@ static int prevalidate_sb(struct wfs_xfs *x, const struct xfs_sb *sb)
 	if (sb->sb_blocklog < XFS_MIN_BLOCKSIZE_LOG || sb->sb_blocklog > XFS_MAX_BLOCKSIZE_LOG ||
 	    sb->sb_blocksize != (1u << sb->sb_blocklog) ||
 	    sb->sb_sectlog < XFS_MIN_SECTORSIZE_LOG || sb->sb_sectlog > XFS_MAX_SECTORSIZE_LOG ||
+	    sb->sb_logsectlog > XFS_MAX_SECTORSIZE_LOG ||
 	    sb->sb_sectsize != (1u << sb->sb_sectlog) ||
 	    sb->sb_inodelog < XFS_DINODE_MIN_LOG || sb->sb_inodelog > XFS_DINODE_MAX_LOG ||
 	    sb->sb_inodesize != (1u << sb->sb_inodelog) ||
@@ -574,7 +575,7 @@ static int log_provider(struct xfs_mount *mp, struct wfs_log_reader *r)
 	return 0;
 }
 
-static int check_summary_counts(struct wfs_xfs *x)
+static int check_summary_counts(struct wfs_xfs *x, bool log_dirty)
 {
 	struct xfs_mount *mp = &x->mp;
 	struct xfs_sb *sbp = &mp->m_sb;
@@ -585,10 +586,10 @@ static int check_summary_counts(struct wfs_xfs *x)
 
 	/*
 	 * Clean log: the superblock counters are trusted unless obviously
-	 * wrong. With norecovery the log may be dirty (logcheck does not say),
-	 * and lazy counters are then stale: recompute from the AGs.
+	 * wrong. A dirty log (mounted with norecovery) leaves lazy counters
+	 * stale: recompute them from the AGs.
 	 */
-	if (!bad && !x->opts.norecovery)
+	if (!bad && !log_dirty)
 		return 0;
 	error = xfs_initialize_perag_data(mp, sbp->sb_agcount);
 	if (error)
@@ -629,6 +630,7 @@ wfs_err_t wfs_xfs_mount(const wfs_host_api *api, wfs_blkdev *const devs[WFS_DEV_
 	struct wfs_xfs *x;
 	struct xfs_mount *mp;
 	int error, r;
+	bool log_dirty = false;	/* set by the log check; stale counters need a recompute */
 
 	*out = NULL;
 	if (!api || !devs || !devs[WFS_DEV_DATA] || !api->blk_read ||
@@ -700,7 +702,7 @@ wfs_err_t wfs_xfs_mount(const wfs_host_api *api, wfs_blkdev *const devs[WFS_DEV_
 		goto fail;
 	/* 6 */
 	if (mp->m_logdev_targp) {
-		error = xfs_log_mount_ro_check(mp, x->opts.norecovery);
+		error = xfs_log_mount_ro_check(mp, x->opts.norecovery, &log_dirty);
 		if (error) {
 			if (error == -EUCLEAN || error == -WFS_EUCLEAN)
 				LOGMSG(x, 0, "xfs: log check failed: not mountable without "
@@ -713,7 +715,7 @@ wfs_err_t wfs_xfs_mount(const wfs_host_api *api, wfs_blkdev *const devs[WFS_DEV_
 	if (error)
 		goto fail;
 	/* 8 */
-	error = check_summary_counts(x);
+	error = check_summary_counts(x, log_dirty);
 	if (error)
 		goto fail;
 

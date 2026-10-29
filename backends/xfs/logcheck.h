@@ -62,6 +62,6 @@ void wfs_log_set_reader_provider(wfs_log_reader_provider fn);
  * Mount-time entry point (M2 design 6.2): derives the parameters from
  * mp->m_sb, gets the reader from the provider and runs wfs_log_check().
  */
-int xfs_log_mount_ro_check(struct xfs_mount *mp, bool norecovery);
+int xfs_log_mount_ro_check(struct xfs_mount *mp, bool norecovery, bool *dirty_out);
 
 #endif

@@ -1104,7 +1104,7 @@ static void mount_entry_point(void)
 	int fd;
 
 	NEED_TOOLS();
-	CHECK(xfs_log_mount_ro_check(NULL, false) == -WFS_EINVAL);	/* no provider */
+	CHECK(xfs_log_mount_ro_check(NULL, false, NULL) == -WFS_EINVAL);	/* no provider */
 	CHECK(fresh(&im, "mnt", "", NULL) == 0);
 	fd = open(im.data, O_RDONLY);
 	CHECK(pread(fd, &dsb, sizeof(dsb), 0) == (ssize_t)sizeof(dsb));
@@ -1131,7 +1131,7 @@ static void mount_entry_point(void)
 	g_reader.ctx = &fc;
 	wfs_log_set_reader_provider(provider);
 
-	CHECK(xfs_log_mount_ro_check(mp, false) == 0);	/* clean */
+	CHECK(xfs_log_mount_ro_check(mp, false, NULL) == 0);	/* clean */
 	close(fc.fd);
 
 	CHECK(slog_load(&s, &im) == 0);
@@ -1139,13 +1139,13 @@ static void mount_entry_point(void)
 	CHECK(slog_store(&s, &im) == 0);
 	fc.fd = open(im.data, O_RDONLY);
 	log_reset();
-	CHECK(xfs_log_mount_ro_check(mp, false) == ER_CORRUPT);
+	CHECK(xfs_log_mount_ro_check(mp, false, NULL) == ER_CORRUPT);
 	/* dirty, not unparsable: the message says so and names the way out */
 	CHECK(strstr(logbuf, "log is dirty") != NULL);
 	CHECK(strstr(logbuf, "cannot be interpreted") == NULL);
 	CHECK(strstr(logbuf, "norecovery") != NULL);
 	log_reset();
-	CHECK(xfs_log_mount_ro_check(mp, true) == 0);
+	CHECK(xfs_log_mount_ro_check(mp, true, NULL) == 0);
 	CHECK(strstr(logbuf, "log is dirty") != NULL);
 	close(fc.fd);
 
@@ -1158,7 +1158,7 @@ static void mount_entry_point(void)
 	CHECK(slog_store(&s, &im) == 0);
 	fc.fd = open(im.data, O_RDONLY);
 	log_reset();
-	CHECK(xfs_log_mount_ro_check(mp, false) == ER_CORRUPT);
+	CHECK(xfs_log_mount_ro_check(mp, false, NULL) == ER_CORRUPT);
 	CHECK(strstr(logbuf, "log is dirty") == NULL);
 	CHECK(strstr(logbuf, "cannot be interpreted") != NULL);
 	close(fc.fd);
