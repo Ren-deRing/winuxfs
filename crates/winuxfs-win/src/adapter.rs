@@ -93,6 +93,7 @@ pub const STATUS_DISK_FULL: NTSTATUS = 0xC000_007F_u32 as i32;
 pub const STATUS_MEDIA_WRITE_PROTECTED: NTSTATUS = 0xC000_00A2_u32 as i32;
 pub const STATUS_FILE_IS_A_DIRECTORY: NTSTATUS = 0xC000_00BA_u32 as i32;
 pub const STATUS_UNEXPECTED_IO_ERROR: NTSTATUS = 0xC000_00E9_u32 as i32;
+pub const STATUS_FILE_CORRUPT_ERROR: NTSTATUS = 0xC000_0102_u32 as i32;
 pub const STATUS_DIRECTORY_NOT_EMPTY: NTSTATUS = 0xC000_0101_u32 as i32;
 pub const STATUS_NOT_A_DIRECTORY: NTSTATUS = 0xC000_0103_u32 as i32;
 
@@ -124,6 +125,7 @@ pub fn errno_to_ntstatus(e: Errno) -> NTSTATUS {
         Errno::ENAMETOOLONG => STATUS_OBJECT_NAME_INVALID,
         Errno::EBUSY => STATUS_SHARING_VIOLATION,
         Errno::EINVAL => STATUS_INVALID_PARAMETER,
+        Errno::EUCLEAN => STATUS_FILE_CORRUPT_ERROR,
         _ => STATUS_UNEXPECTED_IO_ERROR,
     }
 }
@@ -378,22 +380,37 @@ mod tests {
     #[test]
     fn errno_table_is_total() {
         let table: &[(i32, u32)] = &[
-            (2, 0xC000_0034),  // ENOENT
-            (17, 0xC000_0035), // EEXIST
-            (20, 0xC000_0103), // ENOTDIR
-            (21, 0xC000_00BA), // EISDIR
-            (39, 0xC000_0101), // ENOTEMPTY
-            (13, 0xC000_0022), // EACCES
-            (30, 0xC000_00A2), // EROFS
-            (28, 0xC000_007F), // ENOSPC
-            (36, 0xC000_0033), // ENAMETOOLONG
-            (16, 0xC000_0043), // EBUSY
-            (22, 0xC000_000D), // EINVAL
+            (2, 0xC000_0034),   // ENOENT
+            (17, 0xC000_0035),  // EEXIST
+            (20, 0xC000_0103),  // ENOTDIR
+            (21, 0xC000_00BA),  // EISDIR
+            (39, 0xC000_0101),  // ENOTEMPTY
+            (13, 0xC000_0022),  // EACCES
+            (30, 0xC000_00A2),  // EROFS
+            (28, 0xC000_007F),  // ENOSPC
+            (36, 0xC000_0033),  // ENAMETOOLONG
+            (16, 0xC000_0043),  // EBUSY
+            (22, 0xC000_000D),  // EINVAL
+            (117, 0xC000_0102), // EUCLEAN -> STATUS_FILE_CORRUPT_ERROR
         ];
         for &(e, st) in table {
             assert_eq!(errno_to_ntstatus(Errno(e)) as u32, st, "errno {e}");
         }
-        for e in [0, 1, 5, 9, 12, 38, 75, 133, 134, -1, i32::MAX, i32::MIN] {
+        for e in [
+            0,
+            1,
+            5,
+            9,
+            12,
+            38,
+            75,
+            116,
+            133,
+            134,
+            -1,
+            i32::MAX,
+            i32::MIN,
+        ] {
             if table.iter().any(|&(t, _)| t == e) {
                 continue;
             }

@@ -22,6 +22,10 @@ impl Errno {
     pub const ENOSYS: Errno = Errno(38);
     pub const ENOTEMPTY: Errno = Errno(39);
     pub const EOVERFLOW: Errno = Errno(75);
+    /// Stale handle: the inode number does not name an inode (XFS backend).
+    pub const ESTALE: Errno = Errno(116);
+    /// Structure needs cleaning: on-disk corruption detected (XFS backend).
+    pub const EUCLEAN: Errno = Errno(117);
 
     /// Convert a plugin ABI return value: `0` is success, negative is `-errno`,
     /// positive is invalid and maps to `EIO`.
