@@ -260,11 +260,6 @@ int xfs_filestream_select_ag(struct xfs_bmalloca *ap, struct xfs_alloc_arg *args
 	return -ENOSYS;
 }
 
-void xfs_fs_mark_healthy(struct xfs_mount *mp, unsigned int mask)
-{
-	WFS_STUB_RO();
-}
-
 void xfs_fs_mark_sick(struct xfs_mount *mp, unsigned int mask)
 {
 	WFS_STUB_RO();
@@ -381,11 +376,6 @@ void xfs_refcount_decrease_extent(struct xfs_trans *tp, bool isrt, struct xfs_bm
 	WFS_STUB_RO();
 }
 
-void xfs_reinit_percpu_counters(struct xfs_mount *mp)
-{
-	WFS_STUB_RO();
-}
-
 int xfs_rmap_alloc(struct xfs_trans *tp, struct xfs_buf *agbp, struct xfs_perag *pag, xfs_agblock_t bno, xfs_extlen_t len, const struct xfs_owner_info *oinfo)
 {
 	WFS_STUB_RO();
@@ -453,12 +443,6 @@ int xfs_rtrefcountbt_init_cur_cache(void)
 	return -ENOSYS;
 }
 
-unsigned int xfs_rtrefcountbt_maxrecs(struct xfs_mount *mp, unsigned int blocklen, bool leaf)
-{
-	WFS_STUB_RO();
-	return 0;
-}
-
 xfs_filblks_t xfs_rtrmapbt_calc_reserves(struct xfs_mount *mp)
 {
 	WFS_STUB_RO();
@@ -480,12 +464,6 @@ int xfs_rtrmapbt_init_cur_cache(void)
 {
 	WFS_STUB_RO();
 	return -ENOSYS;
-}
-
-unsigned int xfs_rtrmapbt_maxrecs(struct xfs_mount *mp, unsigned int blocklen, bool leaf)
-{
-	WFS_STUB_RO();
-	return 0;
 }
 
 int xfs_rtsummary_create(struct xfs_rtgroup *rtg, struct xfs_inode *ip, struct xfs_trans *tp, bool init)
@@ -511,11 +489,6 @@ void xfs_trans_binval(xfs_trans_t *a0, struct xfs_buf *a1)
 }
 
 void xfs_trans_bjoin(xfs_trans_t *a0, struct xfs_buf *a1)
-{
-	WFS_STUB_RO();
-}
-
-void xfs_trans_brelse(xfs_trans_t *a0, struct xfs_buf *a1)
 {
 	WFS_STUB_RO();
 }
@@ -593,12 +566,6 @@ bool xfs_trans_ordered_buf(xfs_trans_t *a0, struct xfs_buf *a1)
 {
 	WFS_STUB_RO();
 	return false;
-}
-
-int xfs_trans_read_buf_map(struct xfs_mount *mp, struct xfs_trans *tp, struct xfs_buftarg *target, struct xfs_buf_map *map, int nmaps, xfs_buf_flags_t flags, struct xfs_buf **bpp, const struct xfs_buf_ops *ops)
-{
-	WFS_STUB_RO();
-	return -EROFS;
 }
 
 int xfs_trans_roll(struct xfs_trans **a0)

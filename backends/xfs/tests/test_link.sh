@@ -20,12 +20,13 @@ command -v gcc >/dev/null && have_native=1
 command -v ${MINGW}gcc >/dev/null && have_mingw=1
 
 # --- 1. all 29 files compile (-Wall -Wextra -Werror + the kernel-code
-# relaxations of the Makefile) ---
+# relaxations of the Makefile). Objects are NOT cleaned first: -Werror means an
+# object that exists was built without warnings, and make rebuilds on change. ---
 t=all_29_files_compile_without_warnings
 for tc in native mingw; do
   if [ $tc = native ]; then [ $have_native = 1 ] || { echo "SKIPPED $t[native]: gcc not installed"; continue; }; cross=
   else [ $have_mingw = 1 ] || { echo "SKIPPED $t[mingw]: ${MINGW}gcc not installed"; continue; }; cross=$MINGW; fi
-  out=$($M CROSS=$cross OUT=$ROOT/target/xfs-link-$tc clean-objs libxfs-objs 2>&1); rc=$?
+  out=$($M CROSS=$cross OUT=$ROOT/target/xfs-link-$tc libxfs-objs 2>&1); rc=$?
   n=$(find "$ROOT/target/xfs-link-$tc/libxfs" -name '*.o' 2>/dev/null | wc -l)
   if [ $rc -ne 0 ] || [ "$n" -ne 29 ] || echo "$out" | grep -q 'warning'; then
     fail "$t[$tc]" "rc=$rc objects=$n $(echo "$out" | grep -m3 -E 'error|warning')"

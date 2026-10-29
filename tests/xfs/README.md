@@ -91,3 +91,17 @@ sparse, unwritten, fragmented, reflink, device nodes, dirty log, external log +
 RT (two variants). Output `tests/xfs/root-fixtures/*.img.zst` is committed.
 The script refuses to run unless root, uses only new loop devices on temp
 files and cleans up on exit. It has not been run on this host.
+
+### Dirty-log coverage gap (Task 7)
+
+`backends/xfs/tests/test_logcheck.c` builds its dirty logs by synthesizing log
+records into `mkfs.xfs` images (no kernel mount is possible without root), and
+cross-checks the verdict with `xfs_logprint -t`. What that cannot prove: that a
+record written by the real Linux kernel (header layout, CRC over header +
+extension headers + payload, cycle stamping, lsunit-sized records) is accepted
+byte for byte. mkfs writes a zero record CRC and `xfs_logprint -t` does not
+verify CRCs, so no host tool is an independent oracle for the CRC either.
+Needs root fixture `tests/xfs/root-fixtures/dirty-log.img.zst` from
+`tools/gen-root-fixtures.sh`; once committed, the test `root_fixture_dirty_log`
+(skipped with a message while the file is absent) must report the image dirty
+(`-EUCLEAN`) and mount it with `norecovery`.

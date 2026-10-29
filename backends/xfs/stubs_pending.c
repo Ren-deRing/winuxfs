@@ -71,26 +71,7 @@
 
 /* ---- PENDING(T5): none left, buf.c defines them ---- */
 
-/* ---- PENDING(T6) ---- */
-
-/* PENDING(T6) */
-#if defined(WFS_PENDING_ALL) || defined(WFS_ONLY_xfs_metadir_load)
-WFS_WEAK int xfs_metadir_load(struct xfs_trans *tp, struct xfs_inode *dp, const char *path, enum xfs_metafile_type metafile_type, struct xfs_inode **ipp)
-{
-	WFS_STUB_PENDING();
-	return -ENOSYS;
-}
-#endif
-
-/* PENDING(T6) */
-#if defined(WFS_PENDING_ALL) || defined(WFS_ONLY_xfs_set_inode_alloc)
-WFS_WEAK xfs_agnumber_t xfs_set_inode_alloc(struct xfs_mount *mp, xfs_agnumber_t agcount)
-{
-	WFS_STUB_PENDING();
-	/* Only matters for inode allocation; every AG is usable for reads. */
-	return agcount;
-}
-#endif
+/* ---- PENDING(T6): none left, mount.c defines them ---- */
 
 /* ---- PENDING(T7) ---- */
 
@@ -102,83 +83,6 @@ WFS_WEAK bool xfs_log_check_lsn(struct xfs_mount *a0, xfs_lsn_t a1)
 	/* Permissive until logcheck.c knows the log head: a verified LSN is
 	 * accepted. */
 	return true;
-}
-#endif
-
-/* ---- PENDING(T8) ---- */
-
-/* PENDING(T8) */
-#if defined(WFS_PENDING_ALL) || defined(WFS_ONLY_xfs_assert_ilocked)
-WFS_WEAK void xfs_assert_ilocked(struct xfs_inode *a0, uint a1)
-{
-	WFS_STUB_PENDING();
-}
-#endif
-
-/* PENDING(T8) */
-#if defined(WFS_PENDING_ALL) || defined(WFS_ONLY_xfs_corruption_error)
-WFS_WEAK void xfs_corruption_error(const char *tag, int level, struct xfs_mount *mp, const void *buf, size_t bufsize, const char *filename, int linenum, xfs_failaddr_t failaddr)
-{
-	WFS_STUB_PENDING();
-}
-#endif
-
-/* PENDING(T8) */
-#if defined(WFS_PENDING_ALL) || defined(WFS_ONLY_xfs_ilock)
-WFS_WEAK void xfs_ilock(xfs_inode_t *a0, uint a1)
-{
-	WFS_STUB_PENDING();
-}
-#endif
-
-/* PENDING(T8) */
-#if defined(WFS_PENDING_ALL) || defined(WFS_ONLY_xfs_ilock_data_map_shared)
-WFS_WEAK uint xfs_ilock_data_map_shared(struct xfs_inode *a0)
-{
-	WFS_STUB_PENDING();
-	return 0;
-}
-#endif
-
-/* PENDING(T8) */
-#if defined(WFS_PENDING_ALL) || defined(WFS_ONLY_xfs_inode_verifier_error)
-WFS_WEAK void xfs_inode_verifier_error(struct xfs_inode *ip, int error, const char *name, const void *buf, size_t bufsz, xfs_failaddr_t failaddr)
-{
-	WFS_STUB_PENDING();
-}
-#endif
-
-/* PENDING(T8) */
-#if defined(WFS_PENDING_ALL) || defined(WFS_ONLY_xfs_irele)
-WFS_WEAK void xfs_irele(struct xfs_inode *ip)
-{
-	WFS_STUB_PENDING();
-}
-#endif
-
-/* PENDING(T8) */
-#if defined(WFS_PENDING_ALL) || defined(WFS_ONLY_xfs_is_always_cow_inode)
-WFS_WEAK bool xfs_is_always_cow_inode(const struct xfs_inode *ip)
-{
-	WFS_STUB_PENDING();
-	return false;
-}
-#endif
-
-/* PENDING(T8) */
-#if defined(WFS_PENDING_ALL) || defined(WFS_ONLY_xfs_iunlock)
-WFS_WEAK void xfs_iunlock(xfs_inode_t *a0, uint a1)
-{
-	WFS_STUB_PENDING();
-}
-#endif
-
-/* PENDING(T8) */
-#if defined(WFS_PENDING_ALL) || defined(WFS_ONLY_xfs_trans_metafile_iget)
-WFS_WEAK int xfs_trans_metafile_iget(struct xfs_trans *tp, xfs_ino_t ino, enum xfs_metafile_type metafile_type, struct xfs_inode **ipp)
-{
-	WFS_STUB_PENDING();
-	return -ENOSYS;
 }
 #endif
 
