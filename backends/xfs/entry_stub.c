@@ -32,8 +32,11 @@ static wfs_err_t x_mount(const wfs_host_api *api, wfs_blkdev *devs[WFS_DEV_COUNT
 
 static wfs_err_t x_unmount(wfs_fs *fs) { return wfs_xfs_unmount((struct wfs_xfs *)fs); }
 
-/* The loader requires these ops. PENDING(T9, T11): statfs, lookup, readdir. */
-static wfs_err_t x_statfs(wfs_fs *fs, wfs_statfs *st) { (void)fs; (void)st; return -WFS_ENOSYS; }
+/* The loader requires these ops. PENDING(T9): lookup, readdir. */
+static wfs_err_t x_statfs(wfs_fs *fs, wfs_statfs *st)
+{
+	return wfs_xfs_op_statfs((struct wfs_xfs *)fs, st);
+}
 static wfs_err_t x_getattr(wfs_fs *fs, wfs_ino_t ino, wfs_stat *st)
 {
 	return wfs_xfs_op_getattr((struct wfs_xfs *)fs, ino, st);

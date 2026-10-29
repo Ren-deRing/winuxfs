@@ -575,6 +575,16 @@ static int log_provider(struct xfs_mount *mp, struct wfs_log_reader *r)
 	return 0;
 }
 
+/*
+ * Mount step 8, the summary counters (design 5.6 / kernel
+ * xfs_check_summary_counts). Every AGF is read: statfs needs the allocbt
+ * block total (m_allocbt_blks, summed by xfs_alloc_read_agf as each AG is
+ * first read). The sb counters are trusted when the log is clean and they are
+ * sane; a dirty log (norecovery; v5 is always lazy-count, so they are stale)
+ * or insane values (fdblocks > dblocks, ifree > icount, icount outside the
+ * possible range) recompute them from the AGF/AGI sums, which also reads all
+ * AGIs. A failure there means corrupt AG headers and fails the mount.
+ */
 static int check_summary_counts(struct wfs_xfs *x, bool log_dirty)
 {
 	struct xfs_mount *mp = &x->mp;
@@ -582,19 +592,31 @@ static int check_summary_counts(struct wfs_xfs *x, bool log_dirty)
 	bool bad = sbp->sb_fdblocks > sbp->sb_dblocks ||
 		   !xfs_verify_icount(mp, sbp->sb_icount) ||
 		   sbp->sb_ifree > sbp->sb_icount;
+	xfs_agnumber_t agno;
 	int error;
 
-	/*
-	 * Clean log: the superblock counters are trusted unless obviously
-	 * wrong. A dirty log (mounted with norecovery) leaves lazy counters
-	 * stale: recompute them from the AGs.
-	 */
-	if (!bad && !log_dirty)
-		return 0;
-	error = xfs_initialize_perag_data(mp, sbp->sb_agcount);
-	if (error)
-		LOGMSG(x, 0, "xfs: summary counters are inconsistent (error %d)", error);
-	return error;
+	if (bad || log_dirty) {
+		LOGMSG(x, 1, "xfs: summary counters %s: recomputing from the AG headers",
+		       log_dirty ? "may be stale (dirty log)" : "are insane");
+		error = xfs_initialize_perag_data(mp, sbp->sb_agcount);
+		if (error)
+			LOGMSG(x, 0, "xfs: summary counters are inconsistent (error %d)", error);
+		return error;
+	}
+	for (agno = 0; agno < sbp->sb_agcount; agno++) {
+		struct xfs_perag *pag = xfs_perag_get(mp, agno);
+
+		if (!pag)
+			return -EFSCORRUPTED;
+		error = xfs_alloc_read_agf(pag, NULL, 0, NULL);
+		xfs_perag_put(pag);
+		if (error) {
+			LOGMSG(x, 0, "xfs: cannot read the AGF of AG %u (error %d)", agno, error);
+			return error;
+		}
+	}
+	xfs_reinit_percpu_counters(mp);
+	return 0;
 }
 
 /* ------------------------------------------------------------ mount API -- */
