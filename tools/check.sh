@@ -35,6 +35,13 @@ fi
 if command -v gcc >/dev/null && command -v mkfs.xfs >/dev/null && command -v xfs_db >/dev/null; then
   make -s -C backends/xfs test-mount
   make -s -C backends/xfs test-mount-san
+  make -s -C backends/xfs test-icache
+  make -s -C backends/xfs test-icache-san
+  make -s -C backends/xfs test-statfs
+  make -s -C backends/xfs test-dir
+  make -s -C backends/xfs test-dir-san
+  make -s -C backends/xfs test-read
+  make -s -C backends/xfs test-read-san
 else
   echo "SKIPPED: backends/xfs mount tests (gcc, mkfs.xfs and xfs_db needed; install xfsprogs)"
 fi

@@ -13,9 +13,9 @@
  * known from tools/gen-root-fixtures.sh. Read-only host: any write fails the
  * test. Skips visibly when a tool is missing.
  */
+#include <dirent.h>	/* before the shim: its DT_* macros would clash with glibc's enum */
 #include "wfs_xfs.h"
 #include "icache.h"
-#include <dirent.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
