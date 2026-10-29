@@ -38,6 +38,34 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#ifdef _WIN32
+#include <direct.h>
+#include <io.h>
+#include <process.h>
+/* mingw has no mkdtemp()/pread(): small portable stand-ins (compile-only here) */
+static char *make_tmpdir(char *tmpl)
+{
+	size_t n = strlen(tmpl);
+
+	snprintf(tmpl + n - 6, 7, "%05x", (unsigned)_getpid() & 0xfffff);
+	return _mkdir(tmpl) == 0 ? tmpl : NULL;
+}
+static ssize_t pread(int fd, void *b, size_t n, off_t off)
+{
+	if (_lseeki64(fd, off, SEEK_SET) < 0)
+		return -1;
+	return _read(fd, b, (unsigned)n);
+}
+static ssize_t pwrite(int fd, const void *b, size_t n, off_t off)
+{
+	if (_lseeki64(fd, off, SEEK_SET) < 0)
+		return -1;
+	return _write(fd, b, (unsigned)n);
+}
+#else
+static char *make_tmpdir(char *tmpl) { return mkdtemp(tmpl); }
+#endif
+
 static int failures, checks, skipped_cases;
 #define CHECK(c) do { checks++; if (!(c)) { failures++; \
 	fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #c); } } while (0)
@@ -167,6 +195,61 @@ static void wr64(uint8_t *p, uint64_t v)
 	wr32(p + 4, (uint32_t)v);
 }
 
+
+/*
+ * Independent CRC-32C (Castagnoli, bitwise, no tables, no shim code) and an
+ * independent assembly of the record checksum from the format description:
+ * seed ~0, the first 328 header bytes with h_crc zeroed, then 260 bytes of
+ * every extension header (one per 32 KiB of h_len beyond the first), then
+ * the h_len payload bytes as stored (cycle-stamped); the result is ~crc.
+ * The generator and the detector therefore no longer share this code, and
+ * the formula is also checked against a record written by mkfs.xfs.
+ */
+static uint32_t ref_tab[256];
+
+static uint32_t ref_crc32c_update(uint32_t crc, const uint8_t *p, size_t n)
+{
+	size_t i;
+	int b;
+
+	if (!ref_tab[1]) {	/* reflected Castagnoli polynomial, own table */
+		uint32_t c, v;
+
+		for (v = 0; v < 256; v++) {
+			c = v;
+			for (b = 0; b < 8; b++)
+				c = (c >> 1) ^ (0x82F63B78u & (0u - (c & 1)));
+			ref_tab[v] = c;
+		}
+	}
+	for (i = 0; i < n; i++)
+		crc = ref_tab[(crc ^ p[i]) & 0xff] ^ (crc >> 8);
+	return crc;
+}
+
+static uint32_t ref_rec_crc(const uint8_t *h, uint32_t hblks, uint32_t h_len)
+{
+	uint8_t hdr[328];
+	uint32_t crc = ~0u, x, next = (h_len + 32767) / 32768;
+
+	_Static_assert(XLOG_REC_SIZE == 328 && XLOG_REC_EXT_SIZE == 260,
+		       "log record layout");
+	memcpy(hdr, h, 328);
+	memset(hdr + offsetof(struct xlog_rec_header, h_crc), 0, 4);
+	crc = ref_crc32c_update(crc, hdr, 328);
+	for (x = 1; x < next; x++)
+		crc = ref_crc32c_update(crc, h + (size_t)x * BBSIZE, 260);
+	crc = ref_crc32c_update(crc, h + (size_t)hblks * BBSIZE, h_len);
+	return ~crc;	/* stored little endian */
+}
+
+static void put_crc(uint8_t *h, uint32_t hblks, uint32_t h_len)
+{
+	uint32_t c = ref_rec_crc(h, hblks, h_len);
+
+	h[32] = c; h[33] = c >> 8; h[34] = c >> 16; h[35] = c >> 24;
+}
+
 /* ---------------- synthetic log region ---------------- */
 struct slog {
 	uint8_t		*buf;
@@ -229,10 +312,8 @@ static int slog_rec(struct slog *s, uint32_t blk, uint32_t cycle,
 		memcpy(&rh->h_cycle_data[i], d + (size_t)i * BBSIZE, 4);
 		wr32(d + (size_t)i * BBSIZE, cycle);
 	}
-	crc = xfs_start_cksum_update((char *)rh, XLOG_REC_SIZE,
-				     offsetof(struct xlog_rec_header, h_crc));
-	crc = crc32c(crc, d, h_len);
-	rh->h_crc = xfs_end_cksum(crc);
+	(void)crc;
+	put_crc(h, 1, h_len);
 	return 1 + nd;
 }
 
@@ -250,10 +331,8 @@ static void slog_recrc(struct slog *s, uint32_t blk)
 	struct xlog_rec_header *rh = (struct xlog_rec_header *)h;
 	uint32_t len = rd32(h + 12), crc;
 
-	crc = xfs_start_cksum_update((char *)rh, XLOG_REC_SIZE,
-				     offsetof(struct xlog_rec_header, h_crc));
-	crc = crc32c(crc, h + BBSIZE, len);
-	rh->h_crc = xfs_end_cksum(crc);
+	(void)rh; (void)crc;
+	put_crc(h, 1, len);
 }
 
 /*
@@ -331,10 +410,13 @@ static int load_params(struct img *im)
 			(agno * be32_to_cpu(sb.sb_agblocks) + agbno) * bs;
 	}
 	im->p.log_bytes = (uint64_t)be32_to_cpu(sb.sb_logblocks) * bs;
-	im->p.sector_size = be16_to_cpu(sb.sb_logsectsize) ?
+	/* the log sector size applies only with the SECTORBIT feature */
+	im->p.sector_size = (be16_to_cpu(sb.sb_versionnum) & 0x0800) &&
+			    be16_to_cpu(sb.sb_logsectsize) ?
 			    be16_to_cpu(sb.sb_logsectsize) : BBSIZE;
+	/* v5, or the LOGV2 bit of sb_versionnum (0x0400) on v4 */
 	im->p.logv2 = (be16_to_cpu(sb.sb_versionnum) & 0xf) == 5 ||
-		      (be32_to_cpu(sb.sb_features2) & 0x2);
+		      (be16_to_cpu(sb.sb_versionnum) & 0x0400);
 	im->p.logbsize = be32_to_cpu(sb.sb_logsunit) > 1 ?
 			 be32_to_cpu(sb.sb_logsunit) : 0;
 	memcpy(im->p.uuid, &sb.sb_uuid, 16);
@@ -617,7 +699,9 @@ static const uint8_t UUID[16] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
 
 static bool is_defined_rc(int rc)
 {
-	return rc == 0 || rc == ER_CORRUPT || rc == ER_IO;
+	/* the memory reader never fails: -EIO would be a misclassified
+	 * logical error (design 9: EIO is only for blk_read failures) */
+	return rc == 0 || rc == ER_CORRUPT;
 }
 
 static void mem_cases_pure(void)
@@ -1054,13 +1138,478 @@ static void mount_entry_point(void)
 	slog_rec(&s, 2, 1, 1, 2, 1024, OP_START_TRANS, 1);
 	CHECK(slog_store(&s, &im) == 0);
 	fc.fd = open(im.data, O_RDONLY);
+	log_reset();
 	CHECK(xfs_log_mount_ro_check(mp, false) == ER_CORRUPT);
+	/* dirty, not unparsable: the message says so and names the way out */
+	CHECK(strstr(logbuf, "log is dirty") != NULL);
+	CHECK(strstr(logbuf, "cannot be interpreted") == NULL);
+	CHECK(strstr(logbuf, "norecovery") != NULL);
+	log_reset();
 	CHECK(xfs_log_mount_ro_check(mp, true) == 0);
+	CHECK(strstr(logbuf, "log is dirty") != NULL);
+	close(fc.fd);
+
+	/* unparsable (uuid of the record does not match): a different message */
+	free(s.buf);
+	CHECK(slog_load(&s, &im) == 0);
+	slog_rec(&s, 2, 1, 1, 2, 1024, OP_START_TRANS, 1);
+	s.buf[(size_t)2 * BBSIZE + offsetof(struct xlog_rec_header, h_fs_uuid)] ^= 0xff;
+	put_crc(s.buf + (size_t)2 * BBSIZE, 1, 1024);
+	CHECK(slog_store(&s, &im) == 0);
+	fc.fd = open(im.data, O_RDONLY);
+	log_reset();
+	CHECK(xfs_log_mount_ro_check(mp, false) == ER_CORRUPT);
+	CHECK(strstr(logbuf, "log is dirty") == NULL);
+	CHECK(strstr(logbuf, "cannot be interpreted") != NULL);
 	close(fc.fd);
 	free(s.buf);
 	free(mp);
 	wfs_log_set_reader_provider(NULL);
 	unlink(im.data);
+}
+
+
+/* ---- logical failures are corruption, not -EIO (reader never fails) ---- */
+static void logical_failure_is_corrupt_not_eio(void)
+{
+	struct slog s;
+	bool dirty = false;
+	int fl, rc;
+
+	/* One torn record at block 0 whose tail_lsn points at block 1: the
+	 * head is block 2, the CRC pass fails at block 0 and there is no
+	 * earlier record header to fall back to ("found == 0"). Before the
+	 * fix this was reported as -EIO although every read succeeded. */
+	slog_new(&s, 4096, true, UUID);
+	slog_rec(&s, 0, 1, 1, 1, 512, OP_START_TRANS, 1);
+	s.buf[BBSIZE + 40] ^= 0x5a;
+	log_reset();
+	rc = run_mem(&s, false, &dirty, &fl);
+	CHECK(rc == ER_CORRUPT && !fl);
+	CHECK(strstr(logbuf, "read error") == NULL);
+	CHECK(strstr(logbuf, "I/O error") == NULL);
+	/* norecovery turns it into a warning */
+	log_reset();
+	rc = run_mem(&s, true, &dirty, &fl);
+	CHECK(rc == 0 && dirty && !fl);
+	CHECK(strstr(logbuf, "cannot be interpreted") != NULL);
+	free(s.buf);
+
+	/* partially zeroed log (blocks 0..9 written, no record header among
+	 * them): xlog_find_zeroed -> xlog_find_verify_log_record returns
+	 * "no header" (1), which the kernel maps to -EIO and we to corruption */
+	slog_new(&s, 4096, true, UUID);
+	{
+		uint32_t b;
+
+		for (b = 0; b < 10; b++)
+			wr32(s.buf + (size_t)b * BBSIZE, 5);
+	}
+	log_reset();
+	rc = run_mem(&s, false, &dirty, &fl);
+	CHECK(rc == ER_CORRUPT && !fl);
+	CHECK(strstr(logbuf, "I/O error") == NULL);
+	free(s.buf);
+}
+
+static void norecovery_policy(void)
+{
+	struct img im;
+	struct slog s;
+	bool dirty = false;
+
+	NEED_TOOLS();
+	CHECK(fresh(&im, "norp", "", NULL) == 0);
+	CHECK(slog_load(&s, &im) == 0);
+	/* record of a foreign filesystem (uuid mismatch) in the log */
+	slog_rec(&s, 2, 1, 1, 2, 1024, OP_START_TRANS, 1);
+	s.buf[(size_t)2 * BBSIZE + offsetof(struct xlog_rec_header, h_fs_uuid)] ^= 0xff;
+	put_crc(s.buf + (size_t)2 * BBSIZE, 1, 1024);
+	CHECK(slog_store(&s, &im) == 0);
+	log_reset();
+	CHECK(check_img(&im, false, &dirty) == ER_CORRUPT);
+	log_reset();
+	dirty = false;
+	CHECK(check_img(&im, true, &dirty) == 0);	/* warn, mount */
+	CHECK(dirty);
+	CHECK(strstr(logbuf, "norecovery") != NULL);
+	CHECK(strstr(logbuf, "stale") != NULL);
+	free(s.buf);
+	/* bad parameters and reader failure stay errors under norecovery */
+	im.p.sector_size = 1000;
+	CHECK(check_img(&im, true, &dirty) == ER_CORRUPT);
+	unlink(im.data);
+}
+
+/* Records with h_size > 32 KiB (hblks > 1: extension headers, h_ext cycle
+ * data and the extension part of the CRC), assembled independently of the
+ * detector from the format description. */
+static int slog_rec_big(struct slog *s, uint32_t blk, uint32_t cycle,
+			uint32_t tail_blk, uint32_t h_len, uint32_t h_size,
+			uint32_t hblks_override)
+{
+	uint32_t hblks = hblks_override ? hblks_override :
+			 h_size > 32768 ? (h_size + 32767) / 32768 : 1;
+	uint32_t nd = (h_len + BBSIZE - 1) / BBSIZE, i, x;
+	uint8_t *h = s->buf + (size_t)blk * BBSIZE;
+	uint8_t *d = h + (size_t)hblks * BBSIZE;
+	struct xlog_rec_header *rh = (struct xlog_rec_header *)h;
+
+	if (blk + hblks + nd > s->bb)
+		abort();
+	memset(h, 0, (size_t)(hblks + nd) * BBSIZE);
+	wr32(d, 0x1234);
+	wr32(d + 4, h_len - 12);
+	d[8] = 0x69;
+	d[9] = OP_START_TRANS;
+	for (i = 12; i < h_len; i++)
+		d[i] = (uint8_t)(blk + i);
+	rh->h_magicno = cpu_to_be32(XLOG_HEADER_MAGIC_NUM);
+	rh->h_cycle = cpu_to_be32(cycle);
+	rh->h_version = cpu_to_be32(2);
+	rh->h_len = cpu_to_be32(h_len);
+	rh->h_lsn = cpu_to_be64(((uint64_t)cycle << 32) | blk);
+	rh->h_tail_lsn = cpu_to_be64(((uint64_t)cycle << 32) | tail_blk);
+	rh->h_prev_block = cpu_to_be32((uint32_t)-1);
+	rh->h_num_logops = cpu_to_be32(1);
+	rh->h_fmt = cpu_to_be32(XLOG_FMT);
+	memcpy(&rh->h_fs_uuid, s->uuid, 16);
+	rh->h_size = cpu_to_be32(h_size);
+	for (i = 0; i < nd; i++) {
+		uint32_t w;
+
+		memcpy(&w, d + (size_t)i * BBSIZE, 4);
+		if (i < 64) {
+			memcpy(&rh->h_cycle_data[i], &w, 4);
+		} else {
+			struct xlog_rec_ext_header *xh = (struct xlog_rec_ext_header *)
+				(h + (size_t)(i / 64) * BBSIZE);
+
+			memcpy(&xh->xh_cycle_data[i % 64], &w, 4);
+		}
+		wr32(d + (size_t)i * BBSIZE, cycle);
+	}
+	for (x = 1; x < hblks; x++)
+		((struct xlog_rec_ext_header *)(h + (size_t)x * BBSIZE))->xh_cycle =
+			cpu_to_be32(cycle);
+	put_crc(h, hblks, h_len);
+	return hblks + nd;
+}
+
+static void big_header_records(void)
+{
+	static const struct { uint32_t hsz, hlen, logbsize, hblks; } v[] = {
+		{ 65536, 50000, 0, 0 }, { 262144, 200000, 0, 0 },
+		{ 131072, 100000, 0, 0 },
+		/* lsunit override: h_len > h_size but <= logbsize, one op (the
+		 * xfsprogs bug workaround, xlog_do_recovery_pass) */
+		{ 32768, 40000, 65536, 2 },
+	};
+	size_t k;
+
+	NEED_TOOLS();
+	for (k = 0; k < sizeof(v) / sizeof(v[0]); k++) {
+		struct img im;
+		struct slog s;
+		bool dirty = false;
+		int n, rc;
+
+		CHECK(fresh(&im, "big", "", NULL) == 0);
+		CHECK(slog_load(&s, &im) == 0);
+		n = slog_rec_big(&s, 2, 1, 2, v[k].hlen, v[k].hsz, v[k].hblks);
+		slog_rec_big(&s, 2 + n, 1, 2, v[k].hlen, v[k].hsz, v[k].hblks);
+		CHECK(slog_store(&s, &im) == 0);
+		im.p.logbsize = v[k].logbsize;
+		log_reset();
+		rc = check_img(&im, false, &dirty);
+		/* dirty and CRC-verified: not trimmed as a torn write */
+		if (!(rc == ER_CORRUPT && dirty))
+			fprintf(stderr, "big[%zu] hsz=%u hlen=%u rc=%d dirty=%d msg=%s\n",
+				k, v[k].hsz, v[k].hlen, rc, dirty, logbuf);
+		CHECK(rc == ER_CORRUPT && dirty);
+		CHECK(strstr(logbuf, "Torn") == NULL);
+		/* flipping one payload byte of the first record is a CRC error
+		 * outside the head window rule only if it is not within
+		 * MAX_ICLOGS records of the head: here it is, so it trims */
+		s.buf[(size_t)(2 + (v[k].hblks ? v[k].hblks : v[k].hsz > 32768 ?
+				      (v[k].hsz + 32767) / 32768 : 1) + 3) * BBSIZE + 100] ^= 1;
+		CHECK(slog_store(&s, &im) == 0);
+		log_reset();
+		rc = check_img(&im, false, &dirty);
+		CHECK(rc == 0 || rc == ER_CORRUPT);
+		free(s.buf);
+		unlink(im.data);
+	}
+}
+
+static void sect4k_dirty(void)
+{
+	struct img im;
+	struct slog s;
+	bool dirty;
+	int rc, k, lp;
+
+	NEED_TOOLS();
+	for (k = 0; k < 2; k++) {
+		/* k=1: v4 with log version 2 and 4 KiB sectors */
+		if (fresh(&im, "s4k", k ? "-s size=4096 -m crc=0" : "-s size=4096",
+			  NULL)) {
+			skipped_cases++;
+			continue;
+		}
+		CHECK(im.p.sector_size == 4096);
+		CHECK(slog_load(&s, &im) == 0);
+		/* records on 4 KiB boundaries (8 blocks) */
+		slog_rec(&s, 8, 1, 1, 8, 7 * 512, OP_START_TRANS, 1);
+		slog_rec(&s, 16, 1, 1, 8, 7 * 512, OP_START_TRANS, 1);
+		CHECK(slog_store(&s, &im) == 0);
+		lp = logprint_state(im.data, NULL);
+		if (lp >= 0)
+			CHECK(lp == 1);
+		dirty = false;
+		rc = check_img(&im, false, &dirty);
+		CHECK(rc == ER_CORRUPT && dirty);
+		slog_unmount(&s, 24, 1, 1, 26);
+		CHECK(slog_store(&s, &im) == 0);
+		lp = logprint_state(im.data, NULL);
+		if (lp >= 0)
+			CHECK(lp == 0);
+		rc = check_img(&im, false, &dirty);
+		CHECK(rc == 0 && !dirty);
+		free(s.buf);
+		unlink(im.data);
+	}
+}
+
+static void v1_log_real_records(void)
+{
+	struct img im;
+	struct slog s;
+	bool dirty = false;
+	int lp;
+
+	NEED_TOOLS();
+	if (fresh(&im, "v1", "-m crc=0 -l version=1", NULL)) {
+		printf("note: v4 / log v1 mkfs unsupported here, skipped\n");
+		skipped_cases++;
+		return;
+	}
+	CHECK(!im.p.logv2);
+	CHECK(slog_load(&s, &im) == 0);
+	CHECK(rd32(s.buf + 8) == 1);			/* mkfs wrote a v1 record */
+	slog_rec(&s, 2, 1, 1, 2, 1024, OP_START_TRANS, 1);
+	CHECK(slog_store(&s, &im) == 0);
+	lp = logprint_state(im.data, NULL);
+	if (lp >= 0)
+		CHECK(lp == 1);
+	CHECK(check_img(&im, false, &dirty) == ER_CORRUPT);
+	CHECK(dirty);
+	slog_unmount(&s, 5, 1, 1, 7);
+	CHECK(slog_store(&s, &im) == 0);
+	CHECK(check_img(&im, false, &dirty) == 0);
+	CHECK(!dirty);
+	free(s.buf);
+	unlink(im.data);
+}
+
+/* The independent CRC formula against a record written by xfsprogs. */
+static void mkfs_record_crc_matches_independent_formula(void)
+{
+	struct img im;
+	struct slog s;
+	uint32_t stored, c;
+
+	NEED_TOOLS();
+	CHECK(fresh(&im, "crcm", "", NULL) == 0);
+	CHECK(slog_load(&s, &im) == 0);
+	CHECK(rd32(s.buf) == XLOG_HEADER_MAGIC_NUM);
+	stored = s.buf[32] | (s.buf[33] << 8) | (s.buf[34] << 16) |
+		 ((uint32_t)s.buf[35] << 24);
+	c = ref_rec_crc(s.buf, 1, rd32(s.buf + 12));
+	if (stored == 0) {
+		printf("note: mkfs wrote a zero record crc; formula not exercised\n");
+		skipped_cases++;
+	} else {
+		CHECK(stored == c);
+	}
+	free(s.buf);
+	unlink(im.data);
+}
+
+/* Optional golden test: a real Linux-written dirty log. */
+static void root_fixture_dirty_log(void)
+{
+	static const char *path = "../../tests/xfs/root-fixtures/dirty-log.img.zst";
+	char raw[600];
+	struct img im;
+	bool dirty = false;
+
+	if (access(path, R_OK) != 0) {
+		printf("SKIPPED: root_fixture_dirty_log (needs root fixture "
+		       "tests/xfs/root-fixtures/dirty-log.img.zst from "
+		       "tools/gen-root-fixtures.sh)\n");
+		skipped_cases++;
+		return;
+	}
+	snprintf(raw, sizeof(raw), "%s/rootdirty.img", tmpdir);
+	if (sh("zstd -q -d -f '%s' -o '%s'", path, raw)) {
+		printf("SKIPPED: root_fixture_dirty_log (zstd missing)\n");
+		skipped_cases++;
+		return;
+	}
+	snprintf(im.data, sizeof(im.data), "%s", raw);
+	im.logdev[0] = 0;
+	CHECK(load_params(&im) == 0);
+	CHECK(check_img(&im, false, &dirty) == ER_CORRUPT);
+	CHECK(dirty);
+	CHECK(check_img(&im, true, &dirty) == 0);
+	unlink(raw);
+}
+
+/* Differential test against xfs_logprint -t on randomly mutated logs: the
+ * port must never call a log CLEAN that xfs_logprint calls DIRTY, except
+ * for torn-write truncation (the kernel's CRC-based head trimming, which
+ * xfs_logprint does not do). */
+static uint32_t rnd_s = 424242;
+static uint32_t rnd(void) { rnd_s = rnd_s * 1664525u + 1013904223u; return rnd_s >> 8; }
+
+static void diff_fuzz_vs_logprint(void)
+{
+	static const char *opts[] = { "", "-m crc=0 -l version=1", "-m crc=0 -l version=2" };
+	static const uint32_t lens[] = { 20, 512, 1024, 3584, 4096, 8000, 32768, 40000, 70000 };
+	int iters = getenv("DF_ITERS") ? atoi(getenv("DF_ITERS")) : 40;
+	int o, it, agree = 0, torn = 0, danger = 0, compared = 0;
+
+	NEED_TOOLS();
+	if (!have_tool("xfs_logprint")) {
+		printf("SKIPPED: diff_fuzz_vs_logprint (xfs_logprint missing)\n");
+		skipped_cases++;
+		return;
+	}
+	rnd_s = getenv("DF_SEED") ? (uint32_t)atoi(getenv("DF_SEED")) : 424242;
+	for (o = 0; o < 3; o++) {
+		struct img im;
+		struct slog s;
+
+		if (fresh(&im, "df", opts[o], NULL)) {
+			skipped_cases++;
+			continue;
+		}
+		for (it = 0; it < iters; it++) {
+			uint32_t blk = 2, nrec = rnd() % 7, i, nm, head = 0;
+			uint32_t starts[16];
+			bool dirty = false;
+			int lp, rc, full = (rnd() % 5) == 0;
+
+			if (slog_load(&s, &im))
+				abort();
+			memset(s.buf, 0, (size_t)s.bb * BBSIZE);
+			if (full) {
+				slog_wrapped(&s, 3, rnd() % 1000, rnd() & 1, &head);
+			} else {
+				slog_unmount(&s, 0, 1, 1, 2);
+				for (i = 0; i < nrec; i++) {
+					uint32_t l = lens[rnd() % 9], tb;
+
+					if (!s.v2 && l > 32768)
+						l = 8000;
+					starts[i] = blk;
+					tb = i ? starts[rnd() % i] : (rnd() & 1 ? 2 : 0);
+					if (i && (rnd() % 4) == 0)
+						tb = blk;
+					blk += slog_rec(&s, blk, 1, 1, tb, l,
+							OP_START_TRANS, (rnd() % 4 == 0) ? 1 : 3);
+				}
+				if (rnd() % 3 == 0)
+					slog_unmount(&s, blk, 1, 1, blk + 2);
+			}
+			nm = rnd() % 4;
+			for (i = 0; i < nm; i++) {
+				uint32_t b = full ? (rnd() % 2 ? rnd() % 1200 : rnd() % s.bb)
+						  : rnd() % (blk + 3);
+				uint32_t k = rnd() % 6, off = rnd() % BBSIZE;
+				uint8_t *p;
+
+				if (b >= s.bb)
+					b = 0;
+				p = s.buf + (size_t)b * BBSIZE;
+				if (k == 0)
+					p[off] ^= 1 << (rnd() & 7);
+				else if (k == 1)
+					memset(p, 0, BBSIZE);
+				else if (k == 2)
+					wr32(p + (off & ~3u), rnd());
+				else if (k == 3)
+					wr32(p + 12, lens[rnd() % 9]);
+				else if (k == 4)
+					wr64(p + 24, ((uint64_t)(rnd() % 4) << 32) | (rnd() % (blk + 20)));
+				else
+					wr32(p + 4, rnd() % 5);
+				if ((rnd() & 1) && rd32(p) == XLOG_HEADER_MAGIC_NUM &&
+				    rd32(p + 12) <= 70000 &&
+				    b + 1 + (rd32(p + 12) + 511) / 512 <= s.bb)
+					slog_recrc(&s, b);
+			}
+			if (slog_store(&s, &im))
+				abort();
+			lp = logprint_state(im.data, NULL);
+			log_reset();
+			rc = check_img(&im, false, &dirty);
+			free(s.buf);
+			if (lp < 0)
+				continue;
+			compared++;
+			if (lp == 1 && rc == 0 && !dirty) {
+				if (strstr(logbuf, "Torn write")) {
+					torn++;
+				} else {
+					danger++;
+					fprintf(stderr, "DANGER opt%d it%d full%d: logprint DIRTY, port CLEAN\n",
+						o, it, full);
+				}
+			} else {
+				agree++;
+			}
+		}
+		unlink(im.data);
+	}
+	printf("  diff fuzz: compared %d, agree %d, torn-trim %d, dirty->clean %d\n",
+	       compared, agree, torn, danger);
+	CHECK(danger == 0);
+	CHECK(compared > 0);
+}
+
+/* The seek helpers read in chunks: bound on reader calls for a huge log. */
+static void scan_reader_call_bound(void)
+{
+	struct slog s;
+	struct mem_ctx m;
+	struct wfs_log_reader r;
+	struct wfs_log_params p;
+	bool dirty;
+
+	/* 64 MiB log of cycle-2 junk without any record header: the head
+	 * search ends in corruption after a full backwards scan */
+	slog_new(&s, 131072, true, UUID);
+	{
+		uint32_t b;
+
+		for (b = 0; b < s.bb; b++)
+			wr32(s.buf + (size_t)b * BBSIZE, 2);
+		wr32(s.buf + (size_t)(s.bb - 1) * BBSIZE, 1);
+	}
+	m = (struct mem_ctx){ s.buf, (uint64_t)s.bb * BBSIZE, 0, 40000, 0, 0 };
+	r.read = mem_read;
+	r.ctx = &m;
+	memset(&p, 0, sizeof(p));
+	p.log_bytes = m.len;
+	p.sector_size = 512;
+	p.logv2 = true;
+	memcpy(p.uuid, UUID, 16);
+	(void)wfs_log_check(&p, &r, false, &dirty);
+	CHECK(!m.overrun && !m.oob);
+	printf("  scan bound: %ld reader calls for a %u-block log\n", m.nreads, s.bb);
+	free(s.buf);
 }
 
 int main(void)
@@ -1070,8 +1619,8 @@ int main(void)
 
 	wfs_log_set_hook(sink);
 	snprintf(tmpl, sizeof(tmpl), "%s/wfs-logcheck-XXXXXX", base ? base : "/tmp");
-	if (!mkdtemp(tmpl)) {
-		perror("mkdtemp");
+	if (!make_tmpdir(tmpl)) {
+		perror("make_tmpdir");
 		return 1;
 	}
 	snprintf(tmpdir, sizeof(tmpdir), "%s", tmpl);
@@ -1097,6 +1646,15 @@ int main(void)
 	RUN(truncated_log_region);
 	RUN(bad_parameters);
 	RUN(mount_entry_point);
+	RUN(logical_failure_is_corrupt_not_eio);
+	RUN(norecovery_policy);
+	RUN(big_header_records);
+	RUN(sect4k_dirty);
+	RUN(v1_log_real_records);
+	RUN(mkfs_record_crc_matches_independent_formula);
+	RUN(root_fixture_dirty_log);
+	RUN(scan_reader_call_bound);
+	RUN(diff_fuzz_vs_logprint);
 
 	sh("rm -rf '%s'", tmpdir);
 	printf("%d checks, %d failures%s\n", checks, failures,
