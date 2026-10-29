@@ -801,9 +801,15 @@ void xfs_buf_verifier_error(struct xfs_buf *bp, int error, const char *name,
 int xfs_bwrite(struct xfs_buf *bp) { (void)bp; return -EROFS; }
 /* xfs_buf_delwri_submit/queue: -EROFS/false stubs live in stubs_ro.c */
 
+/* A buftarg without a mount is only used for v5 metadata here: assume CRC. */
+static int buf_magic_idx(const struct xfs_buf *bp)
+{
+	return bp->b_mount ? xfs_has_crc(bp->b_mount) : 1;
+}
+
 bool xfs_verify_magic(struct xfs_buf *bp, __be32 dmagic)
 {
-	int idx = xfs_has_crc(bp->b_mount);
+	int idx = buf_magic_idx(bp);
 
 	if (!bp->b_ops || !bp->b_ops->magic[idx])
 		return false;
@@ -812,7 +818,7 @@ bool xfs_verify_magic(struct xfs_buf *bp, __be32 dmagic)
 
 bool xfs_verify_magic16(struct xfs_buf *bp, __be16 dmagic)
 {
-	int idx = xfs_has_crc(bp->b_mount);
+	int idx = buf_magic_idx(bp);
 
 	if (!bp->b_ops || !bp->b_ops->magic16[idx])
 		return false;

@@ -112,8 +112,12 @@ static inline int
 xfs_buf_get(struct xfs_buftarg *target, xfs_daddr_t blkno, size_t numblks,
 	    struct xfs_buf **bpp)
 {
+	if (numblks > INT_MAX)	/* a hostile length must not wrap into a valid one */
+		return -EINVAL;
+	{
 	DEFINE_SINGLE_BUF_MAP(map, blkno, (int)numblks);
 	return xfs_buf_get_map(target, &map, 1, 0, bpp);
+	}
 }
 
 static inline int
@@ -121,9 +125,13 @@ xfs_buf_read(struct xfs_buftarg *target, xfs_daddr_t blkno, size_t numblks,
 	     xfs_buf_flags_t flags, struct xfs_buf **bpp,
 	     const struct xfs_buf_ops *ops)
 {
+	if (numblks > INT_MAX)
+		return -EINVAL;
+	{
 	DEFINE_SINGLE_BUF_MAP(map, blkno, (int)numblks);
 	return xfs_buf_read_map(target, &map, 1, flags, bpp, ops,
 			__builtin_return_address(0));
+	}
 }
 
 static inline void
