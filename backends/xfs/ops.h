@@ -22,4 +22,10 @@ wfs_err_t wfs_xfs_op_read(struct wfs_xfs *x, wfs_ino_t ino, uint64_t off, void *
 wfs_err_t wfs_xfs_op_readlink(struct wfs_xfs *x, wfs_ino_t ino, char *buf, size_t cap,
 			      size_t *len);
 
+/* Task 9 (dir.c) */
+wfs_err_t wfs_xfs_op_lookup(struct wfs_xfs *x, wfs_ino_t dir, const char *name, uint32_t len,
+			    wfs_ino_t *out, wfs_stat *st);
+wfs_err_t wfs_xfs_op_readdir(struct wfs_xfs *x, wfs_ino_t dir, uint64_t cookie,
+			     wfs_dirent_cb cb, void *ctx);
+
 #endif

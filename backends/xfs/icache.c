@@ -20,6 +20,8 @@
 #include "xfs_inode_buf.h"
 #include "xfs_inode_fork.h"
 #include "xfs_trans.h"
+#include "xfs_da_format.h"
+#include "xfs_da_btree.h"
 #include "xfs_metafile.h"
 #include "xfs_error.h"
 
@@ -117,14 +119,20 @@ static int ifork_cache_get(void)
 	if (!ifork_users++ && !xfs_ifork_cache) {
 		xfs_ifork_cache = kmem_cache_create("xfs_ifork",
 				sizeof(struct xfs_ifork), 0, 0, NULL);
-		if (xfs_ifork_cache)
+		/* directory code (lookup, node-format readdir) allocates da state */
+		xfs_da_state_cache = kmem_cache_create("xfs_da_state",
+				sizeof(struct xfs_da_state), 0, 0, NULL);
+		if (xfs_ifork_cache && xfs_da_state_cache)
 			ret = btree_caches_init();
 		else
 			ret = -ENOMEM;
 		if (ret) {
 			if (xfs_ifork_cache)
 				kmem_cache_destroy(xfs_ifork_cache);
+			if (xfs_da_state_cache)
+				kmem_cache_destroy(xfs_da_state_cache);
 			xfs_ifork_cache = NULL;
+			xfs_da_state_cache = NULL;
 			ifork_users--;
 		}
 	}
@@ -137,7 +145,9 @@ static void ifork_cache_put(void)
 	gate_lock();
 	if (!--ifork_users && xfs_ifork_cache) {
 		btree_caches_destroy();
+		kmem_cache_destroy(xfs_da_state_cache);
 		kmem_cache_destroy(xfs_ifork_cache);
+		xfs_da_state_cache = NULL;
 		xfs_ifork_cache = NULL;
 	}
 	gate_unlock();

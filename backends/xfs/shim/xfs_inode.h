@@ -317,4 +317,48 @@ unsigned int xfs_inode_alloc_unitsize(struct xfs_inode *ip);
 static inline bool xfs_inode_unlinked_incomplete(const struct xfs_inode *ip)
 { return VFS_IC(ip)->i_nlink == 0 && !xfs_inode_on_unlinked_list(ip); }
 
+
+/*
+ * Directory iteration (xfs_dir2_readdir.c, vendored top-level file).
+ * dir_emit() hands each entry to ctx->actor; "." and ".." are dropped here
+ * (the ABI never returns them; design 8.4) but ctx->pos still advances, so the
+ * cookie arithmetic of the kernel code is untouched.
+ */
+#ifndef DT_UNKNOWN	/* glibc <dirent.h> (host tests) has the same values */
+#define DT_UNKNOWN	0
+#define DT_FIFO		1
+#define DT_CHR		2
+#define DT_DIR		4
+#define DT_BLK		6
+#define DT_REG		8
+#define DT_LNK		10
+#define DT_SOCK		12
+#define DT_WHT		14
+#endif
+
+struct dir_context;
+typedef bool (*wfs_dir_actor_t)(struct dir_context *, const char *name, int namelen,
+				loff_t pos, u64 ino, unsigned int type);
+struct dir_context {
+	wfs_dir_actor_t	actor;
+	loff_t		pos;
+};
+
+static inline bool dir_emit(struct dir_context *ctx, const char *name, int namelen,
+			    u64 ino, unsigned int type)
+{
+	if ((namelen == 1 && name[0] == '.') ||
+	    (namelen == 2 && name[0] == '.' && name[1] == '.'))
+		return true;
+	return ctx->actor(ctx, name, namelen, ctx->pos, ino, type);
+}
+
+/* Readahead is a no-op without a plug; the buffer cache has no queue. */
+struct blk_plug { int unused; };
+#define blk_start_plug(p)	((void)(p))
+#define blk_finish_plug(p)	((void)(p))
+
+int xfs_readdir(struct xfs_trans *tp, struct xfs_inode *dp, struct dir_context *ctx,
+		size_t bufsize);
+
 #endif	/* __XFS_INODE_H__ */
