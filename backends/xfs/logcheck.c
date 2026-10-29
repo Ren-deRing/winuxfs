@@ -462,7 +462,7 @@ xlog_find_zeroed(struct xlog *log, xfs_daddr_t *blk_no)
 
 	error = xlog_find_verify_log_record(log, start_blk, &last_blk, 0);
 	if (error == 1)
-		error = -EIO;
+		error = -EFSCORRUPTED;	/* no previous record header: corrupt, not I/O */
 	if (error)
 		goto out_free_buffer;
 
@@ -573,7 +573,7 @@ validate_head:
 
 		error = xlog_find_verify_log_record(log, start_blk, &head_blk, 0);
 		if (error == 1)
-			error = -EIO;
+			error = -EFSCORRUPTED;
 		if (error)
 			goto out_free_buffer;
 	} else {
@@ -592,7 +592,7 @@ validate_head:
 			error = xlog_find_verify_log_record(log, start_blk,
 							&new_blk, (int)head_blk);
 			if (error == 1)
-				error = -EIO;
+				error = -EFSCORRUPTED;
 			if (error)
 				goto out_free_buffer;
 			if (new_blk != log_bbnum)
@@ -616,6 +616,73 @@ out_free_buffer:
 }
 
 /*
+ * winuxfs: the kernel reads one basic block per call in the two seek helpers
+ * below. On an untrusted image the walk may cover the whole log (up to 2 GiB,
+ * ~4M reads), so the scan reads WFS_SCAN_CHUNK_BB blocks per reader call:
+ * the worst case is log_bbnum / WFS_SCAN_CHUNK_BB (16K) reader calls.
+ */
+#define WFS_SCAN_CHUNK_BB	256
+
+/*
+ * Scan blocks lo..hi (inclusive) for record headers, backward or forward,
+ * stopping when *found reaches count. Records the block and a copy of the
+ * header block of the last header seen.
+ */
+static int
+xlog_scan_hdrs(struct xlog *log, xfs_daddr_t lo, xfs_daddr_t hi, bool backward,
+	       int count, int *found, xfs_daddr_t *rblk, union wfs_rhead *rhead,
+	       bool is_wrapped, bool *wrapped)
+{
+	char		*buf, *offset;
+	xfs_daddr_t	pos;
+	int		error;
+
+	if (lo > hi)
+		return 0;
+	buf = xlog_alloc_buffer(log, WFS_SCAN_CHUNK_BB);
+	if (!buf)
+		return -ENOMEM;
+	pos = backward ? hi : lo;
+	while (backward ? pos >= lo : pos <= hi) {
+		xfs_daddr_t	c0, c1;
+		int		n, k;
+
+		if (backward) {
+			c1 = pos;
+			c0 = max(lo, c1 - WFS_SCAN_CHUNK_BB + 1);
+		} else {
+			c0 = pos;
+			c1 = min(hi, c0 + WFS_SCAN_CHUNK_BB - 1);
+		}
+		n = (int)(c1 - c0 + 1);
+		error = xlog_bread(log, c0, n, buf, &offset);
+		if (error) {
+			free(buf);
+			return error;
+		}
+		for (k = 0; k < n; k++) {
+			int	idx = backward ? n - 1 - k : k;
+			char	*bp = offset + (size_t)idx * BBSIZE;
+
+			if (*(__be32 *)bp != cpu_to_be32(XLOG_HEADER_MAGIC_NUM))
+				continue;
+			*rblk = c0 + idx;
+			if (rhead)
+				memcpy(rhead->raw, bp, BBSIZE);
+			if (is_wrapped)
+				*wrapped = true;
+			if (++(*found) == count) {
+				free(buf);
+				return 0;
+			}
+		}
+		pos = backward ? c0 - 1 : c1 + 1;
+	}
+	free(buf);
+	return 0;
+}
+
+/*
  * Seek backwards in the log for log record headers. (763-823)
  * Returns the number found or a negative error; *rhead is a copy.
  */
@@ -624,49 +691,27 @@ xlog_rseek_logrec_hdr(struct xlog *log, xfs_daddr_t head_blk,
 		      xfs_daddr_t tail_blk, int count, char *buffer,
 		      xfs_daddr_t *rblk, union wfs_rhead *rhead, bool *wrapped)
 {
-	int			i;
-	int			error;
 	int			found = 0;
-	char			*offset = NULL;
+	int			error;
 	xfs_daddr_t		end_blk;
 
+	(void)buffer;
 	*wrapped = false;
 
 	end_blk = head_blk > tail_blk ? tail_blk : 0;
-	for (i = (int) head_blk - 1; i >= end_blk; i--) {
-		error = xlog_bread(log, i, 1, buffer, &offset);
-		if (error)
-			goto out_error;
-
-		if (*(__be32 *) offset == cpu_to_be32(XLOG_HEADER_MAGIC_NUM)) {
-			*rblk = i;
-			memcpy(rhead->raw, offset, BBSIZE);
-			if (++found == count)
-				break;
-		}
-	}
+	error = xlog_scan_hdrs(log, end_blk, head_blk - 1, true, count, &found,
+			       rblk, rhead, false, wrapped);
+	if (error)
+		return error;
 
 	if (tail_blk >= head_blk && found != count) {
-		for (i = log->l_logBBsize - 1; i >= (int) tail_blk; i--) {
-			error = xlog_bread(log, i, 1, buffer, &offset);
-			if (error)
-				goto out_error;
-
-			if (*(__be32 *)offset ==
-			    cpu_to_be32(XLOG_HEADER_MAGIC_NUM)) {
-				*wrapped = true;
-				*rblk = i;
-				memcpy(rhead->raw, offset, BBSIZE);
-				if (++found == count)
-					break;
-			}
-		}
+		error = xlog_scan_hdrs(log, tail_blk, log->l_logBBsize - 1,
+				       true, count, &found, rblk, rhead, true,
+				       wrapped);
+		if (error)
+			return error;
 	}
-
 	return found;
-
-out_error:
-	return error;
 }
 
 /* Seek forward in the log for log record headers. (835-896) */
@@ -675,47 +720,26 @@ xlog_seek_logrec_hdr(struct xlog *log, xfs_daddr_t head_blk,
 		     xfs_daddr_t tail_blk, int count, char *buffer,
 		     xfs_daddr_t *rblk, bool *wrapped)
 {
-	int			i;
-	int			error;
 	int			found = 0;
-	char			*offset = NULL;
+	int			error;
 	xfs_daddr_t		end_blk;
 
+	(void)buffer;
 	*wrapped = false;
 
 	end_blk = head_blk > tail_blk ? head_blk : log->l_logBBsize - 1;
-	for (i = (int) tail_blk; i <= end_blk; i++) {
-		error = xlog_bread(log, i, 1, buffer, &offset);
-		if (error)
-			goto out_error;
-
-		if (*(__be32 *) offset == cpu_to_be32(XLOG_HEADER_MAGIC_NUM)) {
-			*rblk = i;
-			if (++found == count)
-				break;
-		}
-	}
+	error = xlog_scan_hdrs(log, tail_blk, end_blk, false, count, &found,
+			       rblk, NULL, false, wrapped);
+	if (error)
+		return error;
 
 	if (tail_blk > head_blk && found != count) {
-		for (i = 0; i < (int) head_blk; i++) {
-			error = xlog_bread(log, i, 1, buffer, &offset);
-			if (error)
-				goto out_error;
-
-			if (*(__be32 *)offset ==
-			    cpu_to_be32(XLOG_HEADER_MAGIC_NUM)) {
-				*wrapped = true;
-				*rblk = i;
-				if (++found == count)
-					break;
-			}
-		}
+		error = xlog_scan_hdrs(log, 0, head_blk - 1, false, count,
+				       &found, rblk, NULL, true, wrapped);
+		if (error)
+			return error;
 	}
-
 	return found;
-
-out_error:
-	return error;
 }
 
 /* (901-910) Calculate distance from head to tail (unused space in the log). */
@@ -1008,7 +1032,7 @@ xlog_verify_head(struct xlog *log, xfs_daddr_t *head_blk,
 		if (found < 0)
 			return found;
 		if (found == 0)
-			return -EIO;
+			return -EFSCORRUPTED;
 
 		*head_blk = first_bad;
 		*tail_blk = BLOCK_LSN(be64_to_cpu(rhead->h.h_tail_lsn));
@@ -1195,12 +1219,28 @@ wfs_log_check(const struct wfs_log_params *p, const struct wfs_log_reader *r,
 	error = xlog_find_tail(&log, &head_blk, &tail_blk);
 	if (error == -EFSBADCRC)	/* backend boundary: BADCRC -> EUCLEAN */
 		error = -EFSCORRUPTED;
+	if (error == -EIO) {
+		/* the reader failed: the device is unusable, even for norecovery */
+		xfs_err(NULL, "log: I/O error while reading the log");
+		return error;
+	}
 	if (error) {
-		if (error == -EIO)
-			xfs_err(NULL, "log: read error while checking the log");
-		else
-			xfs_err(NULL, "log: cannot be interpreted (corrupt?), error %d",
-				error);
+		/*
+		 * The log cannot be interpreted (corrupt). The kernel never
+		 * parses the log under norecovery, so there it only warns
+		 * (policy in design 6.2); otherwise the mount is refused.
+		 */
+		if (norecovery) {
+			if (dirty_out)
+				*dirty_out = true;	/* unknown: treat as stale */
+			xfs_warn(NULL,
+	"log cannot be interpreted (error %d): mounting with norecovery, "
+	"data may be stale or inconsistent", error);
+			return 0;
+		}
+		xfs_err(NULL, "log: cannot be interpreted (corrupt?), error %d; "
+			"mount on Linux to replay or use the option norecovery",
+			error);
 		return error;
 	}
 
@@ -1245,7 +1285,9 @@ xfs_log_mount_ro_check(struct xfs_mount *mp, bool norecovery)
 	memset(&p, 0, sizeof(p));
 	memset(&r, 0, sizeof(r));
 
-	sect = mp->m_sb.sb_logsectsize ? mp->m_sb.sb_logsectsize : BBSIZE;
+	/* kernel: the log sector size applies only with the SECTORBIT feature */
+	sect = (mp->m_features & XFS_FEAT_SECTOR) && mp->m_sb.sb_logsectsize ?
+	       mp->m_sb.sb_logsectsize : BBSIZE;
 	if (mp->m_sb.sb_logstart)
 		p.log_start_byte = BBTOB((uint64_t)XFS_FSB_TO_DADDR(mp, mp->m_sb.sb_logstart));
 	p.log_bytes = (uint64_t)mp->m_sb.sb_logblocks << mp->m_sb.sb_blocklog;

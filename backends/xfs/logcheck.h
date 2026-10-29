@@ -39,7 +39,9 @@ struct wfs_log_params {
 /*
  * Core check, independent of libxfs mount state.
  * Returns 0: clean, or dirty with norecovery (warning logged);
- *  -EUCLEAN: dirty without norecovery, or the log is unparsable/corrupt;
+ *  -EUCLEAN: dirty or unparsable log without norecovery, or bad parameters;
+ *            with norecovery an unparsable log is a warning and returns 0
+ *            (*dirty_out is set: contents may be stale);
  *  -EIO: the reader failed.
  * *dirty_out (optional) is set to true when the log needs recovery and is
  * only meaningful when the return value is 0 or the log was parsed as dirty.

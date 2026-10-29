@@ -4,6 +4,8 @@
 #                                 kernel tree or mkfs.xfs/xfs_logprint is missing
 #   make test-logcheck SAN=1      ASan+UBSan
 #   make CROSS=x86_64-w64-mingw32- test-logcheck-build   compile-only
+# kernel-derived object: not -Wextra clean
+$(OUT)/be/logcheck.o: LIBXFS_BE_WNO = $(LIBXFS_WNO)
 LOGCHECK_TEST = $(OUT)/test_logcheck$(EXE)
 LOGCHECK_SRC = logcheck.c tests/test_logcheck.c
 LOGCHECK_FLAGS = -I. $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(INC) $(KINC)
