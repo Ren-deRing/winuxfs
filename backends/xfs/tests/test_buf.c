@@ -6,6 +6,7 @@
 #include "xfs_shared.h"
 #include "xfs_trans_resv.h"
 #include "xfs_mount.h"
+#include "xfs_error.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -322,6 +323,199 @@ static void get_uncached_and_incore(void)
 	teardown();
 }
 
+
+/* ---- fix round 1 tests ---------------------------------------------------- */
+static void vfy_err_badcrc(struct xfs_buf *bp) { xfs_verifier_error(bp, -EFSBADCRC, __this_address); }
+static void vfy_err_corrupt(struct xfs_buf *bp) { xfs_verifier_error(bp, -EFSCORRUPTED, __this_address); }
+static void vfy_err_pos(struct xfs_buf *bp) { xfs_buf_verifier_error(bp, EFSBADCRC, "t", bp->b_addr, 16, __this_address); }
+static const struct xfs_buf_ops ops_badcrc = { .name = "badcrc", .verify_read = vfy_err_badcrc };
+static const struct xfs_buf_ops ops_corrupt = { .name = "corrupt", .verify_read = vfy_err_corrupt };
+static const struct xfs_buf_ops ops_pos = { .name = "pos", .verify_read = vfy_err_pos };
+
+static void verifier_error_reporting_fails_read(void)
+{
+	struct xfs_buf *a = (void *)1;
+
+	setup(WFS_XFS_BUFCACHE_DEFAULT_BYTES);
+	CHECK(xfs_buf_read(&bt, 8, 8, 0, &a, &ops_badcrc) == -EFSBADCRC && a == NULL);
+	CHECK(xfs_buf_read(&bt, 8, 8, 0, &a, &ops_corrupt) == -EFSCORRUPTED);
+	CHECK(xfs_buf_read(&bt, 8, 8, 0, &a, &ops_pos) == -EFSBADCRC);
+	CHECK(wfs_xfs_bcache_usage(cache) == 0 && reads == 3);
+	CHECK(xfs_buf_incore(&bt, 8, 8, 0, &a) == -ENOENT);
+	/* reverify on a cached buffer fails the call but keeps the good data */
+	CHECK(xfs_buf_read(&bt, 8, 8, 0, &a, &test_ops) == 0);
+	xfs_buf_relse(a);
+	CHECK(xfs_buf_read(&bt, 8, 8, 0, &a, &ops_badcrc) == -EFSBADCRC);
+	CHECK(xfs_buf_read(&bt, 8, 8, 0, &a, &test_ops) == 0 && reads == 4);
+	xfs_buf_relse(a);
+	teardown();
+}
+
+static void slow_fail_verify(struct xfs_buf *bp) { usleep(50000); xfs_verifier_error(bp, -EFSBADCRC, __this_address); }
+static void slow_ok_verify(struct xfs_buf *bp) { (void)bp; usleep(50000); }
+static const struct xfs_buf_ops ops_slowfail = { .name = "slowfail", .verify_read = slow_fail_verify };
+static const struct xfs_buf_ops ops_slowok = { .name = "slowok", .verify_read = slow_ok_verify };
+
+static int mo_err[NTHR];
+static void *multi_op_thread(void *arg)
+{
+	long i = (long)arg;
+	struct xfs_buf *bp;
+
+	pthread_barrier_wait(&bar);
+	mo_err[i] = xfs_buf_read(&bt, 5000, 8, 0, &bp, (i & 1) ? &ops_slowok : &ops_slowfail);
+	if (!mo_err[i]) {
+		CHECK(data_ok(bp, 5000, 4096));
+		xfs_buf_relse(bp);
+	}
+	return NULL;
+}
+
+static void failed_read_not_inherited_by_other_ops(void)
+{
+	pthread_t t[NTHR];
+	long i;
+
+	setup(WFS_XFS_BUFCACHE_DEFAULT_BYTES);
+	pthread_barrier_init(&bar, NULL, NTHR);
+	for (i = 0; i < NTHR; i++)
+		pthread_create(&t[i], NULL, multi_op_thread, (void *)i);
+	for (i = 0; i < NTHR; i++)
+		pthread_join(t[i], NULL);
+	pthread_barrier_destroy(&bar);
+	for (i = 0; i < NTHR; i++)
+		CHECK(mo_err[i] == ((i & 1) ? 0 : -EFSBADCRC));
+	teardown();
+}
+
+static int stop_readers;
+static const struct xfs_buf_ops *seen_ops;
+static void *ops_reader_thread(void *arg)
+{
+	struct xfs_buf *bp = arg;
+	while (!__atomic_load_n(&stop_readers, __ATOMIC_ACQUIRE)) {
+		seen_ops = bp->b_ops;	/* unlocked read, as libxfs does */
+		CHECK(bp->b_error == 0);
+	}
+	return NULL;
+}
+
+static void reverify_does_not_write_shared_fields(void)
+{
+	struct xfs_buf *a, *b;
+	pthread_t t;
+	int i;
+
+	setup(WFS_XFS_BUFCACHE_DEFAULT_BYTES);
+	CHECK(xfs_buf_read(&bt, 8, 8, 0, &a, &test_ops) == 0);
+	stop_readers = 0;
+	pthread_create(&t, NULL, ops_reader_thread, a);
+	for (i = 0; i < 200; i++) {
+		CHECK(xfs_buf_read(&bt, 8, 8, 0, &b, (i & 1) ? &ops_slowok : &crc_ops) == ((i & 1) ? 0 : -EFSBADCRC));
+		if (i & 1)
+			xfs_buf_relse(b);
+		if (i > 3)
+			break;
+	}
+	__atomic_store_n(&stop_readers, 1, __ATOMIC_RELEASE);
+	pthread_join(t, NULL);
+	CHECK(a->b_ops == &test_ops);
+	xfs_buf_relse(a);
+	teardown();
+}
+
+static void fast_ok_verify(struct xfs_buf *bp) { (void)bp; }
+static const struct xfs_buf_ops ops_fastok = { .name = "fastok", .verify_read = fast_ok_verify };
+#define TNT 12
+static void *tiny_thread(void *arg)
+{
+	unsigned seed = (unsigned)(long)arg * 7919u + 1;
+	int it;
+
+	for (it = 0; it < 400; it++) {
+		struct xfs_buf *bp[3];
+		int k, n = 1 + (int)(rand_r(&seed) % 3);
+
+		for (k = 0; k < n; k++) {
+			int blk = (int)(rand_r(&seed) % 48);
+
+			if (blk == 47) {	/* a bad block now and then */
+				CHECK(xfs_buf_read(&bt, BAD_DADDR, 8, 0, &bp[k], &test_ops) == -EFSCORRUPTED);
+				bp[k] = NULL;
+				continue;
+			}
+			CHECK(xfs_buf_read(&bt, (xfs_daddr_t)blk * 128, 128, 0, &bp[k],
+					   (it & 1) ? &test_ops : &ops_fastok) == 0);
+			if (bp[k])
+				CHECK(data_ok(bp[k], (uint64_t)blk * 128, 65536));
+		}
+		for (k = 0; k < n; k++)
+			if (bp[k])
+				xfs_buf_relse(bp[k]);
+	}
+	return NULL;
+}
+
+static void tiny_limit_concurrency(void)
+{
+	pthread_t t[TNT];
+	long i;
+
+	setup(256u << 10);
+	for (i = 0; i < TNT; i++)
+		pthread_create(&t[i], NULL, tiny_thread, (void *)i);
+	for (i = 0; i < TNT; i++)
+		pthread_join(t[i], NULL);
+	CHECK(wfs_xfs_bcache_usage(cache) <= (256u << 10));
+	wfs_xfs_bcache_purge(cache);
+	CHECK(wfs_xfs_bcache_usage(cache) == 0);
+	teardown();
+}
+
+static void range_guards(void)
+{
+	struct xfs_buf *a;
+
+	setup(WFS_XFS_BUFCACHE_DEFAULT_BYTES);
+	CHECK(xfs_buf_get_uncached(&bt, ((size_t)1 << 32) + 8, &a) == -EINVAL && a == NULL);
+	CHECK(xfs_buf_read_uncached(&bt, 8, ((size_t)1 << 32) + 8, &a, &test_ops) == -EINVAL);
+	CHECK(xfs_buf_get_uncached(&bt, 0, &a) == -EINVAL);
+	CHECK(reads == 0);
+	/* unknown device size (bt_nr_sectors == 0): offsets must not overflow */
+	bt.bt_nr_sectors = 0;
+	CHECK(xfs_buf_read(&bt, (xfs_daddr_t)1 << 56, 8, 0, &a, &test_ops) == -EFSCORRUPTED);
+	CHECK(xfs_buf_read(&bt, INT64_MAX, 8, 0, &a, &test_ops) == -EFSCORRUPTED);
+	CHECK(xfs_buf_read(&bt, -5, 8, 0, &a, &test_ops) == -EINVAL);
+	CHECK(reads == 0);
+	teardown();
+}
+
+static void *slow_reader(void *arg)
+{
+	struct xfs_buf *bp;
+
+	(void)arg;
+	CHECK(xfs_buf_read(&bt, 6000, 8, 0, &bp, &test_ops) == 0);
+	xfs_buf_relse(bp);
+	return NULL;
+}
+
+static void incore_waits_for_reading(void)
+{
+	pthread_t t;
+	struct xfs_buf *bp;
+
+	setup(WFS_XFS_BUFCACHE_DEFAULT_BYTES);
+	read_delay_us = 200000;
+	pthread_create(&t, NULL, slow_reader, NULL);
+	usleep(50000);
+	CHECK(xfs_buf_incore(&bt, 6000, 8, 0, &bp) == 0);
+	CHECK(reads == 1 && (bp->b_flags & XBF_DONE) && data_ok(bp, 6000, 4096));
+	xfs_buf_relse(bp);
+	pthread_join(t, NULL);
+	teardown();
+}
+
 int main(void)
 {
 	char path[] = "/tmp/wfs_test_buf_XXXXXX";
@@ -338,6 +532,12 @@ int main(void)
 	discontiguous_map_reads_all_segments();
 	cap_exceeded_returns_enomem();
 	get_uncached_and_incore();
+	verifier_error_reporting_fails_read();
+	failed_read_not_inherited_by_other_ops();
+	reverify_does_not_write_shared_fields();
+	tiny_limit_concurrency();
+	range_guards();
+	incore_waits_for_reading();
 	close(img_fd);
 	unlink(path);
 	printf("test_buf: %d checks, %d failures\n", checks, failures);

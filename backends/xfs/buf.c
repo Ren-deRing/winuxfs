@@ -10,7 +10,13 @@
  *            (single-flight). The buffer is in the hash but unusable.
  *   VALID    data present and verified (against vops); immutable from here on
  *   FAILED   I/O or verifier failed: removed from the hash at once (never
- *            cached), error kept for the waiters, freed with the last ref
+ *            cached), error kept for the waiters, freed with the last ref.
+ *            A waiter whose ops differ from the failed verify's retries.
+ *
+ * After a buffer is VALID its xfs_buf fields (b_ops, b_error, b_addr...) are
+ * never written by the cache, so holders read them without locks. Re-verifying
+ * a VALID buffer against other ops runs on a private copy of the xfs_buf
+ * (verify_copy); only the private vops field changes, under the shard lock.
  *
  * Locks (lock order: shard.lock -> lru_lock):
  *   shard.lock  one of NSHARD mutexes; guards its hash chains plus every
@@ -31,6 +37,7 @@
 #include "xfs_shared.h"
 #include "xfs_trans_resv.h"
 #include "xfs_mount.h"
+#include "xfs_error.h"
 
 #define NSHARD		64
 #define NBUCKET		512		/* per shard */
@@ -63,6 +70,8 @@ struct wfs_xbuf {
 	struct lru_node		lru;
 	struct wfs_xfs_bcache	*c;
 	const struct xfs_buf_ops *vops;	/* ops the data was verified against */
+	const struct xfs_buf_ops *err_ops; /* ops of the failed verify (FAILED) */
+	bool			err_verify; /* FAILED by verifier, not by I/O */
 	size_t			bytes;
 	int			state;
 	int			refs;
@@ -92,7 +101,8 @@ struct wfs_bdev {
 	int			role;
 };
 
-static inline struct wfs_xbuf *WB(struct xfs_buf *bp) { return (struct wfs_xbuf *)bp; }
+/* b_priv, not a cast: a verifier may be handed a private copy of the xfs_buf */
+static inline struct wfs_xbuf *WB(struct xfs_buf *bp) { return bp->b_priv; }
 static inline struct wfs_bdev *BD(struct xfs_buftarg *t) { return t->bt_priv; }
 
 /* ---- cache object ------------------------------------------------------ */
@@ -333,6 +343,8 @@ static int check_maps(struct xfs_buftarg *t, const struct xfs_buf_map *m,
 	for (i = 0; i < nmaps; i++) {
 		if (m[i].bm_len <= 0 || m[i].bm_bn < 0)
 			return -EINVAL;
+		if ((uint64_t)m[i].bm_bn > (uint64_t)(INT64_MAX >> 9) - MAX_BUF_BB)
+			return -EFSCORRUPTED;	/* byte offset would overflow */
 		total += m[i].bm_len;
 		if (total > MAX_BUF_BB)
 			return -EINVAL;
@@ -366,6 +378,8 @@ static struct wfs_xbuf *find_locked(struct bshard *s, unsigned int h,
 	return NULL;
 }
 
+static bool put_locked(struct wfs_xbuf *wb);
+
 static int buf_get(struct xfs_buftarg *t, const struct xfs_buf_map *m,
 		int nmaps, xfs_buf_flags_t flags, struct wfs_xbuf **out)
 {
@@ -384,6 +398,19 @@ static int buf_get(struct xfs_buftarg *t, const struct xfs_buf_map *m,
 
 	mutex_lock(&s->lock);
 	wb = find_locked(s, h, t, m, nmaps, len);
+	if (wb && (flags & XBF_INCORE)) {
+		/* never hand out a buffer that is still being read */
+		while (wb->state == ST_READING)
+			cv_wait(&s->cv, &s->lock);
+		if (wb->state == ST_FAILED) {
+			bool freeit = put_locked(wb);
+
+			mutex_unlock(&s->lock);
+			if (freeit)
+				free_buf(wb);
+			return -ENOENT;
+		}
+	}
 	mutex_unlock(&s->lock);
 	if (wb) {
 		*out = wb;
@@ -437,19 +464,28 @@ static int buf_io(struct wfs_xbuf *wb)
 	return 0;
 }
 
-/* Runs b_ops->verify_read; the error is whatever the verifier left in b_error. */
-static int run_verify(struct wfs_xbuf *wb, const struct xfs_buf_ops *ops)
+/* Runs ops->verify_read on bp; the result is whatever the verifier left in
+ * b_error (set by itself or by xfs_verifier_error). Negative errno. */
+static int run_verify(struct xfs_buf *bp, const struct xfs_buf_ops *ops)
 {
 	int err;
 
-	wb->b.b_error = 0;
+	bp->b_error = 0;
 	if (ops && ops->verify_read) {
-		wb->b.b_ops = ops;
-		ops->verify_read(&wb->b);
+		bp->b_ops = ops;
+		ops->verify_read(bp);
 	}
-	err = wb->b.b_error;
-	wb->b.b_error = 0;
+	err = bp->b_error;
+	bp->b_error = 0;
 	return err > 0 ? -err : err;
+}
+
+/* Re-verify a shared VALID buffer on a private copy: no shared field is written. */
+static int verify_copy(struct wfs_xbuf *wb, const struct xfs_buf_ops *ops)
+{
+	struct xfs_buf tmp = wb->b;
+
+	return run_verify(&tmp, ops);
 }
 
 /* shard lock held; drops one reference */
@@ -472,14 +508,16 @@ static bool put_locked(struct wfs_xbuf *wb)
 	return false;
 }
 
+#define FILL_RETRY	1	/* failed under other ops: caller looks the block up again */
+
 /*
  * Bring wb to VALID verified against ops, doing at most one read system-wide
- * (single-flight). Consumes the caller's reference on failure.
+ * (single-flight). Consumes the caller's reference unless it returns 0.
  */
 static int buf_fill(struct wfs_xbuf *wb, const struct xfs_buf_ops *ops)
 {
 	struct bshard *s = &wb->c->shard[wb->shard];
-	bool freeit = false;
+	bool freeit;
 	int err;
 
 	mutex_lock(&s->lock);
@@ -490,6 +528,8 @@ static int buf_fill(struct wfs_xbuf *wb, const struct xfs_buf_ops *ops)
 		}
 		if (wb->state == ST_FAILED) {
 			err = wb->err;
+			if (wb->err_verify && wb->err_ops != ops)
+				err = FILL_RETRY;
 			goto drop;
 		}
 		if (wb->state == ST_VALID && (!ops || wb->vops == ops)) {
@@ -500,15 +540,20 @@ static int buf_fill(struct wfs_xbuf *wb, const struct xfs_buf_ops *ops)
 	}
 
 	if (wb->state == ST_EMPTY) {
+		bool io_ok;
+
 		wb->state = ST_READING;
 		mutex_unlock(&s->lock);
 		err = buf_io(wb);
+		io_ok = !err;
 		if (!err)
-			err = run_verify(wb, ops);
+			err = run_verify(&wb->b, ops);
 		mutex_lock(&s->lock);
 		if (err) {
 			wb->state = ST_FAILED;	/* never cached */
 			wb->err = err;
+			wb->err_verify = io_ok;
+			wb->err_ops = ops;
 			if (wb->hashed)
 				unhash(wb);
 			wb->b.b_ops = NULL;
@@ -517,22 +562,20 @@ static int buf_fill(struct wfs_xbuf *wb, const struct xfs_buf_ops *ops)
 			wb->vops = ops;
 			wb->b.b_flags |= XBF_DONE;
 		}
-	} else {
-		/* VALID but verified against other ops: re-verify, as the kernel does */
-		const struct xfs_buf_ops *old = wb->b.b_ops;
-
-		wb->state = ST_READING;
-		mutex_unlock(&s->lock);
-		err = run_verify(wb, ops);
-		mutex_lock(&s->lock);
-		wb->state = ST_VALID;
-		if (err)
-			wb->b.b_ops = old;	/* data unchanged; stays cached */
-		else
-			wb->vops = ops;
+		cv_broadcast(&s->cv);
+		if (!err) {
+			mutex_unlock(&s->lock);
+			return 0;
+		}
+		goto drop;
 	}
-	cv_broadcast(&s->cv);
+
+	/* VALID, verified against other ops: re-verify like the kernel, on a copy */
+	mutex_unlock(&s->lock);
+	err = verify_copy(wb, ops);
+	mutex_lock(&s->lock);
 	if (!err) {
+		wb->vops = ops;
 		mutex_unlock(&s->lock);
 		return 0;
 	}
@@ -565,10 +608,12 @@ int xfs_buf_read_map(struct xfs_buftarg *target, struct xfs_buf_map *map,
 
 	(void)fa;
 	*bpp = NULL;
-	err = buf_get(target, map, nmaps, flags & ~XBF_INCORE, &wb);
-	if (err)
-		return err;
-	err = buf_fill(wb, ops);
+	do {
+		err = buf_get(target, map, nmaps, flags & ~XBF_INCORE, &wb);
+		if (err)
+			return err;
+		err = buf_fill(wb, ops);
+	} while (err == FILL_RETRY);
 	if (err)
 		return err;
 	*bpp = &wb->b;
@@ -586,10 +631,13 @@ int xfs_buf_get_uncached(struct xfs_buftarg *target, size_t numblks,
 {
 	struct xfs_buf_map m = { .bm_bn = XFS_BUF_DADDR_NULL, .bm_len = (int)numblks };
 	struct wfs_xbuf *wb;
-	int len = check_maps(target, &(struct xfs_buf_map){ .bm_bn = 0, .bm_len = (int)numblks },
-			     1, false);
+	int len;
 
 	*bpp = NULL;
+	if (numblks == 0 || numblks > MAX_BUF_BB)
+		return -EINVAL;	/* before any narrowing to int */
+	len = check_maps(target, &(struct xfs_buf_map){ .bm_bn = 0, .bm_len = (int)numblks },
+			 1, false);
 	if (len < 0)
 		return len;
 	wb = alloc_buf_retry(BD(target)->c, target, &m, 1, len);
@@ -607,10 +655,13 @@ int xfs_buf_read_uncached(struct xfs_buftarg *target, xfs_daddr_t daddr,
 {
 	struct xfs_buf *bp;
 	struct wfs_xbuf *wb;
-	int err = check_maps(target, &(struct xfs_buf_map){ .bm_bn = daddr, .bm_len = (int)numblks },
-			     1, true);
+	int err;
 
 	*bpp = NULL;
+	if (numblks == 0 || numblks > MAX_BUF_BB)
+		return -EINVAL;
+	err = check_maps(target, &(struct xfs_buf_map){ .bm_bn = daddr, .bm_len = (int)numblks },
+			 1, true);
 	if (err < 0)
 		return err;
 	err = xfs_buf_get_uncached(target, numblks, &bp);
@@ -621,7 +672,7 @@ int xfs_buf_read_uncached(struct xfs_buftarg *target, xfs_daddr_t daddr,
 	bp->b_rhash_key = daddr;
 	err = buf_io(wb);
 	if (!err)
-		err = run_verify(wb, ops);
+		err = run_verify(bp, ops);
 	if (err) {
 		xfs_buf_rele(bp);
 		return err;
@@ -639,7 +690,7 @@ int _xfs_buf_read(struct xfs_buf *bp)
 	int err = buf_io(wb);
 
 	if (!err)
-		err = run_verify(wb, bp->b_ops);
+		err = run_verify(bp, bp->b_ops);
 	if (err)
 		bp->b_flags &= ~XBF_DONE;
 	else
@@ -710,14 +761,45 @@ void __xfs_buf_mark_corrupt(struct xfs_buf *bp, xfs_failaddr_t fa)
 	xfs_buf_stale(bp);
 }
 
+void xfs_buf_corruption_error(struct xfs_buf *bp, xfs_failaddr_t fa)
+{
+	xfs_alert(bp->b_mount, "Metadata corruption detected at %p, block 0x%llx",
+		  fa, (unsigned long long)xfs_buf_daddr(bp));
+	bp->b_error = -EFSCORRUPTED;
+}
+
+/*
+ * Real libxfs verifiers report corruption only through these and rely on them
+ * to leave the error in b_error, which run_verify() turns into a failed,
+ * uncached read.
+ */
+void xfs_verifier_error(struct xfs_buf *bp, int error, xfs_failaddr_t failaddr)
+{
+	if (error > 0)
+		error = -error;
+	xfs_alert(bp->b_mount, "Metadata %s detected at %p, block 0x%llx",
+		  error == -EFSBADCRC ? "CRC error" : "corruption", failaddr,
+		  (unsigned long long)xfs_buf_daddr(bp));
+	if (error)
+		bp->b_error = error;
+}
+
+void xfs_buf_verifier_error(struct xfs_buf *bp, int error, const char *name,
+		const void *buf, size_t bufsz, xfs_failaddr_t failaddr)
+{
+	(void)buf; (void)bufsz;
+	if (error > 0)
+		error = -error;
+	xfs_alert(bp->b_mount, "Metadata %s detected at %p (%s), block 0x%llx",
+		  error == -EFSBADCRC ? "CRC error" : "corruption", failaddr,
+		  name ? name : "?", (unsigned long long)xfs_buf_daddr(bp));
+	if (error)
+		bp->b_error = error;
+}
+
 /* Read-only mount: nothing is ever written. */
 int xfs_bwrite(struct xfs_buf *bp) { (void)bp; return -EROFS; }
-int xfs_buf_delwri_submit(struct list_head *l) { (void)l; return -EROFS; }
-bool xfs_buf_delwri_queue(struct xfs_buf *bp, struct list_head *l)
-{
-	(void)bp; (void)l;
-	return false;
-}
+/* xfs_buf_delwri_submit/queue: -EROFS/false stubs live in stubs_ro.c */
 
 bool xfs_verify_magic(struct xfs_buf *bp, __be32 dmagic)
 {

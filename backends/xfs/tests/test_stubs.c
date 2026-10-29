@@ -27,9 +27,7 @@ int xfs_buf_delwri_submit(struct list_head *);
 int xfs_dec_freecounter(struct xfs_mount *, int, uint64_t, bool);
 void xfs_trans_log_inode(struct xfs_trans *, struct xfs_inode *, unsigned);
 void xfs_fs_mark_sick(struct xfs_mount *, unsigned);
-int xfs_buf_read_map(struct xfs_buftarg *, struct xfs_buf_map *, int, unsigned, struct xfs_buf **,
-		     const struct xfs_buf_ops *, void *);
-void xfs_buf_rele(struct xfs_buf *);
+int xfs_metadir_load(struct xfs_trans *, struct xfs_inode *, const char *, int, struct xfs_inode **);
 void xfs_ilock(struct xfs_inode *, unsigned);
 bool xfs_log_check_lsn(struct xfs_mount *, int64_t);
 bool xfs_attr_check_namespace(unsigned);
@@ -49,7 +47,6 @@ static void hook(int level, const char *msg)
 int main(void)
 {
 	struct xfs_trans *tp = NULL;
-	struct xfs_buf *bp = NULL;
 
 	wfs_log_set_hook(hook);
 
@@ -66,11 +63,10 @@ int main(void)
 
 	/* PENDING stubs: error, logged once. */
 	nlogs = 0;
-	CHECK(xfs_buf_read_map(NULL, NULL, 0, 0, &bp, NULL, NULL) == -ENOSYS);
-	CHECK(xfs_buf_read_map(NULL, NULL, 0, 0, &bp, NULL, NULL) == -ENOSYS);
+	CHECK(xfs_metadir_load(NULL, NULL, "x", 0, NULL) == -ENOSYS);
+	CHECK(xfs_metadir_load(NULL, NULL, "x", 0, NULL) == -ENOSYS);
 	CHECK(nlogs == 1);
-	CHECK(strstr(last, "xfs_buf_read_map") != NULL);
-	xfs_buf_rele(NULL);
+	CHECK(strstr(last, "xfs_metadir_load") != NULL);
 	xfs_ilock(NULL, 0);
 	CHECK(xfs_log_check_lsn(NULL, 1));
 
