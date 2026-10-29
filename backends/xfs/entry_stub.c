@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Backend descriptor "xfs". probe/mount/unmount are real (Task 6, mount.c);
- * statfs/lookup/readdir stay -ENOSYS until Tasks 9/11 (getattr/forget: Task 8), the rest of the
- * required-op skeleton likewise. The single exported symbol stays.
+ * Backend descriptor "xfs" (read-only): ABI glue only. Every read operation is
+ * implemented in its own file (mount.c, icache.c/inomap.c: getattr+forget,
+ * dir.c: lookup+readdir, read.c: read+readlink, statfs.c) and wired here; the
+ * write operations stay NULL. The single exported symbol is wfs_backend_entry.
  */
 #include "winuxfs/backend.h"
 #include "winuxfs/errno.h"
@@ -32,7 +33,6 @@ static wfs_err_t x_mount(const wfs_host_api *api, wfs_blkdev *devs[WFS_DEV_COUNT
 
 static wfs_err_t x_unmount(wfs_fs *fs) { return wfs_xfs_unmount((struct wfs_xfs *)fs); }
 
-/* The loader requires these ops. PENDING(T9): lookup, readdir. */
 static wfs_err_t x_statfs(wfs_fs *fs, wfs_statfs *st)
 {
 	return wfs_xfs_op_statfs((struct wfs_xfs *)fs, st);
