@@ -25,6 +25,11 @@ if command -v gcc >/dev/null; then
 else
   echo "SKIPPED: backends/xfs shim test (gcc not installed)"
 fi
+if command -v gcc >/dev/null; then
+  make -s -C backends/xfs test-logcheck
+else
+  echo "SKIPPED: backends/xfs logcheck test (gcc not installed)"
+fi
 if command -v x86_64-w64-mingw32-gcc >/dev/null; then
   make -s -C backends/xfs CROSS=x86_64-w64-mingw32- test-shim-build
 else
