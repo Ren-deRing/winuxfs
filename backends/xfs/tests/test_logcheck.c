@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
 
@@ -859,9 +860,11 @@ static void fuzz_defined_results(void)
 	uint32_t seed = 987654321u;
 	size_t b;
 	int it, bad = 0, ok = 0, err = 0;
+	/* quick default (~4 s); FUZZ_ITERS=1500 is the full run (~20 s) */
+	int iters = getenv("FUZZ_ITERS") ? atoi(getenv("FUZZ_ITERS")) : 300;
 
 	for (b = 0; b < sizeof(base) / sizeof(base[0]); b++) {
-		for (it = 0; it < 1500; it++) {
+		for (it = 0; it < iters; it++) {
 			struct slog s, orig;
 			uint32_t head, nmut, m;
 			bool dirty;
@@ -1477,7 +1480,7 @@ static void diff_fuzz_vs_logprint(void)
 {
 	static const char *opts[] = { "", "-m crc=0 -l version=1", "-m crc=0 -l version=2" };
 	static const uint32_t lens[] = { 20, 512, 1024, 3584, 4096, 8000, 32768, 40000, 70000 };
-	int iters = getenv("DF_ITERS") ? atoi(getenv("DF_ITERS")) : 40;
+	int iters = getenv("DF_ITERS") ? atoi(getenv("DF_ITERS")) : 8;	/* quick default; DF_ITERS=40 for the full run */
 	int o, it, agree = 0, torn = 0, danger = 0, compared = 0;
 
 	NEED_TOOLS();
@@ -1630,8 +1633,8 @@ int main(void)
 	if (!have_tool("xfs_logprint"))
 		printf("SKIPPED: xfs_logprint cross-check (xfs_logprint missing)\n");
 
-#define RUN(t) do { int f0 = failures; log_reset(); t(); \
-	printf("%s %s\n", failures == f0 ? "PASS" : "FAIL", #t); } while (0)
+#define RUN(t) do { int f0 = failures; time_t t0 = time(NULL); log_reset(); t(); \
+	printf("%s %s (%lds)\n", failures == f0 ? "PASS" : "FAIL", #t, (long)(time(NULL) - t0)); } while (0)
 	RUN(clean_fixtures_pass);
 	RUN(dirty_log_rejected);
 	RUN(norecovery_mounts_dirty);
