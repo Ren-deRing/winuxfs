@@ -59,3 +59,14 @@ test-dir-san:
 	$(MAKE) --no-print-directory test-dir SAN=1 OUT=$(OUT)-san
 
 .PHONY: test-dir test-dir-san
+
+# Host performance baseline (docs/xfs-backend.md): make bench-dir IMG=... DIR=/many [FILE=/f]
+BENCH_DIR = $(OUT)/bench_dir$(EXE)
+$(BENCH_DIR): tests/bench_dir.c $(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) icache.h wfs_xfs.h Makefile mk/dir.mk | $(OUT)
+	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(INC) $(KINC) -I. -o $@ tests/bench_dir.c \
+		$(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
+bench-dir:
+	$(MAKE) --no-print-directory $(BENCH_DIR)
+	$(BENCH_DIR) $(IMG) $(DIR) $(FILE)
+
+.PHONY: bench-dir

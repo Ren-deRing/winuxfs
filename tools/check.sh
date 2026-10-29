@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 #   --fuzz     the same, then `make fuzz-sample`: the seed-fixed 1% sample of all
 #              sector mutations in both CRC modes (about a minute; the full set is
 #              `make -C backends/xfs fuzz-full`, for nightly runs).
-#   --vm       the same, then the full Milestone 1 acceptance: Windows
+#   --vm       the same, then the full Milestone 1 and XFS (M2) acceptance: Windows
 #              cross-build, VM restored to snapshot `clean`, every Windows
 #              test executable (integration tests e2e_*, ffi_* and the
 #              lib/bin unit tests of winuxfs-win and winuxfs-cli) run in the VM.
@@ -176,4 +176,29 @@ if [ ${#failed[@]} -gt 0 ]; then
   echo "FAILED in VM: ${failed[*]}" >&2
   exit 1
 fi
+
+# ---- XFS stage (M2 design 10.7): GPT disk of fixture images, the xfs plugin
+# and tools/xfs-vm-acceptance.ps1 in the VM, host-side diff of its manifests.
+echo "== VM: XFS acceptance"
+XFS_FIX="${XFS_FIXTURES:-tests/xfs/images}"
+if [ ! -f "$XFS_FIX/hole-unwritten.img" ]; then tools/gen-fixtures.sh --out "$XFS_FIX"; fi
+XFS_DIR=target/xfs-vm
+rm -rf "$XFS_DIR/vmout"
+python3 -I tools/xfs_vm_acceptance.py prepare "$XFS_DIR" --fixtures "$XFS_FIX"
+XFS_STAGE=target/vm-stage-xfs
+rm -rf "$XFS_STAGE"
+mkdir -p "$XFS_STAGE"
+cp "$WIN/winuxfs.exe" target/plugins-win/winuxfs_backend_xfs.dll tools/xfs-vm-acceptance.ps1 "$XFS_STAGE/"
+vmctl restore clean
+vmctl attach-disk "$XFS_DIR/disk.img"
+vmctl push "$XFS_STAGE" t15 >/dev/null
+vmctl run -- 'if exist C:\t15 rmdir /s /q C:\t15'
+vmctl run -- 'xcopy /y /e /i /q \\host.lan\Data\t15 C:\t15'
+xfs_rc=0
+vmctl run -- 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\t15\xfs-vm-acceptance.ps1 -Dir C:\t15 -Out C:\t15\out' || xfs_rc=$?
+vmctl run -- 'if exist \\host.lan\Data\t15out rmdir /s /q \\host.lan\Data\t15out'
+vmctl run -- 'xcopy /y /e /i /q C:\t15\out \\host.lan\Data\t15out'
+XFS_OUT="$(dirname "$VMCTL")/../vm/shared/t15out"
+if [ "$xfs_rc" != 0 ]; then echo "XFS acceptance script failed ($xfs_rc)" >&2; exit 1; fi
+python3 -I tools/xfs_vm_acceptance.py verify "$XFS_DIR" "$XFS_OUT"
 echo "VM acceptance OK"

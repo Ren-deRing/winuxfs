@@ -3,8 +3,11 @@ use crate::Errno;
 use std::sync::{Arc, Mutex};
 
 /// Turns arbitrary byte requests into sector-aligned requests on `inner`
-/// using read-modify-write. The mutex serializes all requests so concurrent
-/// unaligned writes sharing a sector cannot lose each other's bytes.
+/// using read-modify-write. The mutex serializes writes so concurrent
+/// unaligned writes sharing a sector cannot lose each other's bytes. Reads do
+/// not take it (a read sees a sector before or after a concurrent write, as
+/// on a real disk), and a sector-aligned read goes straight to `inner`
+/// without a bounce buffer.
 pub struct AlignedDevice {
     inner: Arc<dyn BlockDevice>,
     lock: Mutex<()>,
@@ -41,10 +44,12 @@ impl BlockDevice for AlignedDevice {
         if !check_range(self.size(), off, buf.len())? {
             return Ok(());
         }
-        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let (start, end) = self.span(off, buf.len())?;
         if end > self.size() {
             return Err(Errno::EINVAL); // size not a multiple of sector size
+        }
+        if start == off && end - start == buf.len() as u64 {
+            return self.inner.read_at(off, buf);
         }
         let mut tmp = vec![0u8; (end - start) as usize];
         self.inner.read_at(start, &mut tmp)?;

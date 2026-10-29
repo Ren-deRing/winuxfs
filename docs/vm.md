@@ -261,6 +261,46 @@ checkout's `tools/vmctl.py`. Result of the run: all of `e2e_cli` (9),
 `e2e_conformance` (3), `e2e_disk` (9, 1 ignored helper), `e2e_read` (17),
 `e2e_write` (23), `ffi_layout` (8) and `ffi_smoke` (5) passed.
 
+### XFS stage of `tools/check.sh --vm` (M2)
+
+After the M1 tests, `check.sh --vm` restores `clean` again and runs the XFS
+acceptance (details and the list of tests in `docs/xfs-backend.md`):
+
+```sh
+python3 -I tools/xfs_vm_acceptance.py prepare target/xfs-vm   # GPT disk: clean, dirty-log, hole, perf images
+tools/vmctl.py restore clean && tools/vmctl.py attach-disk target/xfs-vm/disk.img
+tools/vmctl.py push target/vm-stage-xfs t15                   # winuxfs.exe, xfs plugin DLL, xfs-vm-acceptance.ps1
+tools/vmctl.py run -- 'xcopy /y /e /i /q \\host.lan\Data\t15 C:\t15'
+tools/vmctl.py run -- 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\t15\xfs-vm-acceptance.ps1 -Dir C:\t15 -Out C:\t15\out'
+tools/vmctl.py run -- 'xcopy /y /e /i /q C:\t15\out \\host.lan\Data\t15out'   # results land in vm/shared/t15out
+python3 -I tools/xfs_vm_acceptance.py verify target/xfs-vm vm/shared/t15out
+```
+
+Observations (build 26300, WinFsp 2.1, 2026-10-29):
+
+- The attached image is the only non-boot, non-system disk (`disk:1`); the
+  script finds it with `Get-Disk` and mounts partitions of its GPT with
+  `winuxfs mount Y: disk:1 --type xfs --partition N`. Windows leaves the
+  unknown (Linux filesystem) partitions alone. The mount process is started
+  with `Start-Process` from the script and everything (walk, probes,
+  `unmount`) runs in that one logon session, as for M1. A `Process` object
+  from `Start-Process -PassThru` reports `ExitCode` null unless its `Handle`
+  is read once.
+- The first `winuxfs.exe` start after a boot of the restored snapshot is slow
+  (3.5-9 s to a visible drive, 9.7 s for a bare `list-partitions`); later
+  mounts take 50-120 ms. Do not read the first number as backend speed.
+- `fsutil fsinfo volumeinfo Y:` prints `Is ReadOnly` for the volume (and a
+  harmless `Error 1: Incorrect function` line); every write attempt fails
+  (`Access denied` for open-for-write, `The media is write protected` for
+  mkdir/delete/rename/attribute changes).
+- Symlinks are listed as plain files with size = target length; opening one
+  for reading fails (.NET reports "Handle does not support synchronous
+  operations"). `Get-FileHash` and `[IO.File]` work for every other file, also
+  names mapped through `namemap` (Korean, U+F7xx for invalid bytes). Names
+  longer than MAX_PATH are hashed through `\\?\` streams in the script.
+- The whole stage takes about 70-90 s in the VM, of which about 27 s is
+  hashing the 4 GiB mostly-hole file.
+
 ### Visual Explorer check (manual)
 
 1. `tools/vmctl.py up`, then open <http://127.0.0.1:8006> in a browser and
