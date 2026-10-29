@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 //! XFS backend under concurrent use, through the plugin ABI: several threads
 //! on one mount, the caches squeezed to their minimum, and lookup/forget
 //! traffic that has to balance. Mirrors `backends/xfs/tests/test_concurrent.c`

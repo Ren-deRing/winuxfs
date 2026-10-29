@@ -51,8 +51,10 @@ static int flush_run(struct wfs_xfs *x, struct run *r, size_t *done)
 		size_t n = r->len < READ_CHUNK ? r->len : READ_CHUNK;
 		int err = wfs_xfs_blk_read(&x->blk, r->role, r->dev_off, r->dst, n);
 
-		if (err)	/* an in-range request the host calls invalid is its problem too */
+		if (err) {	/* an in-range request the host calls invalid is its problem too */
+			r->len = 0;	/* do not retry the failed run */
 			return err == -WFS_EINVAL ? -WFS_EUCLEAN : -WFS_EIO;
+		}
 		r->dev_off += n;
 		r->dst += n;
 		r->len -= n;
@@ -92,6 +94,64 @@ static int extent_dev_off(struct wfs_xfs *x, struct xfs_inode *ip,
 	return 0;
 }
 
+/*
+ * Symlink target of ip into link[] (not NUL terminated); *lenp = its length.
+ * The caller holds a reference; the data-map lock is taken here.
+ */
+static int symlink_target(struct xfs_inode *ip, char link[XFS_SYMLINK_MAXLEN + 1],
+			  size_t *lenp)
+{
+	struct xfs_mount *mp = ip->i_mount;
+	uint32_t lock_mode;
+	int64_t size;
+	int err = 0;
+
+	size = ip->i_disk_size;
+	if (size < 1 || size > XFS_SYMLINK_MAXLEN)
+		return -WFS_EUCLEAN;
+
+	lock_mode = xfs_ilock_data_map_shared(ip);
+	if (ip->i_df.if_format == XFS_DINODE_FMT_LOCAL) {
+		if (!ip->i_df.if_data || size > ip->i_df.if_bytes)
+			err = -WFS_EUCLEAN;
+		else
+			memcpy(link, ip->i_df.if_data, (size_t)size);
+	} else if (ip->i_df.if_format == XFS_DINODE_FMT_EXTENTS) {
+		/*
+		 * xfs_symlink_remote_read trusts the map; check that it covers
+		 * the whole path with real blocks (no hole, delalloc) first.
+		 */
+		struct xfs_bmbt_irec map[XFS_SYMLINK_MAPS];
+		int nmaps = XFS_SYMLINK_MAPS, i;
+		int fsblocks = xfs_symlink_blocks(mp, (int)size);
+		xfs_filblks_t total = 0;
+
+		err = xfs_bmapi_read(ip, 0, fsblocks, map, &nmaps, 0);
+		if (err) {
+			err = wfs_xfs_err(err);
+		} else {
+			for (i = 0; i < nmaps; i++) {
+				if (!xfs_bmap_is_real_extent(&map[i]) ||
+				    !xfs_verify_fsbext(mp, map[i].br_startblock, map[i].br_blockcount))
+					break;
+				total += map[i].br_blockcount;
+			}
+			if (i != nmaps || total != (xfs_filblks_t)fsblocks)
+				err = -WFS_EUCLEAN;
+		}
+		if (!err) {
+			err = xfs_symlink_remote_read(ip, link);
+			err = wfs_xfs_err(err);
+		}
+	} else {
+		err = -WFS_EUCLEAN;
+	}
+	xfs_iunlock(ip, lock_mode);
+	if (!err)
+		*lenp = (size_t)size;
+	return err;
+}
+
 wfs_err_t wfs_xfs_op_read(struct wfs_xfs *x, wfs_ino_t ino, uint64_t off, void *buf,
 			  size_t len, size_t *done)
 {
@@ -114,6 +174,29 @@ wfs_err_t wfs_xfs_op_read(struct wfs_xfs *x, wfs_ino_t ino, uint64_t off, void *
 	case S_IFDIR:
 		xfs_irele(ip);
 		return -WFS_EISDIR;
+	case S_IFLNK: {
+		/* The file's content is the target text (size == its length). */
+		char link[XFS_SYMLINK_MAXLEN + 1];
+		size_t tlen = 0, n;
+
+		err = symlink_target(ip, link, &tlen);
+		xfs_irele(ip);
+		if (err)
+			return err;
+		if (off >= tlen || len == 0)
+			return 0;
+		n = len < tlen - off ? len : (size_t)(tlen - off);
+		memcpy(buf, link + off, n);
+		*done = n;
+		return 0;
+	}
+	case S_IFCHR:
+	case S_IFBLK:
+	case S_IFIFO:
+	case S_IFSOCK:
+		/* Special files have no readable content: empty file. */
+		xfs_irele(ip);
+		return 0;
 	default:
 		xfs_irele(ip);
 		return -WFS_EINVAL;
@@ -198,10 +281,8 @@ wfs_err_t wfs_xfs_op_readlink(struct wfs_xfs *x, wfs_ino_t ino, char *buf, size_
 			      size_t *len)
 {
 	struct xfs_inode *ip;
-	struct xfs_mount *mp = &x->mp;
 	char link[XFS_SYMLINK_MAXLEN + 1];
-	uint32_t lock_mode;
-	int64_t size;
+	size_t n = 0;
 	int err;
 
 	*len = 0;
@@ -212,55 +293,13 @@ wfs_err_t wfs_xfs_op_readlink(struct wfs_xfs *x, wfs_ino_t ino, char *buf, size_
 		xfs_irele(ip);
 		return -WFS_EINVAL;
 	}
-	size = ip->i_disk_size;
-	if (size < 1 || size > XFS_SYMLINK_MAXLEN) {
-		xfs_irele(ip);
-		return -WFS_EUCLEAN;
-	}
-
-	lock_mode = xfs_ilock_data_map_shared(ip);
-	if (ip->i_df.if_format == XFS_DINODE_FMT_LOCAL) {
-		if (!ip->i_df.if_data || size > ip->i_df.if_bytes)
-			err = -WFS_EUCLEAN;
-		else
-			memcpy(link, ip->i_df.if_data, (size_t)size);
-	} else if (ip->i_df.if_format == XFS_DINODE_FMT_EXTENTS) {
-		/*
-		 * xfs_symlink_remote_read trusts the map; check that it covers
-		 * the whole path with real blocks (no hole, delalloc) first.
-		 */
-		struct xfs_bmbt_irec map[XFS_SYMLINK_MAPS];
-		int nmaps = XFS_SYMLINK_MAPS, i;
-		int fsblocks = xfs_symlink_blocks(mp, (int)size);
-		xfs_filblks_t total = 0;
-
-		err = xfs_bmapi_read(ip, 0, fsblocks, map, &nmaps, 0);
-		if (err) {
-			err = wfs_xfs_err(err);
-		} else {
-			for (i = 0; i < nmaps; i++) {
-				if (!xfs_bmap_is_real_extent(&map[i]) ||
-				    !xfs_verify_fsbext(mp, map[i].br_startblock, map[i].br_blockcount))
-					break;
-				total += map[i].br_blockcount;
-			}
-			if (i != nmaps || total != (xfs_filblks_t)fsblocks)
-				err = -WFS_EUCLEAN;
-		}
-		if (!err) {
-			err = xfs_symlink_remote_read(ip, link);
-			err = wfs_xfs_err(err);
-		}
-	} else {
-		err = -WFS_EUCLEAN;
-	}
-	xfs_iunlock(ip, lock_mode);
+	err = symlink_target(ip, link, &n);
 	xfs_irele(ip);
 	if (err)
 		return err;
-	*len = (size_t)size;
-	if (cap < (size_t)size)
+	*len = n;
+	if (cap < n)
 		return -WFS_ERANGE;
-	memcpy(buf, link, (size_t)size);
+	memcpy(buf, link, n);
 	return 0;
 }

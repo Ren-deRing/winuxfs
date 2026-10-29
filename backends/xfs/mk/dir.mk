@@ -28,6 +28,14 @@ $(OUT)/libxfs/xfs_dir2_leaf.o: $(OUT)/libxfs/%.o: $(OUT)/gen/libxfs/.patched $(S
 $(OUT)/libxfs/xfs_dir2_node.o: $(OUT)/libxfs/%.o: $(OUT)/gen/libxfs/.patched $(SHIM_HDR) Makefile
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(if $(SAN),-fno-sanitize=alignment) $(PIC) $(VIS) $(INC) $(KINC) -c -o $@ $(OUT)/gen/libxfs/$*.c
+# Patch 0003 (bmbt extent order, review I2): xfs_bmap.c is built from a patched copy.
+BMAP_PATCH = ../../third_party/linux-xfs-patches/0003-bmbt-extent-order.patch
+$(OUT)/gen/libxfs/xfs_bmap.c: $(KERNEL_XFS_SRC)/libxfs/xfs_bmap.c $(BMAP_PATCH)
+	@mkdir -p $(dir $@)
+	cp $< $@.tmp && chmod u+w $@.tmp && patch -s -p1 --no-backup-if-mismatch $@.tmp < $(BMAP_PATCH) && mv $@.tmp $@
+$(OUT)/libxfs/xfs_bmap.o: $(OUT)/libxfs/%.o: $(OUT)/gen/libxfs/%.c $(SHIM_HDR) Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(if $(SAN),-fno-sanitize=alignment) $(PIC) $(VIS) $(INC) $(KINC) -c -o $@ $<
 $(OUT)/be/dir.o: LIBXFS_BE_WNO = $(LIBXFS_WNO)
 
 # Vendored libxfs casts 4-byte aligned short btree pointers (inobt/bnobt/cnt

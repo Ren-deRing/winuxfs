@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 //! XFS backend through the host: mounts real mkfs.xfs images from the shared
 //! fixture cache (`tools/gen-fixtures.sh`, built by `make -C backends/xfs
 //! test-mount`) and checks the whole tree against the generator's manifest.

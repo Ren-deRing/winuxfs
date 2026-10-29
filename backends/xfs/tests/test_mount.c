@@ -915,6 +915,23 @@ static void mount_unmount_leaves_no_leaks(void)
 	CHECK(wfs_mem_used() == mem_base);
 }
 
+/* xfs_log_check_lsn is a real definition (read-only: no LSN enforcement) and mounting logs nothing about it */
+bool xfs_log_check_lsn(struct xfs_mount *, xfs_lsn_t);
+static void log_check_lsn_is_real_and_silent(void)
+{
+	struct mnt m;
+
+	NEED(tools_mkfs, "mkfs.xfs");
+	CHECK_RC(mnt_open(&m, base_img, NULL, NULL, "", 512), 0);
+	if (m.x) {
+		CHECK(!log_has("xfs_log_check_lsn"));
+		CHECK(!log_has("pending"));
+		CHECK(xfs_log_check_lsn(&m.x->mp, 1));
+		CHECK(xfs_log_check_lsn(&m.x->mp, (xfs_lsn_t)0x7fffffffffffffffLL));
+		mnt_unmount(&m);
+	}
+}
+
 static void mount_twice_in_one_process(void)
 {
 	struct mnt a, b;
@@ -1005,6 +1022,7 @@ int main(int argc, char **argv)
 	RUN(option_parser_rejects_bad_values);
 	RUN(dirty_log_refused_then_norecovery, rootdir);
 	RUN(mount_unmount_leaves_no_leaks);
+	RUN(log_check_lsn_is_real_and_silent);
 	RUN(mount_twice_in_one_process);
 	RUN(entry_point_mounts_and_probes);
 	CHECK(nwrites == 0);

@@ -346,14 +346,44 @@ static void walk_image(const char *fixdir, const char *name)
 			CHECK_EQ(len, tl);
 			CHECK(out[0] == 0x55);
 			CHECK_EQ(wfs_xfs_op_readlink(m.x, w, out, tl, &len), 0);	/* exact fit */
-			CHECK_EQ(wfs_xfs_op_read(m.x, w, 0, out, 4, &done), -WFS_EINVAL);
+			/* read returns the target text; partial windows, EOF, zero length */
+			{
+				char part[2048];
+				size_t k;
+
+				memset(part, 0x55, sizeof(part));
+				done = 99;
+				CHECK_EQ(wfs_xfs_op_read(m.x, w, 0, part, sizeof(part), &done), 0);
+				CHECK_EQ(done, tl);
+				CHECK(done == tl && !memcmp(part, tgt, tl));
+				CHECK(part[tl] == 0x55);
+				k = tl > 4 ? 4 : tl;
+				done = 99;
+				CHECK_EQ(wfs_xfs_op_read(m.x, w, 0, part, k, &done), 0);
+				CHECK_EQ(done, k);
+				CHECK(!memcmp(part, tgt, k));
+				if (tl > 2) {
+					done = 99;
+					CHECK_EQ(wfs_xfs_op_read(m.x, w, 2, part, sizeof(part), &done), 0);
+					CHECK_EQ(done, tl - 2);
+					CHECK(!memcmp(part, tgt + 2, tl - 2));
+				}
+				done = 99;
+				CHECK_EQ(wfs_xfs_op_read(m.x, w, tl, part, 8, &done), 0);
+				CHECK_EQ(done, 0);
+				done = 99;
+				CHECK_EQ(wfs_xfs_op_read(m.x, w, 0, part, 0, &done), 0);
+				CHECK_EQ(done, 0);
+			}
 			continue;
 		}
 		if (strcmp(fld[1], "file")) {	/* fifo & co */
 			uint8_t b[16];
 
 			if (fifos++ < 5) {
-				CHECK_EQ(wfs_xfs_op_read(m.x, w, 0, b, sizeof(b), &done), -WFS_EINVAL);
+				done = 99;
+				CHECK_EQ(wfs_xfs_op_read(m.x, w, 0, b, sizeof(b), &done), 0);
+				CHECK_EQ(done, 0);
 				CHECK_EQ(wfs_xfs_op_readlink(m.x, w, (char *)b, sizeof(b), &done), -WFS_EINVAL);
 			}
 			continue;
@@ -900,12 +930,18 @@ static void bad_extent_beyond_device_is_error(const char *fixdir)
 	/* (b) a valid extent that lies beyond the (shrunken) device */
 	copy_img(src, img);
 	CHECK_EQ(mnt_open(&m, img), 0);
-	m.x->blk.size_bytes[WFS_DEV_DATA] = 1u << 20;	/* extent is further out */
-	done = 99;
-	err = wfs_xfs_op_read(m.x, w_of(&m, xi), 0, buf, sizeof(buf), &done);
-	/* the file's blocks may sit below 1 MiB: only demand "ok or EUCLEAN" then,
-	   and make the failing case certain with a second file further out */
-	CHECK(err == 0 || err == -WFS_EUCLEAN);
+	{
+		struct stat sb;
+
+		CHECK_EQ(stat(img, &sb), 0);
+		/* the true device size: the same read succeeds (bound is exact, not off by one) */
+		m.x->blk.size_bytes[WFS_DEV_DATA] = (uint64_t)sb.st_size;
+		done = 99;
+		err = wfs_xfs_op_read(m.x, w_of(&m, xi), 0, buf, sizeof(buf), &done);
+		CHECK_EQ(err, 0);
+		CHECK(done > 0);
+	}
+	/* device too small for the extent -> EUCLEAN, nothing delivered */
 	m.x->blk.size_bytes[WFS_DEV_DATA] = 4096;
 	done = 99;
 	err = wfs_xfs_op_read(m.x, w_of(&m, xi), 0, buf, sizeof(buf), &done);
@@ -1161,7 +1197,8 @@ static void root_fixture_devnodes(const char *rootfix)
 
 			CHECK(w != 0);
 			CHECK_EQ(wfs_xfs_op_getattr(m.x, w, &st), 0);
-			CHECK_EQ(wfs_xfs_op_read(m.x, w, 0, b, sizeof(b), &done), -WFS_EINVAL);
+			done = 99;
+			CHECK_EQ(wfs_xfs_op_read(m.x, w, 0, b, sizeof(b), &done), 0);	/* empty file */
 			CHECK_EQ(done, 0);
 			CHECK_EQ(wfs_xfs_op_readlink(m.x, w, (char *)b, sizeof(b), &done), -WFS_EINVAL);
 		}

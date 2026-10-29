@@ -1,0 +1,58 @@
+SPDX-License-Identifier: GPL-2.0
+Reject out-of-order extents when reading a bmbt (M2 final review I2).
+
+Why: xfs_iread_bmbt_block() stuffs every record of every leaf into the incore
+extent map. The only sibling check in xfs_btree_visit_blocks() is
+`sibling == self`, so a two-block cycle A -> B -> A of valid bmbt leaves is
+walked forever; the loop ends only when the number of loaded records exceeds
+di_nextents, and di_nextents is bounded only by di_nblocks (which a crafted
+inode can set to 2^32 or more). Each lap allocates 16 bytes per record in the
+iext tree (with __GFP_NOFAIL), i.e. unbounded memory growth.
+Why not a shim: the loop is inside libxfs; the shim sees neither the records
+nor the sibling pointers.
+Upstream: candidate (the same unbounded walk exists in the kernel; there the
+extent count is checked, but a cycle with a huge di_nextents is not).
+Behaviour: a record that starts before the end of the previous record
+(valid trees are strictly ordered and non-overlapping) fails the read with
+-EFSCORRUPTED, so a cycle dies on the second lap at the latest. Legitimate
+trees are unaffected.
+
+--- a/xfs_bmap.c
++++ b/xfs_bmap.c
+@@ -1086,6 +1086,7 @@
+ struct xfs_iread_state {
+ 	struct xfs_iext_cursor	icur;
+ 	xfs_extnum_t		loaded;
++	xfs_fileoff_t		next_off;	/* end of the previous record */
+ };
+ 
+ int
+@@ -1163,6 +1164,20 @@
+ 			return xfs_bmap_complain_bad_rec(ip, whichfork, fa,
+ 					&new);
+ 		}
++		/*
++		 * Records are strictly ordered and never overlap in a valid
++		 * tree. A sibling cycle (A -> B -> A) passes every other check
++		 * and would otherwise be read again and again, growing the
++		 * incore extent map without bound.
++		 */
++		if (unlikely(new.br_startoff < ir->next_off)) {
++			xfs_inode_verifier_error(ip, -EFSCORRUPTED,
++					"xfs_iread_extents(3)", frp,
++					sizeof(*frp), __this_address);
++			xfs_bmap_mark_sick(ip, whichfork);
++			return -EFSCORRUPTED;
++		}
++		ir->next_off = new.br_startoff + new.br_blockcount;
+ 		xfs_iext_insert(ip, &ir->icur, &new,
+ 				xfs_bmap_fork_to_state(whichfork));
+ 		trace_xfs_read_extent(ip, &ir->icur,
+@@ -1194,6 +1209,7 @@
+ 	xfs_assert_ilocked(ip, XFS_ILOCK_EXCL);
+ 
+ 	ir.loaded = 0;
++	ir.next_off = 0;
+ 	xfs_iext_first(ifp, &ir.icur);
+ 	cur = xfs_bmbt_init_cursor(mp, tp, ip, whichfork);
+ 	error = xfs_btree_visit_blocks(cur, xfs_iread_bmbt_block,

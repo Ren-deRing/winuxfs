@@ -59,6 +59,7 @@ struct wfs_xfs {
 	bool			perag_up, rtg_up;	/* groups need freeing */
 	bool			root_loaded;	/* Task 8: wfs_xfs_load_root() succeeded */
 	void			*icache;	/* Task 8 */
+	uint64_t		mem_budget;	/* added to the process allocation cap while mounted */
 };
 
 static inline struct wfs_xfs *wfs_xfs_of(struct xfs_mount *mp)
