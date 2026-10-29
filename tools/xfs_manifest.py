@@ -40,7 +40,11 @@ def _sha256(path):
             h.update(_ZEROS[:k])
             n -= k
 
-    with open(path, "rb") as f:
+    # Unbuffered + pread: a buffered reader keeps its own idea of the file
+    # position, and the lseek(SEEK_DATA/SEEK_HOLE) calls below move the real
+    # one behind its back (data after a short hole then came from the wrong
+    # offset).
+    with open(path, "rb", buffering=0) as f:
         fd = f.fileno()
         pos = 0
         while pos < size:
@@ -53,15 +57,16 @@ def _sha256(path):
             if data >= size:
                 break
             hole = min(os.lseek(fd, data, os.SEEK_HOLE), size)
-            f.seek(data)
             n = hole - data
+            at = data
             while n > 0:
-                b = f.read(min(n, _CHUNK))
+                b = os.pread(fd, min(n, _CHUNK), at)
                 if not b:  # file shrank under us
                     zeros(n)
                     break
                 h.update(b)
                 n -= len(b)
+                at += len(b)
             pos = hole
     return h.hexdigest()
 

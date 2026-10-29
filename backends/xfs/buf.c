@@ -39,6 +39,12 @@
 #include "xfs_mount.h"
 #include "xfs_error.h"
 #include "xfs_trans.h"
+#include "xfs_ag.h"
+#include "wfs_xfs.h"
+
+/* test_buf links buf.c without libxfs; perag_up is never set there. */
+#pragma weak xfs_group_get
+#pragma weak xfs_group_put
 
 #define NSHARD		64
 #define NBUCKET		512		/* per shard */
@@ -469,12 +475,31 @@ static int buf_io(struct wfs_xbuf *wb)
  * b_error (set by itself or by xfs_verifier_error). Negative errno. */
 static int run_verify(struct xfs_buf *bp, const struct xfs_buf_ops *ops)
 {
+	struct xfs_perag *pag = NULL;
 	int err;
 
 	bp->b_error = 0;
 	if (ops && ops->verify_read) {
+		struct wfs_xfs *x = bp->b_mount ? wfs_xfs_of(bp->b_mount) : NULL;
+
+		/*
+		 * AG btree verifiers read bp->b_pag (sibling range checks).
+		 * The cache does not hold a perag reference per buffer: borrow
+		 * one for the duration of the verifier only.
+		 */
+		if (x && x->perag_up && BD(bp->b_target)->role == WFS_DEV_DATA)
+			pag = xfs_perag_get(bp->b_mount,
+					xfs_daddr_to_agno(bp->b_mount, xfs_buf_daddr(bp)));
 		bp->b_ops = ops;
-		ops->verify_read(bp);
+		if (x && x->perag_up && BD(bp->b_target)->role == WFS_DEV_DATA && !pag) {
+			bp->b_error = -EFSCORRUPTED;	/* block outside every AG */
+		} else {
+			bp->b_pag = pag;
+			ops->verify_read(bp);
+			bp->b_pag = NULL;
+		}
+		if (pag)
+			xfs_perag_put(pag);
 	}
 	err = bp->b_error;
 	bp->b_error = 0;
