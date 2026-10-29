@@ -283,6 +283,11 @@ void wfs_xfs_bcache_purge(struct wfs_xfs_bcache *c)
 	evict_to(c, 0);
 }
 
+/* the fuzz builds set 0 so that an over-read is reported exactly */
+#ifndef WFS_BUF_SLACK
+#define WFS_BUF_SLACK 1024u
+#endif
+
 static struct wfs_xbuf *alloc_buf(struct wfs_xfs_bcache *c,
 		struct xfs_buftarg *t, const struct xfs_buf_map *m, int nmaps,
 		int len)
@@ -293,7 +298,13 @@ static struct wfs_xbuf *alloc_buf(struct wfs_xfs_bcache *c,
 	if (!wb)
 		return NULL;
 	wb->bytes = (size_t)len << 9;
-	wb->b.b_addr = kzalloc(wb->bytes, 0);
+	/*
+	 * Zeroed slack behind every buffer (defence in depth): libxfs forms
+	 * pointers from on-disk offsets and may read a few hundred bytes past a
+	 * bad one (a directory entry near the end of a block). The slack is not
+	 * counted in b_length or in the cache usage.
+	 */
+	wb->b.b_addr = kzalloc(wb->bytes + WFS_BUF_SLACK, 0);
 	if (!wb->b.b_addr)
 		goto fail;
 	if (nmaps == 1) {

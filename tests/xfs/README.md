@@ -105,3 +105,23 @@ Needs root fixture `tests/xfs/root-fixtures/dirty-log.img.zst` from
 `tools/gen-root-fixtures.sh`; once committed, the test `root_fixture_dirty_log`
 (skipped with a message while the file is absent) must report the image dirty
 (`-EUCLEAN`) and mount it with `norecovery`.
+
+## Fuzz corpus (`tests/xfs/corpus/`, Task 13)
+
+Committed, no xfsprogs needed to run. `base-small.wsi` is the sparse list of
+the 512-byte sectors the clean mount+walk reads from a small image (all
+directory forms, extent/btree forks, symlinks); every `*.wsd` is a minimized
+bad input: the base name plus the few sectors an `xfs_db -x` edit changed
+(`write -d` = invalid data with a valid CRC, `write -c` = stale CRC).
+`bad-*` must produce an error code, `reg-*` only must not crash, hang or
+over-allocate. Regenerate with `tools/gen-fuzz-corpus.sh` (about 10 s).
+
+    make -C backends/xfs test-fuzz       corpus + clean walk (ASan+UBSan), seconds
+    make -C backends/xfs fuzz-sample     seed-fixed 1% of all mutations, both CRC modes
+    make -C backends/xfs fuzz-full       every mutation (1.6 M per mode; nightly)
+    make -C backends/xfs fuzz-libfuzzer  clang libFuzzer harness
+    tools/check.sh --fuzz                host checks + fuzz-sample
+
+A failing mutation is printed as `idx N (dev D sector S, kind k)`; replay with
+`mutate_runner --only N tests/xfs/corpus/base-small.wsi`, save it with
+`--dump-dir DIR` and move the `.wsd` into the corpus.

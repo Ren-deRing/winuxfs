@@ -11,6 +11,23 @@ $(OUT)/gen/xfs_dir2_readdir.c: $(KERNEL_XFS_SRC)/xfs_dir2_readdir.c $(DIR_PATCH)
 $(OUT)/be/xfs_dir2_readdir.o: $(OUT)/gen/xfs_dir2_readdir.c $(SHIM_HDR) Makefile
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(PIC) $(VIS) $(INC) $(KINC) -c -o $@ $<
+
+# Patch 0002 (bounded leaf address, fuzz finding): xfs_dir2_leaf.c and
+# xfs_dir2_node.c are built from patched copies; the other libxfs files from
+# the vendored tree as before.
+DIR_PATCH2 = ../../third_party/linux-xfs-patches/0002-dir-lookup-bound-leaf-address.patch
+$(OUT)/gen/libxfs/.patched: $(KERNEL_XFS_SRC)/libxfs/xfs_dir2_leaf.c $(KERNEL_XFS_SRC)/libxfs/xfs_dir2_node.c $(DIR_PATCH2)
+	@mkdir -p $(dir $@)
+	cp $(KERNEL_XFS_SRC)/libxfs/xfs_dir2_leaf.c $(KERNEL_XFS_SRC)/libxfs/xfs_dir2_node.c $(dir $@)
+	chmod u+w $(dir $@)xfs_dir2_leaf.c $(dir $@)xfs_dir2_node.c
+	patch -s -d $(dir $@) -p1 --no-backup-if-mismatch < $(abspath $(DIR_PATCH2))
+	touch $@
+$(OUT)/libxfs/xfs_dir2_leaf.o: $(OUT)/libxfs/%.o: $(OUT)/gen/libxfs/.patched $(SHIM_HDR) Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(if $(SAN),-fno-sanitize=alignment) $(PIC) $(VIS) $(INC) $(KINC) -c -o $@ $(OUT)/gen/libxfs/$*.c
+$(OUT)/libxfs/xfs_dir2_node.o: $(OUT)/libxfs/%.o: $(OUT)/gen/libxfs/.patched $(SHIM_HDR) Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(if $(SAN),-fno-sanitize=alignment) $(PIC) $(VIS) $(INC) $(KINC) -c -o $@ $(OUT)/gen/libxfs/$*.c
 $(OUT)/be/dir.o: LIBXFS_BE_WNO = $(LIBXFS_WNO)
 
 # Vendored libxfs casts 4-byte aligned short btree pointers (inobt/bnobt/cnt

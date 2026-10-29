@@ -38,7 +38,7 @@ typedef __u32			dev_t_;
 #include "xfs_hooks.h"
 #include "xfs_types.h"
 #include "xfs_fs.h"
-#include "xfs_cksum.h"
+#include "wfs_cksum.h"
 #include "xfs_buf.h"
 #include "xfs_message.h"
 

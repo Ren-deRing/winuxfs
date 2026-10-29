@@ -5,8 +5,10 @@
 #define HDR 16u
 static size_t g_used;
 static size_t g_cap;
+static size_t g_cap_hits;
 
 void wfs_mem_set_cap(size_t cap) { __atomic_store_n(&g_cap, cap, __ATOMIC_SEQ_CST); }
+size_t wfs_mem_cap_hits(void) { return __atomic_load_n(&g_cap_hits, __ATOMIC_SEQ_CST); }
 size_t wfs_mem_used(void) { return __atomic_load_n(&g_used, __ATOMIC_SEQ_CST); }
 
 void *wfs_alloc(size_t size, gfp_t flags)
@@ -19,8 +21,10 @@ void *wfs_alloc(size_t size, gfp_t flags)
 	cap = __atomic_load_n(&g_cap, __ATOMIC_SEQ_CST);
 	cur = __atomic_load_n(&g_used, __ATOMIC_SEQ_CST);
 	do {	/* reserve first so concurrent allocators cannot overshoot */
-		if (cap && (total > cap || cur > cap - total))
+		if (cap && (total > cap || cur > cap - total)) {
+			__atomic_fetch_add(&g_cap_hits, 1, __ATOMIC_SEQ_CST);
 			return NULL;
+		}
 	} while (!__atomic_compare_exchange_n(&g_used, &cur, cur + total, 0,
 					      __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
 	p = (flags & __GFP_ZERO) ? calloc(1, total) : malloc(total);

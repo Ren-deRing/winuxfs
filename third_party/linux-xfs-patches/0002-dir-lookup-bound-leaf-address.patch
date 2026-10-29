@@ -1,0 +1,52 @@
+Bound the leaf entry address in directory lookup (M2 task 13, fuzz finding).
+
+Why: xfs_dir2_leaf_lookup_int() and xfs_dir2_leafn_lookup_for_entry() turn the
+`address` of a leaf entry into a pointer into the data block and read
+dep->namelen, dep->name and dep->inumber without checking that the entry lies
+inside the block. The leaf block's CRC does not vouch for the address, so a
+crafted image (address pointing at blocksize-4) makes the lookup read past the
+end of the heap buffer. The kernel gets away with it because its buffers are
+page backed; the backend's buffers are exact-size heap blocks.
+Why not a shim: the pointer is formed inline in the two lookup loops.
+Upstream: candidate (the same unchecked arithmetic exists in the kernel).
+Behaviour: an out of range entry is skipped like a non-matching entry (the
+buffer references stay balanced); the lookup then reports "not found".
+
+--- a/xfs_dir2_leaf.c
++++ b/xfs_dir2_leaf.c
+@@ -1344,6 +1344,16 @@
+ 			xfs_dir2_dataptr_to_off(args->geo,
+ 						be32_to_cpu(lep->address)));
+ 		/*
++		 * The leaf entry is untrusted (its CRC says nothing about
++		 * where it points): an entry that does not lie inside the data
++		 * block is skipped, never dereferenced.
++		 */
++		if (xfs_dir2_dataptr_to_off(args->geo, be32_to_cpu(lep->address)) +
++		    offsetof(struct xfs_dir2_data_entry, name) + 1 > args->geo->blksize ||
++		    xfs_dir2_dataptr_to_off(args->geo, be32_to_cpu(lep->address)) +
++		    xfs_dir2_data_entsize(mp, dep->namelen) > args->geo->blksize)
++			continue;
++		/*
+ 		 * Compare name and if it's an exact match, return the index
+ 		 * and buffer. If it's the first case-insensitive match, store
+ 		 * the index and buffer and continue looking for an exact match.
+--- a/xfs_dir2_node.c
++++ b/xfs_dir2_node.c
+@@ -884,6 +884,16 @@
+ 			xfs_dir2_dataptr_to_off(args->geo,
+ 						be32_to_cpu(lep->address)));
+ 		/*
++		 * The leaf entry is untrusted (its CRC says nothing about
++		 * where it points): an entry that does not lie inside the data
++		 * block is skipped, never dereferenced.
++		 */
++		if (xfs_dir2_dataptr_to_off(args->geo, be32_to_cpu(lep->address)) +
++		    offsetof(struct xfs_dir2_data_entry, name) + 1 > args->geo->blksize ||
++		    xfs_dir2_dataptr_to_off(args->geo, be32_to_cpu(lep->address)) +
++		    xfs_dir2_data_entsize(mp, dep->namelen) > args->geo->blksize)
++			continue;
++		/*
+ 		 * Compare the entry and if it's an exact match, return
+ 		 * EEXIST immediately. If it's the first case-insensitive
+ 		 * match, store the block & inode number and continue looking.
