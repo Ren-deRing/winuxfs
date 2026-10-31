@@ -415,6 +415,7 @@ struct block_device;
 struct dentry;
 struct kobject { int unused; };
 struct shrinker;
+struct fserror_event;
 struct file;
 struct dax_device;
 struct llist_head { void *first; };
@@ -457,6 +458,15 @@ static long wfs_mb_word __attribute__((unused));
 #define check_add_overflow(a, b, d)	__builtin_add_overflow(a, b, d)
 #define check_sub_overflow(a, b, d)	__builtin_sub_overflow(a, b, d)
 #define check_mul_overflow(a, b, d)	__builtin_mul_overflow(a, b, d)
+/* kernel overflow.h: true when (a << s) does not fit *d (or s is out of range) */
+#define check_shl_overflow(a, s, d) ({					\
+	__typeof__(a) _a = (a);						\
+	__typeof__(s) _s = (s);						\
+	__typeof__(d) _d = (d);						\
+	unsigned long long _a_full = (unsigned long long)_a;		\
+	unsigned int _to_shift = (_s >= 0 && (unsigned long long)_s < 8 * sizeof(*_d)) ? (unsigned int)_s : 0; \
+	*_d = (__typeof__(*_d))(_a_full << _to_shift);			\
+	(_to_shift != _s || *_d < 0 || _a < 0 || (__typeof__(_a))(*_d >> _to_shift) != _a); })
 #define struct_size_t(type, member, n) \
 	(sizeof(type) + sizeof(((type *)0)->member[0]) * (size_t)(n))
 #define struct_size(p, member, n) struct_size_t(__typeof__(*(p)), member, n)

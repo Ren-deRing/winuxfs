@@ -24,6 +24,7 @@ struct wfs_xfs;
 
 struct wfs_xfs_options {
 	bool		norecovery;		/* mount a dirty log without replay */
+	bool		ro;			/* read-only even on a writable device */
 	uint64_t	bufcache_bytes;		/* WFS_XFS_BUFCACHE_MIN..MAX */
 	uint32_t	inodecache_entries;	/* WFS_XFS_INODECACHE_MIN..MAX */
 };

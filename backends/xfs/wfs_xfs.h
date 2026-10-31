@@ -60,6 +60,8 @@ struct wfs_xfs {
 	bool			perag_up, rtg_up;	/* groups need freeing */
 	bool			root_loaded;	/* Task 8: wfs_xfs_load_root() succeeded */
 	bool			kinit;		/* holds a wfs_xfs_kinit_get() reference */
+	bool			rw;		/* read-write mount (want_rw) */
+	bool			rw_up;		/* mount_rw ran: unmount_rw quiesces */
 	void			*icache;	/* Task 8 */
 	uint64_t		mem_budget;	/* added to the process allocation cap while mounted */
 };

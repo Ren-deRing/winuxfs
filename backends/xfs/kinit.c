@@ -38,6 +38,7 @@
 #include "xfs_refcount_item.h"
 #include "xfs_bmap_item.h"
 #include "xfs_attr_item.h"
+#include "xfs_super.h"
 #include "kinit.h"
 
 /* Init-time only, so a bare spin on a builtin test-and-set is enough (also
@@ -142,8 +143,14 @@ fail:
 	return -ENOMEM;
 }
 
+struct workqueue_struct *xfs_discard_wq;
+
 static void kinit_destroy(void)
 {
+	if (xfs_discard_wq) {
+		destroy_workqueue(xfs_discard_wq);
+		xfs_discard_wq = NULL;
+	}
 	if (xfs_alloc_wq) {
 		destroy_workqueue(xfs_alloc_wq);
 		xfs_alloc_wq = NULL;
@@ -169,6 +176,11 @@ static int kinit_create(void)
 	/* bmbt splits run here on a fresh stack (xfs_btree_split) */
 	xfs_alloc_wq = alloc_workqueue("xfsalloc", XFS_WQFLAGS(WQ_MEM_RECLAIM | WQ_FREEZABLE), 0);
 	if (!xfs_alloc_wq) {
+		error = -ENOMEM;
+		goto fail;
+	}
+	xfs_discard_wq = alloc_workqueue("xfsdiscard", XFS_WQFLAGS(WQ_UNBOUND), 0);
+	if (!xfs_discard_wq) {
 		error = -ENOMEM;
 		goto fail;
 	}

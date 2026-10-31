@@ -182,9 +182,20 @@ struct address_space;
 #define gid_eq(a, b)				((a) == (b))
 static inline u32 sysv_encode_dev(u32 dev) { return dev; }	/* rdev is stored encoded */
 #define SB_ACTIVE		(1u << 30)
+#define SB_UNFROZEN		0
 #define SB_FREEZE_WRITE		1
 #define SB_FREEZE_COMPLETE	4
 #define sb_start_intwrite(sb)	((void)(sb))
+#define shrinker_free(s)	((void)(s))	/* no shrinkers are registered */
+/* the host keeps the volume identity: nothing to publish */
+#define super_set_uuid(sb, uuid, len)	((void)(sb), (void)(uuid), (void)(len))
+#define MAX_RW_COUNT		(INT_MAX & PAGE_MASK)
+/* The host process is the privileged caller of every admin operation. */
+#define CAP_SYS_ADMIN		21
+#define capable(cap)		((void)(cap), true)
+/* Freezing the host device is the host's business (shutdown ioctl). */
+#define bdev_freeze(bdev)	((void)(bdev), -EOPNOTSUPP)
+static inline int bdev_thaw(struct block_device *bdev) { (void)bdev; return 0; }
 #define sb_end_intwrite(sb)	((void)(sb))
 
 /* ---- tunables (kernel xfs_globals.c / xfs_sysctl.c) ------------------- */

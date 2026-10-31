@@ -228,12 +228,14 @@ bool completion_done(struct completion *x);
 struct semaphore {
 	unsigned int		count;
 	unsigned int		waiters;	/* down()s in the slow path */
+	unsigned int		busy;		/* up()s still touching the semaphore */
 	struct wait_queue_head	wait;
 };
 static inline void sema_init(struct semaphore *s, int val)
 {
 	s->count = (unsigned int)val;
 	s->waiters = 0;
+	s->busy = 0;
 	init_waitqueue_head(&s->wait);
 }
 void down(struct semaphore *s);

@@ -24,6 +24,22 @@ void xa_destroy(struct xarray *xa);
 void *xa_load(struct xarray *xa, unsigned long index);
 int xa_insert(struct xarray *xa, unsigned long index, void *entry, gfp_t gfp);
 void *xa_erase(struct xarray *xa, unsigned long index);
+struct xa_limit { u32 max, min; };
+#define XA_LIMIT(lo, hi)	((struct xa_limit){ .min = (lo), .max = (hi) })
+#define xa_limit_32b		XA_LIMIT(0, UINT_MAX)
+/* the lowest free index in [limit.min, limit.max] (below WFS_XA_MAX_INDEX) */
+int xa_alloc(struct xarray *xa, u32 *id, void *entry, struct xa_limit limit, gfp_t gfp);
+static inline bool xa_empty(const struct xarray *xa)
+{
+	unsigned long i;
+
+	for (i = 0; i < xa->xa_n; i++)
+		if (xa->xa_slots[i])
+			return false;
+	return true;
+}
+/* all-zero is the empty table (xa_init) */
+#define DEFINE_XARRAY_ALLOC(name)	struct xarray name = { 0 }
 void xa_set_mark(struct xarray *xa, unsigned long index, xa_mark_t mark);
 void xa_clear_mark(struct xarray *xa, unsigned long index, xa_mark_t mark);
 bool xa_marked(struct xarray *xa, xa_mark_t mark);

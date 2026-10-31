@@ -101,12 +101,13 @@ else
   miss=
   for s in xfs_trans_alloc xfs_trans_commit xfs_trans_roll xfs_defer_finish xfs_trans_log_inode \
            xfs_trans_log_buf xfs_trans_ijoin xfs_rmap_alloc xfs_rmap_free xfs_extent_busy_insert \
-           xfs_icreate_log xfs_trans_mod_sb xfs_log_force xfs_trans_ail_insert; do
+           xfs_icreate_log xfs_trans_mod_sb xfs_log_force xfs_trans_ail_insert \
+           xfs_dec_freecounter xfs_add_freecounter xfs_mod_delalloc xfs_reserve_blocks; do
     nm "$obj" | grep -q " T $s\$" && miss="$miss $s(still stubbed)"
     n=$(nm "$L"/libxfs/*.o "$L"/m3/*.o "$L"/shim/*.o "$L"/be/*.o 2>/dev/null | grep -c " [TtW] $s\$")
     [ "$n" = 1 ] || miss="$miss $s(defined $n times)"
   done
-  for s in xfs_dec_freecounter xfs_add_freecounter xfs_fs_mark_sick xfs_mod_delalloc xfs_parent_addname; do
+  for s in xfs_fs_mark_sick xfs_parent_addname xfs_bmap_rtalloc xfs_filestream_select_ag; do
     nm "$obj" | grep -q " T $s\$" || miss="$miss $s(stub missing)"
     n=$(nm "$L"/libxfs/*.o "$L"/m3/*.o "$L"/shim/*.o 2>/dev/null | grep -c " [TtW] $s\$")
     [ "$n" = 0 ] || miss="$miss $s(also defined in core/shim)"

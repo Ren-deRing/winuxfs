@@ -47,35 +47,13 @@
 #include "xfs_rtrmap_btree.h"
 #include "xfs_rtrefcount_btree.h"
 #include "xfs_zone_alloc.h"
+#include "xfs_metafile.h"
+#include "xfs_rtalloc.h"
+#include "xfs_healthmon.h"
+#include "xfs_icache.h"
 #include "wfs_xfs.h"
 
 /* ---- shutdown (kernel xfs_fsops.c) ------------------------------------- */
-
-void xfs_do_force_shutdown(struct xfs_mount *mp, uint32_t flags, char *fname, int lnnum)
-{
-	const char *why;
-
-	if (xfs_set_shutdown(mp)) {	/* already shut down */
-		if (mp->m_log)
-			xlog_shutdown_wait(mp->m_log);
-		return;
-	}
-	if (mp->m_sb_bp)
-		xfs_buf_set_uptodate(mp->m_sb_bp);
-	if (xlog_force_shutdown(mp->m_log, flags))
-		why = "Log I/O Error";
-	else if (flags & SHUTDOWN_CORRUPT_INCORE)
-		why = "Corruption of in-memory data";
-	else if (flags & SHUTDOWN_CORRUPT_ONDISK)
-		why = "Corruption of on-disk metadata";
-	else if (flags & SHUTDOWN_DEVICE_REMOVED)
-		why = "Block device removal";
-	else
-		why = "Metadata I/O Error";
-	xfs_alert(mp, "%s (0x%x) detected (%s:%d). Shutting down filesystem.",
-		  why, (unsigned int)flags, fname, lnnum);
-	xfs_alert(mp, "Unmount and check the filesystem: no further changes are written.");
-}
 
 bool wfs_xfs_is_shutdown(struct xfs_mount *mp)
 {
@@ -88,35 +66,6 @@ void wfs_xfs_force_shutdown(struct xfs_mount *mp, uint32_t flags)
 }
 
 /* ---- mount state (kernel xfs_mount.c / xfs_super.c) --------------------- */
-
-bool xfs_fs_writable(struct xfs_mount *mp, int level)
-{
-	(void)level;	/* no freezing here */
-	return !xfs_is_shutdown(mp) && !xfs_is_readonly(mp);
-}
-
-int xfs_dev_is_read_only(struct xfs_mount *mp, char *message)
-{
-	if (xfs_readonly_buftarg(mp->m_ddev_targp) ||
-	    (mp->m_logdev_targp && xfs_readonly_buftarg(mp->m_logdev_targp)) ||
-	    (mp->m_rtdev_targp && xfs_readonly_buftarg(mp->m_rtdev_targp))) {
-		xfs_notice(mp, "%s required on read-only device.", message);
-		xfs_notice(mp, "write access unavailable, cannot proceed.");
-		return -EROFS;
-	}
-	return 0;
-}
-
-/*
- * Log incompat feature bits are only set by features this port never logs
- * (logged xattrs, exchange-range); leaving them set is what the kernel does
- * while they might still be in the log, and is always safe.
- */
-bool xfs_clear_incompat_log_features(struct xfs_mount *mp)
-{
-	(void)mp;
-	return false;
-}
 
 /* No page cache: file data is never dirty in memory (M3 design 2). */
 void xfs_flush_inodes(struct xfs_mount *mp)
@@ -136,6 +85,44 @@ void xfs_inode_clear_eofblocks_tag(struct xfs_inode *ip) { (void)ip; }
 void xfs_inode_set_cowblocks_tag(struct xfs_inode *ip) { (void)ip; }
 void xfs_inode_clear_cowblocks_tag(struct xfs_inode *ip) { (void)ip; }
 void xfs_filestream_deassociate(struct xfs_inode *ip) { (void)ip; }
+void xfs_blockgc_start(struct xfs_mount *mp) { (void)mp; }
+void xfs_blockgc_stop(struct xfs_mount *mp) { (void)mp; }
+void xfs_inodegc_start(struct xfs_mount *mp) { (void)mp; }
+void xfs_inodegc_stop(struct xfs_mount *mp) { (void)mp; }
+int xfs_inodegc_register_shrinker(struct xfs_mount *mp) { (void)mp; return 0; }
+/* The inode cache (icache.c) frees its entries itself when the mount goes. */
+void xfs_reclaim_inodes(struct xfs_mount *mp) { (void)mp; }
+void xfs_health_unmount(struct xfs_mount *mp) { (void)mp; }
+void xfs_healthmon_unmount(struct xfs_mount *mp) { (void)mp; }
+void xfs_healthmon_report_shutdown(struct xfs_mount *mp, uint32_t flags) { (void)mp; (void)flags; }
+
+/* ---- realtime, zoned, metadir (kernel xfs_rtalloc.c, xfs_zone_*.c) ------
+ * The RT device is read (M2) but never written (M3 design 1), zoned and
+ * metadir filesystems are refused by the mount policy: these follow the
+ * kernel's !CONFIG_XFS_RT inlines, except that RT data stays readable.
+ */
+int xfs_rtmount_init(struct xfs_mount *mp) { (void)mp; return 0; }
+int xfs_rtmount_inodes(struct xfs_mount *mp) { (void)mp; return 0; }
+void xfs_rtunmount_inodes(struct xfs_mount *mp) { (void)mp; }
+int xfs_rtalloc_reinit_frextents(struct xfs_mount *mp) { (void)mp; return 0; }
+int xfs_growfs_check_rtgeom(const struct xfs_mount *mp, xfs_rfsblock_t dblocks,
+			    xfs_rfsblock_t rblocks, xfs_extlen_t rextsize)
+{
+	(void)mp; (void)dblocks; (void)rblocks; (void)rextsize;
+	return 0;
+}
+void xfs_rtrmapbt_compute_maxlevels(struct xfs_mount *mp) { mp->m_rtrmap_maxlevels = 0; }
+void xfs_rtrefcountbt_compute_maxlevels(struct xfs_mount *mp) { mp->m_rtrefc_maxlevels = 0; }
+int xfs_mount_zones(struct xfs_mount *mp) { (void)mp; return -EOPNOTSUPP; }
+void xfs_unmount_zones(struct xfs_mount *mp) { (void)mp; }
+void xfs_zone_gc_start(struct xfs_mount *mp) { (void)mp; }
+void xfs_zone_gc_stop(struct xfs_mount *mp) { (void)mp; }
+int xfs_metafile_iget(struct xfs_mount *mp, xfs_ino_t ino, enum xfs_metafile_type metafile_type,
+		      struct xfs_inode **ipp)
+{
+	(void)mp; (void)ino; (void)metafile_type; (void)ipp;
+	return -EOPNOTSUPP;
+}
 
 /* ---- messages and health (kernel xfs_error.c, xfs_buf.c, xfs_health.c) -- */
 
@@ -274,6 +261,9 @@ int xfs_reflink_cancel_cow_range(struct xfs_inode *ip, xfs_off_t offset, xfs_off
 	(void)ip; (void)offset; (void)count; (void)cancel_real;
 	return 0;
 }
+
+/* no reflink writes (M3 design 1): no CoW-based atomic writes */
+xfs_extlen_t xfs_reflink_max_atomic_cow(struct xfs_mount *mp) { (void)mp; return 0; }
 
 int xfs_reflink_recover_cow(struct xfs_mount *mp)
 {

@@ -39,6 +39,21 @@ static int grow(struct xarray *xa, unsigned long need)
 	return 0;
 }
 
+int xa_alloc(struct xarray *xa, u32 *id, void *entry, struct xa_limit limit, gfp_t gfp)
+{
+	unsigned long i, max = min_t(unsigned long, limit.max, WFS_XA_MAX_INDEX - 1);
+
+	for (i = limit.min; i <= max; i++) {
+		if (i < xa->xa_n && xa->xa_slots[i])
+			continue;
+		if (xa_insert(xa, i, entry, gfp))
+			return -ENOMEM;
+		*id = (u32)i;
+		return 0;
+	}
+	return -EBUSY;
+}
+
 int xa_insert(struct xarray *xa, unsigned long i, void *entry, gfp_t gfp)
 {
 	(void)gfp;

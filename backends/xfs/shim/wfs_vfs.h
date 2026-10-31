@@ -25,6 +25,7 @@ struct super_block {
 	struct user_namespace	*s_user_ns;
 	struct sb_writers	s_writers;
 	void			*s_fs_info;	/* the xfs_mount */
+	struct block_device	*s_bdev;	/* NULL: the host owns the device */
 };
 #define SB_RDONLY		(1u << 0)
 #define SB_BORN			(1u << 29)
