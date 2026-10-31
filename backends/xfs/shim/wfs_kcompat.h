@@ -140,6 +140,10 @@ static inline s64 div_s64_rem(s64 dividend, s32 divisor, s32 *rem)
 	return dividend / divisor;
 }
 
+/* ---- radix tree: the per-AG incore inode tree is unused (icache.c) ---- */
+struct radix_tree_root { void *xa_head; };
+#define INIT_RADIX_TREE(root, gfp)	((root)->xa_head = NULL)
+
 /* ---- iovecs ----------------------------------------------------------- */
 struct kvec { void *iov_base; size_t iov_len; };
 
@@ -190,6 +194,11 @@ struct xfs_globals {
 extern struct xfs_globals xfs_globals;
 /* Kernel default: 30 s between periodic log syncs (xfssyncd). */
 extern int xfs_syncd_centisecs;
+/*
+ * Kernel xfs_super.c work queues used from libxfs: xfs_alloc_wq runs bmbt
+ * splits on a fresh stack (xfs_btree_split); the variable is defined in
+ * xfs_alloc.c. Created by the first write mount (M3a T4), NULL before.
+ */
 #define XFS_WQFLAGS(wqflags)	(WQ_FREEZABLE | (wqflags))
 
 #endif /* WFS_SHIM_KCOMPAT_H */

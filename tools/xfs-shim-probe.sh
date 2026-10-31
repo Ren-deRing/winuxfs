@@ -24,6 +24,9 @@ xfs_iunlink_item xfs_extfree_item xfs_extent_busy xfs_inode xfs_bmap_util
 xfs_bmap_item xfs_rmap_item xfs_refcount_item xfs_attr_item xfs_attr_inactive
 xfs_log_recover"
 rm -rf "$OUT"; mkdir -p "$OUT/logs" "$OUT/gen" "$OUT/pre/linux"
+# Kernel lib/ headers, patched like mk/linuxlib.mk does.
+cp -r third_party/linux-lib "$OUT/linux-lib" && chmod -R u+w "$OUT/linux-lib"
+for p in third_party/linux-lib-patches/*.patch; do patch -s -d "$OUT/linux-lib" -p1 < "$p"; done
 EXTRA=()
 if [ $pre = 1 ]; then
   printf '#define __releases(x)\n#define __acquires(x)\n#define __must_hold(x)\n#define ____cacheline_aligned_in_smp\n' > "$OUT/pre/pre.h"
@@ -33,7 +36,7 @@ fi
 FL=(-std=gnu11 -fsyntax-only -fmax-errors=0 -Wno-sign-compare -Wno-unused-parameter
     -Wno-missing-field-initializers -Wno-type-limits -Wno-implicit-fallthrough
     -Wno-empty-body -Wno-override-init -Wno-parentheses -Wno-address-of-packed-member
-    -Ibackends/xfs/shim "${EXTRA[@]}" -Iinclude -I$K/libxfs -I$K)
+    -Ibackends/xfs/shim "${EXTRA[@]}" -Iinclude -I$K/libxfs -I$K -I"$OUT/linux-lib/include")
 for f in $LIBXFS; do gcc "${FL[@]}" "$K/libxfs/$f.c" > "$OUT/logs/$f.log" 2>&1 & done
 for f in $TOP; do cp "$K/$f.c" "$OUT/gen/"; gcc "${FL[@]}" "$OUT/gen/$f.c" > "$OUT/logs/$f.log" 2>&1 & done
 wait

@@ -250,6 +250,8 @@ struct delayed_work {
 	do { INIT_LIST_HEAD(&(w)->entry); (w)->func = (f); (w)->pending = 0; (w)->wq = NULL; } while (0)
 #define INIT_DELAYED_WORK(dw, f) \
 	do { INIT_WORK(&(dw)->work, f); (dw)->due_ns = 0; (dw)->timer = 0; } while (0)
+#define INIT_WORK_ONSTACK(w, f)	INIT_WORK(w, f)
+#define destroy_work_on_stack(w)	((void)(w))
 #define to_delayed_work(w)	container_of(w, struct delayed_work, work)
 #define work_pending(w)		(__atomic_load_n(&(w)->pending, __ATOMIC_ACQUIRE) & 1)
 #define delayed_work_pending(dw) work_pending(&(dw)->work)
