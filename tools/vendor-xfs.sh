@@ -29,6 +29,16 @@ xfs_attr_leaf xfs_rtgroup xfs_metafile xfs_rmap_btree xfs_refcount_btree"
 # M2 design 5.3: top-level files that are ported with edits (E).
 TOP_FILES="xfs_dir2_readdir.c xfs_mount.c xfs_icache.c xfs_symlink.c
 xfs_log_recover.c xfs_log_priv.h"
+# M3 design 3: write, transaction and log path (compiled from M3a T3 on; the
+# libxfs ones byte for byte, the top-level ones like 5.3 through patches/shim).
+M3_LIBXFS_C="xfs_defer xfs_trans_resv xfs_trans_space xfs_log_rlimit
+xfs_trans_inode xfs_ag_resv xfs_btree_staging xfs_rmap xfs_refcount xfs_attr
+xfs_attr_remote"
+M3_TOP_C="xfs_log.c xfs_log_cil.c xfs_trans.c xfs_trans_buf.c xfs_trans_ail.c
+xfs_buf_item.c xfs_buf_item_recover.c xfs_inode_item.c xfs_inode_item_recover.c
+xfs_icreate_item.c xfs_iunlink_item.c xfs_extfree_item.c xfs_extent_busy.c
+xfs_inode.c xfs_bmap_util.c xfs_bmap_item.c xfs_rmap_item.c xfs_refcount_item.c
+xfs_attr_item.c xfs_attr_inactive.c xfs_drain.c"
 # Headers #included by the files above that live in fs/xfs (not libxfs/). They
 # are kept as reference; backends/xfs/shim/ provides the headers actually used.
 EXTRA_HDRS="xfs_bmap_util.h xfs_buf_mem.h xfs_dquot.h xfs_error.h
@@ -70,8 +80,16 @@ vendor() {
   local list core extra f
   core=$( { for b in $LIBXFS_C; do echo "libxfs/$b.c"; done
             (cd "$src" && ls libxfs/*.h)
-            for t in $TOP_FILES; do echo "$t"; done; } | LC_ALL=C sort)
-  extra=$(for h in $EXTRA_HDRS; do echo "$h"; done | LC_ALL=C sort)
+            for t in $TOP_FILES; do echo "$t"; done
+            for b in $M3_LIBXFS_C; do echo "libxfs/$b.c"; done
+            for t in $M3_TOP_C; do echo "$t"; done; } | LC_ALL=C sort -u)
+  # Top-level headers: the fixed list plus every fs/xfs/*.h that a vendored
+  # top-level .c includes (the include closure, one level).
+  extra=$( { for h in $EXTRA_HDRS; do echo "$h"; done
+             for t in $TOP_FILES $M3_TOP_C; do
+               case "$t" in *.c) sed -n 's/^#include "\(xfs_[a-z0-9_]*\.h\)"/\1/p' "$src/$t" ;; esac
+             done | while IFS= read -r h; do [ -f "$src/$h" ] && echo "$h"; done; } \
+           | LC_ALL=C sort -u | grep -vxF -f <(echo "$core"))
   for f in $core $extra; do [ -f "$src/$f" ] || die "not found in source: $f"; done
   # Rebuild from scratch so removed entries cannot linger.
   rm -rf "$DEST"
@@ -84,7 +102,7 @@ vendor() {
     echo "# Files are byte-for-byte copies. Modify only through third_party/linux-xfs-patches/."
     echo "# Written by tools/vendor-xfs.sh; check with tools/vendor-xfs.sh --verify."
     echo "commit: $COMMIT"
-    echo "# --- core: M2 design 5.1 libxfs .c files, all libxfs/*.h, 5.3 top-level files"
+    echo "# --- core: M2 design 5.1 libxfs .c files, all libxfs/*.h, 5.3 top-level files, M3 design 3 files"
     for f in $core; do (cd "$DEST" && sha256sum -- "$f"); done
     echo "# --- extra: fs/xfs headers #included by the files above (include closure, reference only;"
     echo "# --- the shim in backends/xfs/shim/ supplies the headers actually compiled against)"
