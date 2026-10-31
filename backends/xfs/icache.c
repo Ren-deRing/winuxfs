@@ -171,7 +171,8 @@ static struct ic_ent *ent_alloc(struct xfs_mount *mp, xfs_ino_t ino)
 	ip->i_next_unlinked = NULLAGINO;
 	init_rwsem(&ip->i_lock);
 	spin_lock_init(&ip->i_flags_lock);
-	ip->i_priv = e;
+	VFS_I(ip)->i_sb = mp->m_super;
+	init_rwsem(&VFS_I(ip)->i_rwsem);
 	return e;
 }
 
@@ -192,6 +193,7 @@ static void ent_free(struct ic_ent *e)
 		kmem_cache_free(xfs_ifork_cache, ip->i_cowfp);
 	}
 	destroy_rwsem(&ip->i_lock);
+	destroy_rwsem(&VFS_I(ip)->i_rwsem);
 	kfree(e);
 }
 

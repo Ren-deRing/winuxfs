@@ -698,7 +698,9 @@ wfs_err_t wfs_xfs_mount(const wfs_host_api *api, wfs_blkdev *const devs[WFS_DEV_
 	mp = &x->mp;
 	x->api = api;
 	x->log_role = -1;
-	mp->m_wfs = x;
+	mp->m_super = &x->sb;
+	x->sb.s_fs_info = mp;
+	x->sb.s_maxbytes = LLONG_MAX;	/* kernel: MAX_LFS_FILESIZE on 64-bit */
 	log_attach(api);
 
 	{

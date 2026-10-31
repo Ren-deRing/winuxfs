@@ -46,6 +46,7 @@ struct xfs_buftarg {
 	xfs_daddr_t		bt_nr_sectors;
 	void			*bt_priv;	/* backend: host device handle */
 	struct block_device	*bt_bdev;	/* bio I/O (log): same device */
+	unsigned int		bt_awu_min, bt_awu_max;	/* atomic writes: none (0) */
 };
 
 struct xfs_buf_map {

@@ -7,7 +7,7 @@
  * one process stay independent.
  *
  * Ownership and lifetime
- *   x->mp          the libxfs xfs_mount (embedded; mp.m_wfs points back to x)
+ *   x->mp          the libxfs xfs_mount (embedded: wfs_xfs_of() is container_of)
  *   x->blk         host devices + sector/size info; the buffer cache reads
  *                  through it and everything must outlive the cache
  *   x->bcache      metadata buffer cache (buf.c), one per mount
@@ -49,6 +49,7 @@
 
 struct wfs_xfs {
 	struct xfs_mount	mp;
+	struct super_block	sb;		/* mp.m_super */
 	const wfs_host_api	*api;
 	struct wfs_xfs_blk	blk;
 	struct wfs_xfs_bcache	*bcache;
@@ -73,7 +74,7 @@ void wfs_xfs_force_shutdown(struct xfs_mount *mp, uint32_t flags);
 
 static inline struct wfs_xfs *wfs_xfs_of(struct xfs_mount *mp)
 {
-	return (struct wfs_xfs *)mp->m_wfs;
+	return container_of(mp, struct wfs_xfs, mp);
 }
 
 /* Kernel errno (negative or positive; libxfs/buf cache) -> -WFS_E*. */

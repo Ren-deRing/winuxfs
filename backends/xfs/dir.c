@@ -16,6 +16,7 @@
 #include "xfs_da_format.h"
 #include "xfs_da_btree.h"
 #include "xfs_dir2.h"
+#include "xfs_dir2_priv.h"	/* xfs_readdir */
 #include "xfs_types.h"
 
 #define WFS_NAME_MAX	255	/* MAXNAMELEN - 1 */
