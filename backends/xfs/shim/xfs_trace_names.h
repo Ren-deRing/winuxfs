@@ -443,4 +443,5 @@
 #define trace_xlog_iclog_wait_on(...) WFS_TRACE(__VA_ARGS__)
 #define trace_xlog_iclog_write(...) WFS_TRACE(__VA_ARGS__)
 #define trace_xlog_intent_recovery_failed(...) WFS_TRACE(__VA_ARGS__)
+#define trace_xfs_force_shutdown(...) WFS_TRACE(__VA_ARGS__)
 #endif

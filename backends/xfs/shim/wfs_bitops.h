@@ -32,6 +32,9 @@ static inline bool is_power_of_2(u64 n) { return n != 0 && (n & (n - 1)) == 0; }
 #define ilog2(n) ((int)(fls64((u64)(n)) - 1))
 static inline u64 roundup_pow_of_two_(u64 n) { return n <= 1 ? 1 : 1ULL << fls64(n - 1); }
 #define roundup_pow_of_two(n)	roundup_pow_of_two_(n)
+static inline u64 rounddown_pow_of_two_(u64 n) { return n ? 1ULL << (fls64(n) - 1) : 0; }
+#define rounddown_pow_of_two(n)	rounddown_pow_of_two_(n)
+static inline u64 max_pow_of_two_factor(u64 n) { return n & (~n + 1); }
 
 #define __WFS_BIT_WORD(nr)	((nr) / BITS_PER_LONG)
 #define __WFS_BIT_MASK(nr)	(1UL << ((nr) % BITS_PER_LONG))

@@ -19,10 +19,9 @@ struct xfs_buf_map;
 struct xfs_buf_ops;
 struct xfs_inode;
 
-int xfs_dec_freecounter(struct xfs_mount *, int, uint64_t, bool);
-void xfs_add_freecounter(struct xfs_mount *, int, uint64_t);
+struct xfs_bmalloca;
 void xfs_fs_mark_sick(struct xfs_mount *, unsigned);
-void xfs_mod_delalloc(struct xfs_inode *, int64_t, int64_t);
+int xfs_bmap_rtalloc(struct xfs_bmalloca *);
 
 static int nlogs, failures;
 static char last[512];
@@ -42,17 +41,15 @@ int main(void)
 
 	/* M3: the transaction/log symbols are the kernel's own now (xfs_trans.c
 	 * and friends); what stays stubbed is outside the M3a write path. */
-	CHECK(xfs_dec_freecounter(NULL, 0, 1, false) == -EROFS);
-	CHECK(strstr(last, "xfs_dec_freecounter") != NULL);
-	xfs_add_freecounter(NULL, 0, 1);
-	xfs_mod_delalloc(NULL, 0, 0);
+	CHECK(xfs_bmap_rtalloc(NULL) < 0);
+	CHECK(strstr(last, "xfs_bmap_rtalloc") != NULL);
 	xfs_fs_mark_sick(NULL, 0);
 	CHECK(strstr(last, "xfs_fs_mark_sick") != NULL);
 
 	/* repeated ro calls are bounded (10 log lines per function) */
 	nlogs = 0;
 	for (int i = 0; i < 100; i++)
-		(void)xfs_dec_freecounter(NULL, 0, 1, false);
+		(void)xfs_bmap_rtalloc(NULL);
 	CHECK(nlogs == 9);	/* 1 of the 10 logged calls was used above */
 
 	if (failures) {

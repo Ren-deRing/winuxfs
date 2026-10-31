@@ -82,6 +82,11 @@ static inline void destroy_rwsem(struct rw_semaphore *r) { pthread_rwlock_destro
 #define lockdep_is_held(l)		1
 #define assert_spin_locked(l)		((void)0)
 #define mutex_lock_nested(m, s)		mutex_lock(m)
+#ifdef _WIN32
+#define DEFINE_MUTEX(name)	struct mutex name = { { 0 } }	/* SRWLOCK_INIT */
+#else
+#define DEFINE_MUTEX(name)	struct mutex name = { PTHREAD_MUTEX_INITIALIZER }
+#endif
 #define down_read_nested(r, s)		down_read(r)
 #define down_write_nested(r, s)		down_write(r)
 

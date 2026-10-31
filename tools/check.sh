@@ -53,6 +53,9 @@ if command -v gcc >/dev/null && command -v mkfs.xfs >/dev/null && command -v xfs
   make -s -C backends/xfs test-concurrent-san
   make -s -C backends/xfs test-concurrent-tsan
   make -s -C backends/xfs test-fuzz
+  make -s -C backends/xfs test-rw
+  make -s -C backends/xfs test-rw-san
+  make -s -C backends/xfs test-rw-tsan
   if [ "$fuzz" = 1 ]; then make -s -C backends/xfs fuzz-sample; fi
 else
   echo "SKIPPED: backends/xfs mount tests (gcc, mkfs.xfs and xfs_db needed; install xfsprogs)"

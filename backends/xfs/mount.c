@@ -45,6 +45,10 @@
 #include "kinit.h"
 #include "xfs_trans.h"
 #include "xfs_trans_priv.h"	/* xfs_trans_init */
+#include "xfs_fsops.h"
+#include "xfs_extent_busy.h"
+#include "xfs_super.h"
+#include "xfs_quota_defs.h"
 #include <stdarg.h>
 #include <stdio.h>
 
@@ -153,13 +157,66 @@ void wfs_xfs_unload_root(struct wfs_xfs *x)
 /* ------------------------------------------------- libxfs-called helpers -- */
 
 /*
- * Inode allocation policy only matters for writes: every AG is usable for
- * reads, inode32 is not in effect (kernel returns the usable AG count).
+ * Kernel xfs_super.c: per-AG inode allocation policy (inode32 only with
+ * XFS_FEAT_SMALL_INUMS, which no option sets here). Called by
+ * xfs_initialize_perag once the perags exist.
  */
+static bool xfs_set_inode_alloc_perag(struct xfs_perag *pag, xfs_ino_t ino,
+				      xfs_agnumber_t max_metadata)
+{
+	if (!xfs_is_inode32(pag_mount(pag))) {
+		set_bit(XFS_AGSTATE_ALLOWS_INODES, &pag->pag_opstate);
+		clear_bit(XFS_AGSTATE_PREFERS_METADATA, &pag->pag_opstate);
+		return false;
+	}
+	if (ino > XFS_MAXINUMBER_32) {
+		clear_bit(XFS_AGSTATE_ALLOWS_INODES, &pag->pag_opstate);
+		clear_bit(XFS_AGSTATE_PREFERS_METADATA, &pag->pag_opstate);
+		return false;
+	}
+	set_bit(XFS_AGSTATE_ALLOWS_INODES, &pag->pag_opstate);
+	if (pag_agno(pag) < max_metadata)
+		set_bit(XFS_AGSTATE_PREFERS_METADATA, &pag->pag_opstate);
+	else
+		clear_bit(XFS_AGSTATE_PREFERS_METADATA, &pag->pag_opstate);
+	return true;
+}
+
 xfs_agnumber_t xfs_set_inode_alloc(struct xfs_mount *mp, xfs_agnumber_t agcount)
 {
-	xfs_clear_inode32(mp);
-	return agcount;
+	xfs_agnumber_t index, maxagi = 0, max_metadata;
+	struct xfs_sb *sbp = &mp->m_sb;
+	xfs_agino_t agino;
+	xfs_ino_t ino;
+
+	if (M_IGEO(mp)->maxicount) {
+		uint64_t icount = sbp->sb_dblocks * sbp->sb_imax_pct;
+
+		do_div(icount, 100);
+		icount += sbp->sb_agblocks - 1;
+		do_div(icount, sbp->sb_agblocks);
+		max_metadata = icount;
+	} else {
+		max_metadata = agcount;
+	}
+	agino = XFS_AGB_TO_AGINO(mp, sbp->sb_agblocks - 1);
+	ino = XFS_AGINO_TO_INO(mp, agcount - 1, agino);
+	if (xfs_has_small_inums(mp) && ino > XFS_MAXINUMBER_32)
+		xfs_set_inode32(mp);
+	else
+		xfs_clear_inode32(mp);
+	for (index = 0; index < agcount; index++) {
+		struct xfs_perag *pag;
+
+		ino = XFS_AGINO_TO_INO(mp, index, agino);
+		pag = xfs_perag_get(mp, index);
+		if (!pag)
+			continue;
+		if (xfs_set_inode_alloc_perag(pag, ino, max_metadata))
+			maxagi++;
+		xfs_perag_put(pag);
+	}
+	return xfs_is_inode32(mp) ? maxagi : agcount;
 }
 
 /*
@@ -594,6 +651,49 @@ static int read_agfs(struct wfs_xfs *x)
 	return 0;
 }
 
+/* ------------------------------------------------- step 5b: rw or ro -- */
+
+/*
+ * Read-write unless something rules it out (M3 design 4): the ro option,
+ * norecovery (the kernel requires ro with it), a device the host opened
+ * read-only, or a feature whose writes are not ported yet. A demotion is
+ * logged once with its reason; the mount itself still succeeds.
+ */
+static bool want_rw(struct wfs_xfs *x)
+{
+	struct xfs_mount *mp = &x->mp;
+	struct xfs_sb *sbp = &mp->m_sb;
+	const char *why = NULL;
+	int r;
+
+	if (x->opts.ro)
+		return false;
+	if (x->opts.norecovery)
+		why = "norecovery";
+	for (r = 0; !why && r < WFS_DEV_COUNT; r++)
+		if (x->bt_bound[r] && wfs_xfs_blk_read_only(&x->blk, r))
+			why = "the host opened a device read-only";
+	if (why)
+		;
+	else if (x->log_role < 0)
+		why = "no log device";
+	else if (sbp->sb_features_ro_compat & (uint32_t)XFS_SB_FEAT_RO_COMPAT_UNKNOWN)
+		why = "unknown read-only compatible features";
+	else if (xfs_has_rmapbt(mp) || xfs_has_reflink(mp))
+		why = "rmapbt/reflink updates are not supported yet";
+	else if (sbp->sb_rblocks || x->bt_bound[WFS_DEV_RT])
+		why = "realtime device writes are not supported";
+	else if (sbp->sb_qflags & XFS_ALL_QUOTA_ACCT)
+		why = "quota accounting is not supported";
+	else if (xfs_has_parent(mp) || xfs_has_metadir(mp))
+		why = "parent pointer/metadir updates are not supported";
+	if (why) {
+		LOGMSG(x, 1, "xfs: mounting read-only: %s", why);
+		return false;
+	}
+	return true;
+}
+
 /* ----------------------------------------------- step 6: log, 8: counters -- */
 
 static int log_read(void *ctx, uint64_t off, void *buf, size_t len)
@@ -660,14 +760,81 @@ static int check_summary_counts(struct wfs_xfs *x, bool log_dirty)
 
 /* ------------------------------------------------------------ mount API -- */
 
+/*
+ * Kernel xfs_mountfs, read-write tail: per-AG metadata reservations around
+ * log recovery, pending superblock updates, the reserve pool and the
+ * permanent per-AG reservations.
+ */
+static const char *const xfs_free_pool_name[] = {	/* kernel xfs_mount.c */
+	[XC_FREE_BLOCKS]	= "free blocks",
+	[XC_FREE_RTEXTENTS]	= "free rt extents",
+	[XC_FREE_RTAVAILABLE]	= "available rt extents",
+};
+
+static int mount_rw(struct wfs_xfs *x)
+{
+	struct xfs_mount *mp = &x->mp;
+	int error, i;
+
+	if (mp->m_update_sb) {
+		error = xfs_sync_sb(mp, false);
+		if (error) {
+			LOGMSG(x, 0, "xfs: failed to write superblock changes (%d)", error);
+			return error;
+		}
+	}
+	for (i = 0; i < XC_FREE_NR; i++) {
+		error = xfs_reserve_blocks(mp, i, xfs_default_resblks(mp, i));
+		if (error)
+			LOGMSG(x, 1, "xfs: unable to allocate reserve blocks (%d): continuing "
+			       "without a reserve pool for %s", error, xfs_free_pool_name[i]);
+	}
+	x->rw_up = true;
+	error = xfs_fs_reserve_ag_blocks(mp);
+	if (error && error != -ENOSPC) {
+		LOGMSG(x, 0, "xfs: per-AG metadata reservation failed (%d)", error);
+		return error;
+	}
+	return 0;
+}
+
+/*
+ * Kernel xfs_unmountfs up to xfs_log_unmount: drop the reservations, force
+ * the log, write back everything the AIL holds while the inodes are still
+ * cached, and give the reserve pool back so the on-disk free count is exact
+ * (lazy counters are trusted after a clean unmount).
+ */
+static void unmount_rw(struct wfs_xfs *x)
+{
+	struct xfs_mount *mp = &x->mp;
+
+	x->rw_up = false;
+	xfs_fs_unreserve_ag_blocks(mp);
+	xfs_log_force(mp, XFS_LOG_SYNC);
+	xfs_extent_busy_wait_all(mp);
+	flush_workqueue(xfs_discard_wq);
+	xfs_set_unmounting(mp);
+	xfs_ail_push_all_sync(mp->m_ail);
+	if (xfs_reserve_blocks(mp, XC_FREE_BLOCKS, 0))
+		LOGMSG(x, 1, "xfs: unable to free the reserved block pool: free space "
+		       "may be off on the next mount");
+	if (!xfs_is_shutdown(mp) &&
+	    percpu_counter_sum(&mp->m_ifree) > percpu_counter_sum(&mp->m_icount))
+		LOGMSG(x, 0, "xfs: ifree/icount mismatch at unmount");
+	xfs_set_done_with_log_incompat(mp);
+}
+
 static void free_mount(struct wfs_xfs *x)
 {
 	struct xfs_mount *mp = &x->mp;
 	int r;
 
+	if (x->rw_up)
+		unmount_rw(x);
 	wfs_xfs_unload_root(x);
 	if (mp->m_log) {
-		xfs_log_unmount(mp);	/* read-only: quiesces, writes nothing */
+		/* read-only: quiesces, writes nothing; rw: the unmount record */
+		xfs_log_unmount(mp);
 		mp->m_log = NULL;
 	}
 	if (mp->m_sync_workqueue)
@@ -804,10 +971,17 @@ wfs_err_t wfs_xfs_mount(const wfs_host_api *api, wfs_blkdev *const devs[WFS_DEV_
 		error = -ENOMEM;
 		goto fail;
 	}
-	/* read-only: the log must not write (stale block clearing, covering) */
-	for (r = 0; r < WFS_DEV_COUNT; r++)
-		if (x->bt_bound[r])
-			wfs_xfs_buftarg_set_read_only(&x->bt[r]);
+	/* 5b. read-only: the log must not write (stale block clearing, covering) */
+	x->rw = want_rw(x);
+	if (x->rw) {
+		clear_bit(XFS_OPSTATE_READONLY, &mp->m_opstate);
+		x->sb.s_flags &= ~SB_RDONLY;
+	} else {
+		x->sb.s_flags |= SB_RDONLY;
+		for (r = 0; r < WFS_DEV_COUNT; r++)
+			if (x->bt_bound[r])
+				wfs_xfs_buftarg_set_read_only(&x->bt[r]);
+	}
 	if (mp->m_logdev_targp) {
 		error = xfs_log_mount_ro_check(mp, x->opts.norecovery, &log_dirty);
 		if (error) {
@@ -831,17 +1005,29 @@ wfs_err_t wfs_xfs_mount(const wfs_host_api *api, wfs_blkdev *const devs[WFS_DEV_
 	error = wfs_xfs_load_root(x);
 	if (error)
 		goto fail;
+	/* 8 (kernel order: the counters are checked before the log is finished) */
+	error = check_summary_counts(x, log_dirty);
+	if (error)
+		goto fail;
 	if (mp->m_log) {
+		/* inactivation during recovery may need the per-AG reservations */
+		if (x->rw && xfs_fs_reserve_ag_blocks(mp) == -ENOSPC)
+			LOGMSG(x, 1, "xfs: ENOSPC reserving the per-AG metadata pool, "
+			       "log recovery may fail");
 		error = xfs_log_mount_finish(mp);
+		if (x->rw)
+			xfs_fs_unreserve_ag_blocks(mp);
 		if (error) {
 			LOGMSG(x, 0, "xfs: log mount finish failed (%d)", error);
 			goto fail;
 		}
 	}
-	/* 8 */
-	error = check_summary_counts(x, log_dirty);
-	if (error)
-		goto fail;
+	/* 9 */
+	if (x->rw) {
+		error = mount_rw(x);
+		if (error)
+			goto fail;
+	}
 
 	*out = x;
 	return 0;

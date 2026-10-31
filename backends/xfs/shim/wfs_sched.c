@@ -389,11 +389,12 @@ void finish_wait(struct wait_queue_head *wq, struct wait_queue_entry *e)
 	spin_unlock(&wq->lock);
 }
 
-void __wake_up(struct wait_queue_head *wq, unsigned int mode, int nr_exclusive, void *key)
+/* wq->lock held */
+static void wake_up_locked_nr(struct wait_queue_head *wq, unsigned int mode, int nr_exclusive,
+			      void *key)
 {
 	struct wait_queue_entry *e, *n;
 
-	spin_lock(&wq->lock);
 	wq_fix(wq);
 	list_for_each_entry_safe(e, n, &wq->head, entry) {
 		unsigned int flags = e->flags;
@@ -402,6 +403,12 @@ void __wake_up(struct wait_queue_head *wq, unsigned int mode, int nr_exclusive, 
 		    nr_exclusive > 0 && !--nr_exclusive)
 			break;
 	}
+}
+
+void __wake_up(struct wait_queue_head *wq, unsigned int mode, int nr_exclusive, void *key)
+{
+	spin_lock(&wq->lock);
+	wake_up_locked_nr(wq, mode, nr_exclusive, key);
 	spin_unlock(&wq->lock);
 }
 
@@ -419,21 +426,26 @@ struct wait_queue_head *wfs_hashed_waitqueue(const void *addr)
 
 /* ---- completions ---------------------------------------------------- */
 
+/*
+ * Wake under the lock, as the kernel does: a waiter can only take the
+ * completion (and then free it) after the lock is dropped, which is the last
+ * touch of *x here.
+ */
 void complete(struct completion *x)
 {
 	spin_lock(&x->wait.lock);
 	if (x->done != COMPLETION_DONE_ALL)
 		x->done++;
+	wake_up_locked_nr(&x->wait, TASK_NORMAL, 1, NULL);
 	spin_unlock(&x->wait.lock);
-	__wake_up(&x->wait, TASK_NORMAL, 1, NULL);
 }
 
 void complete_all(struct completion *x)
 {
 	spin_lock(&x->wait.lock);
 	x->done = COMPLETION_DONE_ALL;
+	wake_up_locked_nr(&x->wait, TASK_NORMAL, 0, NULL);
 	spin_unlock(&x->wait.lock);
-	wake_up_all(&x->wait);
 }
 
 static bool completion_take(struct completion *x)
@@ -510,15 +522,29 @@ static inline void wfs_pause(void)
  * its final sem_take(); up() increments `count` before reading `waiters`.
  * Both are seq_cst, so either the sleeper sees the count or up() sees the
  * sleeper (which is already on the queue) and wakes it.
+ *
+ * No use after free: the kernel's up() and down() both run under the
+ * semaphore's spinlock, so a down() that is about to free the semaphore (an
+ * iclog, a buffer) cannot return while up() still touches it. Here up() holds
+ * `busy` from before it publishes the count until its last access, and every
+ * successful down() waits for `busy` to drain before returning.
  */
+static void sem_quiesce(struct semaphore *s)
+{
+	while (__atomic_load_n(&s->busy, __ATOMIC_ACQUIRE))
+		wfs_pause();
+}
+
 void down(struct semaphore *s)
 {
 	DEFINE_WAIT(w);
 	int i;
 
 	for (i = 0; i < SEM_SPINS; i++) {
-		if (sem_take(s))
+		if (sem_take(s)) {
+			sem_quiesce(s);
 			return;
+		}
 		wfs_pause();
 	}
 	__atomic_add_fetch(&s->waiters, 1, __ATOMIC_SEQ_CST);
@@ -530,18 +556,24 @@ void down(struct semaphore *s)
 	}
 	finish_wait(&s->wait, &w);
 	__atomic_sub_fetch(&s->waiters, 1, __ATOMIC_SEQ_CST);
+	sem_quiesce(s);
 }
 
 int down_trylock(struct semaphore *s)
 {
-	return sem_take(s) ? 0 : 1;
+	if (!sem_take(s))
+		return 1;
+	sem_quiesce(s);
+	return 0;
 }
 
 void up(struct semaphore *s)
 {
+	__atomic_add_fetch(&s->busy, 1, __ATOMIC_SEQ_CST);
 	__atomic_add_fetch(&s->count, 1, __ATOMIC_SEQ_CST);
 	if (__atomic_load_n(&s->waiters, __ATOMIC_SEQ_CST))
 		__wake_up(&s->wait, TASK_NORMAL, 1, NULL);
+	__atomic_sub_fetch(&s->busy, 1, __ATOMIC_RELEASE);	/* last access */
 }
 
 /* ---- work queues ---------------------------------------------------- */

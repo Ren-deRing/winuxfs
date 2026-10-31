@@ -38,7 +38,7 @@ M3_TOP_C="xfs_log.c xfs_log_cil.c xfs_trans.c xfs_trans_buf.c xfs_trans_ail.c
 xfs_buf_item.c xfs_buf_item_recover.c xfs_inode_item.c xfs_inode_item_recover.c
 xfs_icreate_item.c xfs_iunlink_item.c xfs_extfree_item.c xfs_extent_busy.c
 xfs_inode.c xfs_bmap_util.c xfs_bmap_item.c xfs_rmap_item.c xfs_refcount_item.c
-xfs_attr_item.c xfs_attr_inactive.c xfs_drain.c"
+xfs_attr_item.c xfs_attr_inactive.c xfs_drain.c xfs_fsops.c"
 # Headers #included by the files above that live in fs/xfs (not libxfs/). They
 # are kept as reference; backends/xfs/shim/ provides the headers actually used.
 EXTRA_HDRS="xfs_bmap_util.h xfs_buf_mem.h xfs_dquot.h xfs_error.h

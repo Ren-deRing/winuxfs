@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Mount option parser (Task 6). Grammar: item { "," item }, item =
- *   norecovery | bufcache_bytes=N | inodecache_entries=N
+ *   norecovery | ro | rw | bufcache_bytes=N | inodecache_entries=N
  * N is a plain decimal number (digits only, no sign/space/suffix).
  * Ranges: bufcache_bytes 1 MiB..64 GiB, inodecache_entries 64..2^24.
  */
@@ -47,6 +47,7 @@ int wfs_xfs_parse_options(const wfs_host_api *api, const char *str,
 	const char *p = str;
 
 	o->norecovery = false;
+	o->ro = false;
 	o->bufcache_bytes = WFS_XFS_BUFCACHE_DEF;
 	o->inodecache_entries = WFS_XFS_INODECACHE_DEF;
 	if (!p)
@@ -60,7 +61,13 @@ int wfs_xfs_parse_options(const wfs_host_api *api, const char *str,
 
 		if (len == 0)
 			goto next;
-		if (klen == 10 && !memcmp(p, "norecovery", 10)) {
+		if ((klen == 2 && (!memcmp(p, "ro", 2) || !memcmp(p, "rw", 2)))) {
+			if (eq) {
+				opt_err(api, "takes no value", p, len);
+				return -WFS_EINVAL;
+			}
+			o->ro = p[1] == 'o';	/* rw is the default (a writable device) */
+		} else if (klen == 10 && !memcmp(p, "norecovery", 10)) {
 			if (eq) {
 				opt_err(api, "norecovery takes no value", p, len);
 				return -WFS_EINVAL;

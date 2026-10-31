@@ -63,11 +63,6 @@
  * them, so a mismatch is a compile error). Stubs never ASSERT or abort. */
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
-void xfs_add_freecounter(struct xfs_mount *mp, enum xfs_free_counter ctr, uint64_t delta)
-{
-	WFS_STUB_RO();
-}
-
 void xfs_ag_geom_health(struct xfs_perag *pag, struct xfs_ag_geometry *ageo)
 {
 	WFS_STUB_RO();
@@ -103,12 +98,6 @@ void xfs_btree_mark_sick(struct xfs_btree_cur *cur)
 void xfs_da_mark_sick(struct xfs_da_args *args)
 {
 	WFS_STUB_RO();
-}
-
-int xfs_dec_freecounter(struct xfs_mount *mp, enum xfs_free_counter ctr, uint64_t delta, bool rsvd)
-{
-	WFS_STUB_RO();
-	return -EROFS;
 }
 
 void xfs_dirattr_mark_sick(struct xfs_inode *ip, int whichfork)
@@ -180,11 +169,6 @@ int xfs_metadir_mkdir(struct xfs_inode *dp, const char *path, struct xfs_inode *
 {
 	WFS_STUB_RO();
 	return -EROFS;
-}
-
-void xfs_mod_delalloc(struct xfs_inode *ip, int64_t data_delta, int64_t ind_delta)
-{
-	WFS_STUB_RO();
 }
 
 int xfs_parent_addname(struct xfs_trans *tp, struct xfs_parent_args *ppargs, struct xfs_inode *dp, const struct xfs_name *parent_name, struct xfs_inode *child)
