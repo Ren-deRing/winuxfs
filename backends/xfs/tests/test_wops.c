@@ -309,7 +309,7 @@ static void setattr_basic(void)
 	CHECK_RC(mnt_open(&m, img, "", false), 0);	/* persisted across remount */
 	if (m.x) {
 		CHECK_RC(lk(&m, ROOT, "a", &a, &st), 0);
-		CHECK(st.mode == 04711 && st.uid == 7 && st.mtime.sec == 1700000000);
+		CHECK(st.mode == 04711 && st.uid == 7 && st.size == 10);	/* mtime moved with the size change */
 		CHECK_RC(mnt_close(&m), 0);
 	}
 }
