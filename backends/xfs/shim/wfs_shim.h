@@ -13,6 +13,7 @@
 #include "wfs_sync.h"
 #include "wfs_sched.h"
 #include "wfs_mem.h"
+#include "wfs_kcompat.h"
 #include "wfs_xarray.h"
 #include "wfs_crc32c.h"
 #include "wfs_log.h"

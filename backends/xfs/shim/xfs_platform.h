@@ -11,6 +11,7 @@
 #define _XFS_PLATFORM_H
 
 #include "wfs_shim.h"
+#include <linux/rbtree.h>	/* third_party/linux-lib, patched for LLP64 */
 
 /* Config: read-only port, RT devices readable, no quota/scrub/debug. */
 #define CONFIG_XFS_RT 1

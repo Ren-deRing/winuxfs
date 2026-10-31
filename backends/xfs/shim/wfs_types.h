@@ -408,12 +408,9 @@ struct kobject { int unused; };
 struct shrinker;
 struct file;
 struct dax_device;
-struct cpumask { int unused; };
 struct llist_head { void *first; };
 struct xarray { void **xa_slots; unsigned char *xa_marks; unsigned long xa_n; };
 struct ratelimit_state { int unused; };
-struct rb_node { unsigned long __rb_parent_color; struct rb_node *rb_right, *rb_left; };
-struct rb_root { struct rb_node *rb_node; };
 struct iomap;
 struct kvec;
 struct seq_file;
@@ -425,6 +422,7 @@ struct iov_iter;
 #define rcu_read_lock()		((void)0)
 #define rcu_read_unlock()	((void)0)
 #define rcu_dereference(p)	READ_ONCE(p)
+#define rcu_dereference_raw(p)	READ_ONCE(p)
 #define rcu_dereference_protected(p, c) (p)
 #define rcu_assign_pointer(p, v) WRITE_ONCE(p, v)
 #define RCU_INIT_POINTER(p, v)	((p) = (v))

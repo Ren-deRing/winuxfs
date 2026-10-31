@@ -36,3 +36,22 @@ On Windows x64 (mingw) `long` and `unsigned long` are 32 bit; on Linux x86-64
 8. **Windows headers never enter kernel-derived code.** SRW lock functions are
    declared locally in `wfs_sync.h`; `<windows.h>` macros (`min`, `max`, `ERROR`,
    `small`) would collide with kernel identifiers.
+
+## M3: the write path (audit 2026-10-31)
+
+The read-only port could ignore `long` in write-path code; M3 compiles and runs
+it. Grep of the M3 file set (`tools/vendor-xfs.sh`, M3_*) and the write paths of
+the M2 files for `unsigned long`, `(long)` and `long` declarations:
+
+| Use | Verdict |
+|---|---|
+| `xfs_rmap.c` 1123/1387/1853: `(unsigned long)a.rm_blockcount + len + b.rm_blockcount > XFS_RMAP_LEN_MAX` | **Bug on LLP64** (32-bit sum wraps, over-long merge passes): patch `0004-rmap-merge-len-u64` |
+| `(long)` deltas to `xfs_trans_mod_sb`/`xfs_alloc_update_counters` in `xfs_alloc.c`, `xfs_bmap.c`, `xfs_ialloc.c` | Safe: extent lengths (at most 2^21 blocks) and inode chunk sizes (64) |
+| `(long)-nblks` to `xfs_trans_mod_dquot_byino` | Quota is off (no-op) |
+| `xfs_log_cil.c` `ASSERT(IS_ALIGNED((unsigned long)ptr, 8))` | Safe: alignment uses the low bits only |
+| `li_flags`, `t_pflags`, `xc_flags`, `l_opstate` | Bitmaps, bit numbers below 32 |
+| `xfs_refcount.c` `overhead`, `nr_ops` | Counts far below 2^32 |
+| `xfs_trans_ail.c` `tout` (milliseconds), `xfs_log.c` printf of an offset | Safe |
+
+Kernel `lib/rbtree` keeps a pointer in `unsigned long __rb_parent_color`:
+patched to `uintptr_t` (`third_party/linux-lib-patches/0001-rbtree-uintptr.patch`).

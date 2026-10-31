@@ -26,8 +26,10 @@ cargo fmt --check
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
 tools/vendor-xfs.sh --verify
+(cd third_party/linux-lib && sha256sum -c --quiet SOURCE.sha256)
 if command -v gcc >/dev/null; then
   make -s -C backends/xfs test-shim
+  make -s -C backends/xfs test-rbtree
   make -s -C backends/xfs test-buf
   make -s -C backends/xfs tsan-buf
 else
@@ -66,6 +68,7 @@ else
   echo "SKIPPED: backends/xfs libxfs link test (gcc not installed)"
 fi
 python3 -I tools/license-scan.py --check-allowed third_party/linux-xfs
+python3 -I tools/license-scan.py --check-allowed third_party/linux-lib
 python3 -m unittest tools/test_license_scan.py
 python3 -m unittest tools/test_mkdisk.py
 # Windows-only code is never compiled by the host run above: check and lint

@@ -34,7 +34,41 @@ struct inode {
 	u64			i_version;
 	unsigned long		i_state;
 	unsigned long		i_flags;
+	spinlock_t		i_lock;		/* i_state */
+	atomic_t		i_dio_count;	/* always 0: no direct I/O path */
+	struct address_space	*i_mapping;	/* always NULL: no page cache */
 };
+static inline unsigned long inode_state_read_once(struct inode *i)
+{
+	return __atomic_load_n(&i->i_state, __ATOMIC_RELAXED);
+}
+static inline void inode_state_clear(struct inode *i, unsigned long f)
+{
+	__atomic_and_fetch(&i->i_state, ~f, __ATOMIC_RELAXED);
+}
+static inline void inode_state_set(struct inode *i, unsigned long f)
+{
+	__atomic_or_fetch(&i->i_state, f, __ATOMIC_RELAXED);
+}
+/* VFS reference: a transient icache reference (dropped by xfs_irele). */
+void wfs_xfs_ihold(struct inode *inode);
+#define ihold(i)		wfs_xfs_ihold(i)
+struct timespec64 current_time(struct inode *inode);
+static inline struct timespec64 inode_set_ctime_current(struct inode *i)
+{
+	struct timespec64 now = current_time(i);
+
+	i->i_ctime_ = now;
+	return now;
+}
+/* NFS change attribute: bump on every change (cheap here, no I_VERSION_QUERIED). */
+static inline bool inode_maybe_inc_iversion(struct inode *i, bool force)
+{
+	(void)force;
+	__atomic_add_fetch(&i->i_version, 1, __ATOMIC_RELAXED);
+	return true;
+}
+#define inode_inc_iversion(i)	((void)inode_maybe_inc_iversion((i), true))
 #define i_size_read(i)		((i)->i_size)
 #define i_size_write(i, s)	((i)->i_size = (s))
 #define set_nlink(i, n)		((i)->i_nlink = (n))

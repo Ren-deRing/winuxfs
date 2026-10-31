@@ -22,7 +22,7 @@ TOP="xfs_log xfs_log_cil xfs_trans xfs_trans_buf xfs_trans_ail xfs_buf_item
 xfs_buf_item_recover xfs_inode_item xfs_inode_item_recover xfs_icreate_item
 xfs_iunlink_item xfs_extfree_item xfs_extent_busy xfs_inode xfs_bmap_util
 xfs_bmap_item xfs_rmap_item xfs_refcount_item xfs_attr_item xfs_attr_inactive
-xfs_drain xfs_log_recover"
+xfs_log_recover"
 rm -rf "$OUT"; mkdir -p "$OUT/logs" "$OUT/gen" "$OUT/pre/linux"
 EXTRA=()
 if [ $pre = 1 ]; then

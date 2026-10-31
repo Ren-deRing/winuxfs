@@ -33,6 +33,9 @@ Current patches:
 - 0003-bmbt-extent-order: xfs_bmap.c, `xfs_iread_bmbt_block` rejects a record
   that starts before the end of the previous one, so a bmbt sibling cycle
   cannot grow the incore extent map without bound.
+- 0004-rmap-merge-len-u64: xfs_rmap.c, the three merge length checks sum in
+  64 bits (on Windows `unsigned long` is 32 bits and the sum would wrap).
+  Applied once xfs_rmap.c is compiled (M3).
 
 ### Reads of `lep->address` that are NOT patched
 
