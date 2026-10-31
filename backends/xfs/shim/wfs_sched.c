@@ -182,6 +182,16 @@ struct task_struct *wfs_current(void)
 	return &self()->t;
 }
 
+u32 wfs_current_fsuid(void) { return self()->t.fsuid; }
+u32 wfs_current_fsgid(void) { return self()->t.fsgid; }
+void wfs_set_current_fsids(u32 uid, u32 gid)
+{
+	struct wfs_task *k = self();
+
+	k->t.fsuid = uid;
+	k->t.fsgid = gid;
+}
+
 void wfs_set_current_state(long state)
 {
 	struct wfs_task *k = self();

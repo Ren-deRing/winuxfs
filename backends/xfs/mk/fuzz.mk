@@ -24,9 +24,9 @@ CFLAGS += -DWFS_BUF_SLACK=0
 endif
 MUTATE_RUNNER = $(OUT)/mutate_runner$(EXE)
 FUZZ_SRC = fuzz/fuzz_walk.h
-$(MUTATE_RUNNER): fuzz/mutate_runner.c $(FUZZ_SRC) $(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) Makefile mk/fuzz.mk | $(OUT)
+$(MUTATE_RUNNER): fuzz/mutate_runner.c $(FUZZ_SRC) $(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) Makefile mk/fuzz.mk | $(OUT)
 	$(CC) $(CFLAGS) $(LIBXFS_WNO) -Wno-format-truncation $(SANFLAGS) $(INC) $(KINC) -I. -Ifuzz -o $@ fuzz/mutate_runner.c \
-		$(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
+		$(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
 
 FUZZ_NEEDS = $(if $(CROSS),cross build,$(if $(HAVE_KERNEL),,no kernel tree))
 
@@ -59,9 +59,9 @@ fuzz-full:
 # libFuzzer needs clang for the runtime and for coverage instrumentation of
 # the backend objects too.
 FUZZER = $(OUT)/fuzz_mount_walk
-$(FUZZER): fuzz/fuzz_mount_walk.c $(FUZZ_SRC) $(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) Makefile mk/fuzz.mk | $(OUT)
+$(FUZZER): fuzz/fuzz_mount_walk.c $(FUZZ_SRC) $(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) Makefile mk/fuzz.mk | $(OUT)
 	$(CC) $(CFLAGS) $(LIBXFS_WNO) -Wno-format-truncation -fsanitize=fuzzer,address,undefined $(INC) $(KINC) -I. -Ifuzz -o $@ fuzz/fuzz_mount_walk.c \
-		$(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
+		$(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
 
 fuzz-build-libfuzzer: $(FUZZER)
 

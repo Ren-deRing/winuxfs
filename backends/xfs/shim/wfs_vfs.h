@@ -10,7 +10,8 @@
 
 #include "wfs_shim.h"
 
-struct address_space;
+/* One per inode (inode.i_data): the MMAPLOCK lives in invalidate_lock. */
+struct address_space { struct rw_semaphore invalidate_lock; unsigned long nrpages; /* 0 */ };
 struct user_namespace;
 struct mnt_idmap;
 
@@ -43,7 +44,8 @@ struct inode {
 	unsigned long		i_flags;
 	spinlock_t		i_lock;		/* i_state */
 	atomic_t		i_dio_count;	/* always 0: no direct I/O path */
-	struct address_space	*i_mapping;	/* always NULL: no page cache */
+	struct address_space	*i_mapping;	/* &i_data (no page cache) */
+	struct address_space	i_data;		/* i_mapping points here */
 	struct super_block	*i_sb;		/* the mount's (xfs_mount.m_super) */
 	struct rw_semaphore	i_rwsem;	/* XFS_IOLOCK */
 	u64			i_blocks;
@@ -126,6 +128,41 @@ WFS_TS_ACCESSORS(ctime, i_ctime_)
 #define mapping_clear_stable_writes(m)		((void)(m))
 #define bdev_stable_writes(b)			((void)(b), false)
 struct llist_node { struct llist_node *next; };
+
+#ifndef XATTR_NAME_MAX	/* <linux/limits.h> on glibc */
+#define XATTR_NAME_MAX		255
+#define XATTR_SIZE_MAX		65536
+#endif
+#define I_LINKABLE		(1u << 10)
+#define I_DONTCACHE		(1u << 16)
+#define I_MUTEX_NONDIR2		4
+#define WHITEOUT_MODE		0
+#define RENAME_NOREPLACE	(1u << 0)
+#define RENAME_EXCHANGE		(1u << 1)
+#define RENAME_WHITEOUT		(1u << 2)
+struct qstr { const unsigned char *name; u32 len; u32 hash; };
+#define special_file(m)		(S_ISCHR(m) || S_ISBLK(m) || S_ISFIFO(m) || S_ISSOCK(m))
+#define inode_state_set_raw(i, f)	inode_state_set((i), (f))
+#define inode_state_clear_raw(i, f)	inode_state_clear((i), (f))
+/* VFS inode references are icache references (icache.c). */
+int wfs_xfs_icount(struct inode *inode);
+#define icount_read_once(i)	wfs_xfs_icount(i)
+void wfs_xfs_iput(struct inode *inode);
+#define iput(i)			wfs_xfs_iput(i)
+/* i_rwsem is XFS_IOLOCK */
+#define inode_lock(i)		down_write(&(i)->i_rwsem)
+#define inode_lock_nested(i, c)	down_write(&(i)->i_rwsem)
+#define inode_unlock(i)		up_write(&(i)->i_rwsem)
+#define inode_lock_shared(i)	down_read(&(i)->i_rwsem)
+#define inode_unlock_shared(i)	up_read(&(i)->i_rwsem)
+/* No DAX, no pNFS/lease layouts. */
+#define break_layout(i, w)		((void)(i), 0)
+#define dax_break_layout(i, s, e, cb)	((void)(i), 0)
+#define dax_break_layout_inode(i, cb)	((void)(i), (void)(cb), 0)
+/* Owner of new inodes: the calling thread's fsuid/fsgid (set by the ABI glue). */
+#define i_user_ns(i)			((void)(i), (struct user_namespace *)NULL)
+#define mapped_fsuid(idmap, ns)		((void)(idmap), (void)(ns), current_fsuid())
+#define mapped_fsgid(idmap, ns)		((void)(idmap), (void)(ns), current_fsgid())
 
 /*
  * Directory iteration (xfs_dir2_readdir.c, vendored top-level file).

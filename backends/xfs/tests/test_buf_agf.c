@@ -59,6 +59,8 @@ int main(int argc, char **argv)
 	CHECK(pread(fd, sb, sizeof(sb), 0) == sizeof(sb));
 	xfs_sb_from_disk(&mp.m_sb, (struct xfs_dsb *)sb);
 	mp.m_features |= xfs_sb_version_to_features(&mp.m_sb);
+	/* no log here: the kernel's xfs_log_check_lsn skips the LSN check under norecovery */
+	mp.m_features |= XFS_FEAT_NORECOVERY;
 	xfs_sb_mount_common(&mp, &mp.m_sb);
 	xfs_alloc_compute_maxlevels(&mp);
 	xfs_rmapbt_compute_maxlevels(&mp);

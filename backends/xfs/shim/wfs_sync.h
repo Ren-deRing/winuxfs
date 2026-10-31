@@ -68,6 +68,15 @@ static inline void destroy_rwsem(struct rw_semaphore *r) { pthread_rwlock_destro
 #define spin_lock_irqsave(s, f)		do { (void)(f); spin_lock(s); } while (0)
 #define spin_unlock_irqrestore(s, f)	do { (void)(f); spin_unlock(s); } while (0)
 #define lockdep_assert_held(l)		((void)0)
+#define rwsem_assert_held(r)		((void)(r))
+#define rwsem_assert_held_write(r)	((void)(r))
+#define rwsem_assert_held_nolockdep(r)	((void)(r))
+#define rwsem_assert_held_write_nolockdep(r) ((void)(r))
+/*
+ * Not atomic with pthread/SRW locks: a writer may slip in between. The only
+ * callers (xfs_ilock_demote from xfs_file.c / xfs_reflink.c) are not compiled.
+ */
+#define downgrade_write(r)		do { up_write(r); down_read(r); } while (0)
 #define lockdep_assert_held_write(l)	((void)0)
 #define lockdep_assert_held_read(l)	((void)0)
 #define lockdep_is_held(l)		1

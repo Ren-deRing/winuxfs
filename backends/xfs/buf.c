@@ -1219,6 +1219,7 @@ int wfs_xfs_buftarg_bind(struct xfs_buftarg *bt, struct wfs_xfs_bcache *c,
 	bd->role = role;
 	bd->bdev.wfs_blk = c->blk;
 	bd->bdev.wfs_role = role;
+	bd->bdev.wfs_read_only = wfs_xfs_blk_read_only(c->blk, role);
 	ss = c->blk->sector_size[role] ? c->blk->sector_size[role] : 512;
 	bt->bt_priv = bd;
 	bt->bt_bdev = &bd->bdev;
@@ -1230,33 +1231,14 @@ int wfs_xfs_buftarg_bind(struct xfs_buftarg *bt, struct wfs_xfs_bcache *c,
 	return 0;
 }
 
+void wfs_xfs_buftarg_set_read_only(struct xfs_buftarg *bt)
+{
+	BD(bt)->bdev.wfs_read_only = true;
+}
+
 void wfs_xfs_buftarg_unbind(struct xfs_buftarg *bt)
 {
 	kfree(bt->bt_priv);
 	bt->bt_priv = NULL;
 	bt->bt_bdev = NULL;
-}
-
-/*
- * Read path "transaction" buffer glue (Task 6). libxfs reads metadata with
- * xfs_trans_read_buf()/xfs_trans_brelse() passing tp == NULL when no
- * transaction is involved; the port never creates a transaction (xfs_trans_alloc
- * fails with -EROFS), so these are the plain cache calls. A non-NULL tp is a
- * write-path caller and is refused.
- */
-int xfs_trans_read_buf_map(struct xfs_mount *mp, struct xfs_trans *tp,
-		struct xfs_buftarg *target, struct xfs_buf_map *map, int nmaps,
-		xfs_buf_flags_t flags, struct xfs_buf **bpp,
-		const struct xfs_buf_ops *ops)
-{
-	*bpp = NULL;
-	if (tp)
-		return -EROFS;
-	return xfs_buf_read_map(target, map, nmaps, flags, bpp, ops, NULL);
-}
-
-void xfs_trans_brelse(struct xfs_trans *tp, struct xfs_buf *bp)
-{
-	if (!tp)
-		xfs_buf_relse(bp);
 }

@@ -7,6 +7,7 @@
  * for the reference and locking rules.
  */
 #include "icache.h"
+#include "kinit.h"
 #include "xfs_bit.h"
 #include "xfs_types.h"
 #include "xfs_ag.h"
@@ -25,7 +26,7 @@
 #include "xfs_metafile.h"
 #include "xfs_error.h"
 
-#define XFS_IGET_UNTRUSTED	(1U << 1)	/* xfs_icache.h is not compiled */
+#include "xfs_icache.h"
 
 struct ic_shard;
 
@@ -36,9 +37,20 @@ struct ic_ent {
 	struct ic_shard		*sh;
 	uint32_t		refs;		/* transient references */
 	uint64_t		nlookup;	/* host lookup references */
+	int			state;		/* ENT_*; waiters: wait_var_event(&state) */
+	int			err;		/* ENT_FAILED: the load error */
 	bool			pinned;
 	bool			on_lru;
 };
+
+/*
+ * A miss inserts the entry LOADING and drops the shard lock for the disk read:
+ * the read takes buffer locks (AGI, inode cluster), and a transaction holding
+ * those buffers may call xfs_iget for an inode of the same shard. Lookups that
+ * find a LOADING entry take a reference and wait for READY or FAILED, so one
+ * read serves all of them. A FAILED entry is unhashed at once (never cached).
+ */
+enum { ENT_LOADING, ENT_READY, ENT_FAILED };
 
 struct ic_shard {
 	spinlock_t		lock;
@@ -64,95 +76,6 @@ static inline struct wfs_xfs_icache *ic_of(struct wfs_xfs *x)
 	return (struct wfs_xfs_icache *)x->icache;
 }
 
-/* ------------------------------------- global libxfs caches (refcounted) -- */
-
-/*
- * libxfs allocates the COW fork from the global xfs_ifork_cache and btree
- * cursors from the btree cursor caches (the kernel creates both in
- * xfs_init_caches()). Shared by all mounts of the process, created by the
- * first icache, destroyed by the last. Init-time only, so a bare spin on a builtin test-and-set is enough
- * (also builds with mingw, where there is no static mutex initialiser here).
- */
-static volatile int ifork_gate;
-static int ifork_users;
-
-/*
- * The data-device cursor caches only: the rt rmap/refcount ones are
- * write-path stubs here (rt groups with those btrees are not read in M2).
- */
-static void btree_caches_destroy(void)
-{
-	xfs_refcountbt_destroy_cur_cache();
-	xfs_rmapbt_destroy_cur_cache();
-	xfs_bmbt_destroy_cur_cache();
-	xfs_inobt_destroy_cur_cache();
-	xfs_allocbt_destroy_cur_cache();
-}
-
-static int btree_caches_init(void)
-{
-	int error;
-
-	if ((error = xfs_allocbt_init_cur_cache()) ||
-	    (error = xfs_inobt_init_cur_cache()) ||
-	    (error = xfs_bmbt_init_cur_cache()) ||
-	    (error = xfs_rmapbt_init_cur_cache()) ||
-	    (error = xfs_refcountbt_init_cur_cache())) {
-		btree_caches_destroy();
-		return error;
-	}
-	return 0;
-}
-
-static void gate_lock(void)
-{
-	while (__sync_lock_test_and_set(&ifork_gate, 1))
-		;
-}
-static void gate_unlock(void) { __sync_lock_release(&ifork_gate); }
-
-static int ifork_cache_get(void)
-{
-	int ret = 0;
-
-	gate_lock();
-	if (!ifork_users++ && !xfs_ifork_cache) {
-		xfs_ifork_cache = kmem_cache_create("xfs_ifork",
-				sizeof(struct xfs_ifork), 0, 0, NULL);
-		/* directory code (lookup, node-format readdir) allocates da state */
-		xfs_da_state_cache = kmem_cache_create("xfs_da_state",
-				sizeof(struct xfs_da_state), 0, 0, NULL);
-		if (xfs_ifork_cache && xfs_da_state_cache)
-			ret = btree_caches_init();
-		else
-			ret = -ENOMEM;
-		if (ret) {
-			if (xfs_ifork_cache)
-				kmem_cache_destroy(xfs_ifork_cache);
-			if (xfs_da_state_cache)
-				kmem_cache_destroy(xfs_da_state_cache);
-			xfs_ifork_cache = NULL;
-			xfs_da_state_cache = NULL;
-			ifork_users--;
-		}
-	}
-	gate_unlock();
-	return ret;
-}
-
-static void ifork_cache_put(void)
-{
-	gate_lock();
-	if (!--ifork_users && xfs_ifork_cache) {
-		btree_caches_destroy();
-		kmem_cache_destroy(xfs_da_state_cache);
-		kmem_cache_destroy(xfs_ifork_cache);
-		xfs_da_state_cache = NULL;
-		xfs_ifork_cache = NULL;
-	}
-	gate_unlock();
-}
-
 /* ---------------------------------------------------------- entries -- */
 
 static struct ic_ent *ent_alloc(struct xfs_mount *mp, xfs_ino_t ino)
@@ -173,6 +96,8 @@ static struct ic_ent *ent_alloc(struct xfs_mount *mp, xfs_ino_t ino)
 	spin_lock_init(&ip->i_flags_lock);
 	VFS_I(ip)->i_sb = mp->m_super;
 	init_rwsem(&VFS_I(ip)->i_rwsem);
+	VFS_I(ip)->i_mapping = &VFS_I(ip)->i_data;
+	init_rwsem(&VFS_I(ip)->i_data.invalidate_lock);
 	return e;
 }
 
@@ -201,7 +126,8 @@ static void ent_free(struct ic_ent *e)
 #define WFS_XFS_MAX_EXTENTS	((uint64_t)8 << 20)
 
 /* Load the on-disk inode into e. Kernel errno on failure. */
-static int ent_load(struct wfs_xfs *x, struct ic_ent *e)
+static int ent_load(struct wfs_xfs *x, struct ic_ent *e, struct xfs_trans *tp,
+		    unsigned int flags)
 {
 	struct xfs_mount *mp = &x->mp;
 	struct xfs_inode *ip = &e->ip;
@@ -214,16 +140,24 @@ static int ent_load(struct wfs_xfs *x, struct ic_ent *e)
 	if (!pag)
 		return -EINVAL;
 
-	error = xfs_imap(pag, NULL, ino, &ip->i_imap, XFS_IGET_UNTRUSTED);
+	error = xfs_imap(pag, tp, ino, &ip->i_imap, flags | XFS_IGET_UNTRUSTED);
 	if (error)
 		goto out_put;
-	error = xfs_read_icluster(pag, NULL, ip->i_imap.im_agbno, &bp);
+	/*
+	 * A new inode (xfs_dialloc): nothing to read; the caller initializes it
+	 * (xfs_iget_cache_miss: a v5 inode gets a random generation).
+	 */
+	if (flags & XFS_IGET_CREATE) {
+		VFS_I(ip)->i_generation = get_random_u32();
+		goto out_put;
+	}
+	error = xfs_read_icluster(pag, tp, ip->i_imap.im_agbno, &bp);
 	if (error)
 		goto out_put;
 	error = xfs_inode_from_disk(ip, xfs_buf_offset(bp, ip->i_imap.im_boffset));
 	if (!error)
 		xfs_buf_set_ref(bp, XFS_INO_REF);
-	xfs_trans_brelse(NULL, bp);
+	xfs_trans_brelse(tp, bp);
 	if (error)
 		goto out_put;
 
@@ -350,12 +284,12 @@ int wfs_xfs_icache_create(struct wfs_xfs *x)
 		per = 1;
 	while (nb < per && nb < ((size_t)1 << 16))
 		nb <<= 1;
-	error = ifork_cache_get();
+	error = wfs_xfs_kinit_get();
 	if (error)
 		return error;
 	c = kzalloc(sizeof(*c), GFP_KERNEL);
 	if (!c) {
-		ifork_cache_put();
+		wfs_xfs_kinit_put();
 		return -ENOMEM;
 	}
 	c->nbuckets = nb;
@@ -367,7 +301,7 @@ int wfs_xfs_icache_create(struct wfs_xfs *x)
 			while (i--)
 				kfree(c->sh[i].bucket);
 			kfree(c);
-			ifork_cache_put();
+			wfs_xfs_kinit_put();
 			return -ENOMEM;
 		}
 	}
@@ -399,19 +333,40 @@ void wfs_xfs_icache_destroy(struct wfs_xfs *x)
 	}
 	kfree(c);
 	x->icache = NULL;
-	ifork_cache_put();
+	wfs_xfs_kinit_put();
 }
 
-int wfs_xfs_iget(struct wfs_xfs *x, xfs_ino_t ino, struct xfs_inode **ipp)
+/* Wait until e is not LOADING. Shard lock held on entry and on return. */
+static void wait_loaded(struct ic_shard *s, struct ic_ent *e)
+{
+	while (e->state == ENT_LOADING) {
+		spin_unlock(&s->lock);
+		wait_var_event(&e->state, READ_ONCE(e->state) != ENT_LOADING);
+		spin_lock(&s->lock);
+	}
+}
+
+/* Kernel xfs_iget_check_free_state: CREATE wants a free inode, others an allocated one. */
+static int check_free_state(struct xfs_inode *ip, unsigned int flags)
+{
+	if (flags & XFS_IGET_CREATE)
+		return VFS_I(ip)->i_mode != 0 ? -EFSCORRUPTED : 0;
+	return VFS_I(ip)->i_mode == 0 ? -ENOENT : 0;
+}
+
+static int iget_flags(struct wfs_xfs *x, struct xfs_trans *tp, xfs_ino_t ino,
+		      unsigned int flags, struct xfs_inode **ipp)
 {
 	struct wfs_xfs_icache *c = ic_of(x);
 	struct xfs_mount *mp = &x->mp;
-	uint64_t h;
+	struct ic_ent *e, *nw = NULL;
 	struct ic_shard *s;
-	struct ic_ent *e;
+	bool freeit;
+	uint64_t h;
 	size_t b;
 	int error;
 
+	*ipp = NULL;
 	if (ino == 0 || ino == NULLFSINO || ino > XFS_MAXINUMBER ||
 	    XFS_INO_TO_AGNO(mp, ino) >= mp->m_sb.sb_agcount)
 		return -EINVAL;
@@ -421,40 +376,150 @@ int wfs_xfs_iget(struct wfs_xfs *x, xfs_ino_t ino, struct xfs_inode **ipp)
 	b = bucket_of(c, h);
 
 	spin_lock(&s->lock);
-	for (e = s->bucket[b]; e; e = e->hnext) {
-		if (I_INO(&e->ip) == ino) {
-			lru_remove(s, e);
-			e->refs++;
-			spin_unlock(&s->lock);
-			*ipp = &e->ip;
-			return 0;
+	for (e = s->bucket[b]; e; e = e->hnext)
+		if (I_INO(&e->ip) == ino)
+			break;
+	if (!e && !(flags & XFS_IGET_INCORE)) {
+		spin_unlock(&s->lock);
+		nw = ent_alloc(mp, ino);
+		if (!nw)
+			return -ENOMEM;
+		spin_lock(&s->lock);
+		for (e = s->bucket[b]; e; e = e->hnext)	/* lost a race? */
+			if (I_INO(&e->ip) == ino)
+				break;
+	}
+	if (e) {				/* hit */
+		lru_remove(s, e);
+		e->refs++;
+		wait_loaded(s, e);
+		if (e->state == ENT_FAILED) {
+			error = e->err;
+			freeit = --e->refs == 0;
+		} else {
+			error = check_free_state(&e->ip, flags);
+			freeit = false;
+			if (error) {
+				e->refs--;
+				release_locked(c, s, e);
+			}
 		}
-	}
-
-	e = ent_alloc(mp, ino);
-	if (!e) {
 		spin_unlock(&s->lock);
-		return -ENOMEM;
-	}
-	error = ent_load(x, e);
-	if (error) {
-		spin_unlock(&s->lock);
-		ent_free(e);	/* never cached: a corrupt inode is retried (and re-reported) */
+		if (freeit)
+			ent_free(e);
+		if (nw)
+			ent_free(nw);
+		if (!error)
+			*ipp = &e->ip;
 		return error;
 	}
+	if (!nw) {				/* XFS_IGET_INCORE miss */
+		spin_unlock(&s->lock);
+		return -ENODATA;
+	}
+
+	e = nw;					/* miss: load without the shard lock */
 	e->sh = s;
 	e->refs = 1;
+	WRITE_ONCE(e->state, ENT_LOADING);
 	e->hnext = s->bucket[b];
 	s->bucket[b] = e;
 	s->count++;
-	trim(c, s);	/* may evict others; e holds a reference */
 	spin_unlock(&s->lock);
-	*ipp = &e->ip;
-	return 0;
+
+	error = ent_load(x, e, tp, flags);
+	if (!error)
+		error = check_free_state(&e->ip, flags);
+
+	spin_lock(&s->lock);
+	freeit = false;
+	if (error) {
+		WRITE_ONCE(e->state, ENT_FAILED);	/* never cached: a corrupt inode is retried (and re-reported) */
+		e->err = error;
+		hash_unlink(c, s, e);
+		freeit = --e->refs == 0;
+	} else {
+		WRITE_ONCE(e->state, ENT_READY);
+		trim(c, s);		/* may evict others; e holds a reference */
+	}
+	spin_unlock(&s->lock);
+	wake_up_var(&e->state);
+	if (freeit)
+		ent_free(e);
+	if (!error)
+		*ipp = &e->ip;
+	return error;
 }
 
-void xfs_irele(struct xfs_inode *ip)
+int wfs_xfs_iget(struct wfs_xfs *x, xfs_ino_t ino, struct xfs_inode **ipp)
 {
+	return iget_flags(x, NULL, ino, XFS_IGET_UNTRUSTED, ipp);
+}
+
+/* Kernel xfs_iget (xfs_icache.c) on the winuxfs inode cache. */
+int xfs_iget(struct xfs_mount *mp, struct xfs_trans *tp, xfs_ino_t ino, uint flags,
+	     uint lock_flags, struct xfs_inode **ipp)
+{
+	int error = iget_flags(wfs_xfs_of(mp), tp, ino, flags, ipp);
+
+	if (!error && lock_flags)
+		xfs_ilock(*ipp, lock_flags);
+	return error;
+}
+
+/* An inode outside the cache (log recovery: xfs_inode_item_recover.c). */
+struct xfs_inode *xfs_inode_alloc(struct xfs_mount *mp, xfs_ino_t ino)
+{
+	struct ic_ent *e = ent_alloc(mp, ino);
+
+	return e ? &e->ip : NULL;
+}
+
+void xfs_inode_free(struct xfs_inode *ip)
+{
+	ent_free(ent_of(ip));
+}
+
+/* Kernel xfs_setup_inode: the VFS size follows the on-disk size. */
+void xfs_setup_inode(struct xfs_inode *ip)
+{
+	i_size_write(VFS_I(ip), ip->i_disk_size);
+}
+
+/* pag_ici_root lookups (xfs_iunlink_lookup): a cached inode, no reference. */
+void *wfs_xfs_ici_lookup(struct radix_tree_root *root, unsigned long agino)
+{
+	struct xfs_perag *pag = container_of(root, struct xfs_perag, pag_ici_root);
+	struct xfs_mount *mp = pag_mount(pag);
+	struct wfs_xfs_icache *c = ic_of(wfs_xfs_of(mp));
+	xfs_ino_t ino = XFS_AGINO_TO_INO(mp, pag_agno(pag), (xfs_agino_t)agino);
+	uint64_t h = ino_hash(ino);
+	struct ic_shard *s = shard_of(c, h);
+	struct ic_ent *e;
+
+	spin_lock(&s->lock);
+	for (e = s->bucket[bucket_of(c, h)]; e; e = e->hnext)
+		if (I_INO(&e->ip) == ino && e->state == ENT_READY)
+			break;
+	spin_unlock(&s->lock);
+	return e ? &e->ip : NULL;
+}
+
+int wfs_xfs_icount(struct inode *inode)
+{
+	struct ic_ent *e = ent_of(XFS_I(inode));
+	int n;
+
+	spin_lock(&e->sh->lock);
+	n = (int)e->refs;
+	spin_unlock(&e->sh->lock);
+	return n;
+}
+
+/* iput(): drop a transient reference (the kernel xfs_irele calls this). */
+void wfs_xfs_iput(struct inode *inode)
+{
+	struct xfs_inode *ip = XFS_I(inode);
 	struct ic_ent *e = ent_of(ip);
 	struct ic_shard *s = e->sh;
 	struct wfs_xfs_icache *c = ic_of(wfs_xfs_of(ip->i_mount));
@@ -560,70 +625,6 @@ uint64_t wfs_xfs_icache_nlookup(struct wfs_xfs *x)
 }
 
 /* ------------------------------------------------- libxfs-called hooks -- */
-
-/*
- * Inode locks. Only ILOCK is real: the read-only port has no IOLOCK or
- * MMAPLOCK users, and those flags are accepted and ignored. Exclusive is
- * taken only to read the extent list lazily (xfs_ilock_data_map_shared).
- */
-void xfs_ilock(struct xfs_inode *ip, uint lock_flags)
-{
-	if (lock_flags & XFS_ILOCK_EXCL)
-		down_write(&ip->i_lock);
-	else if (lock_flags & XFS_ILOCK_SHARED)
-		down_read(&ip->i_lock);
-}
-
-int xfs_ilock_nowait(struct xfs_inode *ip, uint lock_flags)
-{
-	if (lock_flags & XFS_ILOCK_EXCL)
-		return down_write_trylock(&ip->i_lock);
-	if (lock_flags & XFS_ILOCK_SHARED)
-		return down_read_trylock(&ip->i_lock);
-	return 1;
-}
-
-void xfs_iunlock(struct xfs_inode *ip, uint lock_flags)
-{
-	if (lock_flags & XFS_ILOCK_EXCL)
-		up_write(&ip->i_lock);
-	else if (lock_flags & XFS_ILOCK_SHARED)
-		up_read(&ip->i_lock);
-}
-
-/*
- * The pthread/SRW lock cannot report its state, so this is a no-op; the
- * callers (libxfs ASSERTs) are debug checks only.
- */
-void xfs_assert_ilocked(struct xfs_inode *ip, uint lock_flags)
-{
-	(void)ip; (void)lock_flags;
-}
-
-static uint ilock_map_shared(struct xfs_inode *ip, const struct xfs_ifork *ifp)
-{
-	uint lock_mode = XFS_ILOCK_SHARED;
-
-	if (ifp && xfs_need_iread_extents(ifp))
-		lock_mode = XFS_ILOCK_EXCL;
-	xfs_ilock(ip, lock_mode);
-	return lock_mode;
-}
-
-uint xfs_ilock_data_map_shared(struct xfs_inode *ip)
-{
-	return ilock_map_shared(ip, &ip->i_df);
-}
-
-uint xfs_ilock_attr_map_shared(struct xfs_inode *ip)
-{
-	return ilock_map_shared(ip, xfs_inode_has_attr_fork(ip) ? &ip->i_af : NULL);
-}
-
-bool xfs_is_always_cow_inode(const struct xfs_inode *ip)
-{
-	return ip->i_mount->m_always_cow && xfs_has_reflink(ip->i_mount);
-}
 
 void xfs_inode_verifier_error(struct xfs_inode *ip, int error, const char *name,
 		const void *buf, size_t bufsz, xfs_failaddr_t failaddr)

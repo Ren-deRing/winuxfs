@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-only
 # Task 4 link tests, run by `make test-link` (cwd = backends/xfs).
-#   all_29_files_compile_without_warnings
+#   all_core_files_compile_without_warnings (libxfs + M3 top-level files)
 #   no_unresolved_symbols_native_and_mingw
 #   plugin_loads_and_reports_abi_version
 #   write_path_symbols_do_not_abort
@@ -19,18 +19,20 @@ have_native=0; have_mingw=0
 command -v gcc >/dev/null && have_native=1
 command -v ${MINGW}gcc >/dev/null && have_mingw=1
 
-# --- 1. all 29 files compile (-Wall -Wextra -Werror + the kernel-code
-# relaxations of the Makefile). Objects are NOT cleaned first: -Werror means an
-# object that exists was built without warnings, and make rebuilds on change. ---
-t=all_29_files_compile_without_warnings
+# --- 1. all core files (libxfs + the M3 top-level fs/xfs files) compile
+# (-Wall -Wextra -Werror + the kernel-code relaxations of the Makefile).
+# Objects are NOT cleaned first: -Werror means an object that exists was built
+# without warnings, and make rebuilds on change. ---
+t=all_core_files_compile_without_warnings
+want=$($M print-core-count)
 for tc in native mingw; do
   if [ $tc = native ]; then [ $have_native = 1 ] || { echo "SKIPPED $t[native]: gcc not installed"; continue; }; cross=
   else [ $have_mingw = 1 ] || { echo "SKIPPED $t[mingw]: ${MINGW}gcc not installed"; continue; }; cross=$MINGW; fi
-  out=$($M CROSS=$cross OUT=$ROOT/target/xfs-link-$tc libxfs-objs 2>&1); rc=$?
-  n=$(find "$ROOT/target/xfs-link-$tc/libxfs" -name '*.o' 2>/dev/null | wc -l)
-  if [ $rc -ne 0 ] || [ "$n" -ne 29 ] || echo "$out" | grep -q 'warning'; then
-    fail "$t[$tc]" "rc=$rc objects=$n $(echo "$out" | grep -m3 -E 'error|warning')"
-  else pass "$t[$tc]: 29 objects"; fi
+  out=$($M CROSS=$cross OUT=$ROOT/target/xfs-link-$tc m3-objs 2>&1); rc=$?
+  n=$(find "$ROOT/target/xfs-link-$tc/libxfs" "$ROOT/target/xfs-link-$tc/m3" -name '*.o' 2>/dev/null | wc -l)
+  if [ $rc -ne 0 ] || [ "$n" -ne "$want" ] || echo "$out" | grep -q 'warning'; then
+    fail "$t[$tc]" "rc=$rc objects=$n want=$want $(echo "$out" | grep -m3 -E 'error|warning')"
+  else pass "$t[$tc]: $n objects"; fi
 done
 
 # --- 2. no unresolved symbols; plugin imports only libc / OS ---
@@ -88,22 +90,28 @@ else
   fi
 fi
 
-# --- 4. write-path symbols resolve to stubs and the stubs do not abort ---
+# --- 4. the write path links the kernel's own definitions (exactly once, from
+# the core objects), the remaining stubs are the only definition of theirs,
+# and the stubs do not abort ---
 t=write_path_symbols_do_not_abort
 if [ $have_native = 0 ]; then echo "SKIPPED $t: gcc not installed"
 else
-  obj=$ROOT/target/xfs-link-native/be/stubs_ro.o
+  L=$ROOT/target/xfs-link-native
+  obj=$L/be/stubs_ro.o
   miss=
   for s in xfs_trans_alloc xfs_trans_commit xfs_trans_roll xfs_defer_finish xfs_trans_log_inode \
            xfs_trans_log_buf xfs_trans_ijoin xfs_rmap_alloc xfs_rmap_free xfs_extent_busy_insert \
-           xfs_dec_freecounter xfs_add_freecounter xfs_icreate_log \
-           xfs_trans_mod_sb xfs_parent_addname xfs_refcount_alloc_cow_extent; do
-    nm "$obj" | grep -q " T $s\$" || miss="$miss $s"
-    # and the full link takes exactly that definition (no second one elsewhere)
-    n=$(nm "$ROOT/target/xfs-link-native"/libxfs/*.o "$ROOT/target/xfs-link-native"/shim/*.o | grep -c " [TtWw] $s\$")
-    [ "$n" = 0 ] || miss="$miss $s(also defined in libxfs/shim)"
+           xfs_icreate_log xfs_trans_mod_sb xfs_log_force xfs_trans_ail_insert; do
+    nm "$obj" | grep -q " T $s\$" && miss="$miss $s(still stubbed)"
+    n=$(nm "$L"/libxfs/*.o "$L"/m3/*.o "$L"/shim/*.o "$L"/be/*.o 2>/dev/null | grep -c " [TtW] $s\$")
+    [ "$n" = 1 ] || miss="$miss $s(defined $n times)"
   done
-  r=$($M OUT=$ROOT/target/xfs-link-native test-stubs 2>&1) || miss="$miss test_stubs: $r"
+  for s in xfs_dec_freecounter xfs_add_freecounter xfs_fs_mark_sick xfs_mod_delalloc xfs_parent_addname; do
+    nm "$obj" | grep -q " T $s\$" || miss="$miss $s(stub missing)"
+    n=$(nm "$L"/libxfs/*.o "$L"/m3/*.o "$L"/shim/*.o 2>/dev/null | grep -c " [TtW] $s\$")
+    [ "$n" = 0 ] || miss="$miss $s(also defined in core/shim)"
+  done
+  r=$($M OUT=$L test-stubs 2>&1) || miss="$miss test_stubs: $r"
   [ -z "$miss" ] && pass "$t: $(echo "$r" | tail -1)" || fail $t "$miss"
 fi
 

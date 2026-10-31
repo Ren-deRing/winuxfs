@@ -21,16 +21,6 @@
 
 #define WFS_NAME_MAX	255	/* MAXNAMELEN - 1 */
 
-/*
- * xfs_ifork_zapped() (xfs_inode.c) tells whether online repair zapped a fork
- * after a failed rebuild; there is no scrub here, so never.
- */
-bool xfs_ifork_zapped(const struct xfs_inode *ip, int whichfork)
-{
-	(void)ip; (void)whichfork;
-	return false;
-}
-
 /* iget error for an inode number read from a directory entry */
 static int entry_iget_err(int error)
 {

@@ -200,3 +200,24 @@ int xfs_rw_bdev(struct block_device *bdev, sector_t sector, unsigned int count,
 	bio_add_virt_nofail(&bio, data, count);
 	return submit_bio_wait(&bio);
 }
+
+int blkdev_issue_zeroout(struct block_device *bdev, sector_t sector, sector_t nr_sects,
+			 gfp_t gfp, unsigned int flags)
+{
+	enum { CHUNK = 64 << 10 };
+	void *z = kzalloc(CHUNK, gfp);
+	int err = 0;
+
+	(void)flags;
+	if (!z)
+		return -ENOMEM;
+	while (!err && nr_sects) {
+		unsigned int n = nr_sects > CHUNK / SECTOR_SIZE ? CHUNK : (unsigned int)nr_sects * SECTOR_SIZE;
+
+		err = xfs_rw_bdev(bdev, sector, n, z, REQ_OP_WRITE);
+		sector += n / SECTOR_SIZE;
+		nr_sects -= n / SECTOR_SIZE;
+	}
+	kfree(z);
+	return err;
+}

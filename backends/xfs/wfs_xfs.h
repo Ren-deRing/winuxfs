@@ -59,15 +59,15 @@ struct wfs_xfs {
 	int			log_role;	/* WFS_DEV_DATA or WFS_DEV_LOG, -1 none */
 	bool			perag_up, rtg_up;	/* groups need freeing */
 	bool			root_loaded;	/* Task 8: wfs_xfs_load_root() succeeded */
+	bool			kinit;		/* holds a wfs_xfs_kinit_get() reference */
 	void			*icache;	/* Task 8 */
 	uint64_t		mem_budget;	/* added to the process allocation cap while mounted */
-	uint32_t		shutdown;	/* SHUTDOWN_* flags; nonzero = shut down (atomic) */
 };
 
 /*
- * Filesystem shutdown (kernel xfs_force_shutdown): after a metadata write or
- * log error, or in-core corruption, every later change fails and nothing more
- * is written. Reads keep working. The first call logs the reason.
+ * Filesystem shutdown (glue.c, kernel xfs_do_force_shutdown): after a metadata
+ * write or log error, or in-core corruption, every later change fails and
+ * nothing more is written. Reads keep working. The first call logs the reason.
  */
 bool wfs_xfs_is_shutdown(struct xfs_mount *mp);
 void wfs_xfs_force_shutdown(struct xfs_mount *mp, uint32_t flags);

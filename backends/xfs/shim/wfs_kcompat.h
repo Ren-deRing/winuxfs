@@ -143,6 +143,9 @@ static inline s64 div_s64_rem(s64 dividend, s32 divisor, s32 *rem)
 /* ---- radix tree: the per-AG incore inode tree is unused (icache.c) ---- */
 struct radix_tree_root { void *xa_head; };
 #define INIT_RADIX_TREE(root, gfp)	((root)->xa_head = NULL)
+/* Lookups in pag_ici_root are lookups in the inode cache (icache.c). */
+void *wfs_xfs_ici_lookup(struct radix_tree_root *root, unsigned long agino);
+#define radix_tree_lookup(root, index)	wfs_xfs_ici_lookup((root), (index))
 
 /* ---- iovecs ----------------------------------------------------------- */
 struct kvec { void *iov_base; size_t iov_len; };

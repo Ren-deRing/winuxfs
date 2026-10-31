@@ -32,9 +32,10 @@ static inline blk_status_t errno_to_blk_status(int e) { return e ? BLK_STS_IOERR
 struct block_device {
 	const void		*wfs_blk;	/* struct wfs_xfs_blk */
 	int			wfs_role;
+	bool			wfs_read_only;	/* host device opened read-only */
 };
 static inline bool bdev_write_cache(struct block_device *b) { (void)b; return true; }
-static inline bool bdev_read_only(struct block_device *b) { (void)b; return false; }
+static inline bool bdev_read_only(struct block_device *b) { return b->wfs_read_only; }
 
 typedef unsigned int blk_opf_t;
 enum req_op { REQ_OP_READ = 0, REQ_OP_WRITE = 1 };
@@ -88,6 +89,12 @@ void submit_bio(struct bio *bio);
 int submit_bio_wait(struct bio *bio);
 /* Number of vecs a virtually contiguous buffer needs (always 1 here). */
 static inline unsigned int bio_add_max_vecs(void *kaddr, unsigned int len) { (void)kaddr; (void)len; return 1; }
+
+/* Write zeroes to a sector range (synchronous). */
+int blkdev_issue_zeroout(struct block_device *bdev, sector_t sector, sector_t nr_sects,
+			 gfp_t gfp, unsigned int flags);
+#define BLKDEV_ZERO_NOUNMAP	(1u << 0)
+#define BLKDEV_ZERO_NOFALLBACK	(1u << 1)
 
 /* Synchronous I/O of a virtually contiguous buffer (kernel xfs_bio_io.c). */
 int xfs_rw_bdev(struct block_device *bdev, sector_t sector, unsigned int count,
