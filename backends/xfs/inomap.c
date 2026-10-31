@@ -116,5 +116,5 @@ void wfs_xfs_op_forget(struct wfs_xfs *x, wfs_ino_t ino, uint64_t nlookup)
 		return;
 	if (wfs_xfs_ino_from_wfs(&x->mp, ino, &xino))
 		return;
-	wfs_xfs_iforget(x, xino, nlookup);
+	wfs_xfs_op_forget_w(x, xino, nlookup);
 }

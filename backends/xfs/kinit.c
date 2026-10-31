@@ -40,6 +40,7 @@
 #include "xfs_attr_item.h"
 #include "xfs_super.h"
 #include "kinit.h"
+#include "xfs_dir2.h"
 
 /* Init-time only, so a bare spin on a builtin test-and-set is enough (also
  * builds with mingw, where there is no static mutex initialiser here). */
@@ -125,6 +126,8 @@ static int caches_init(void)
 		if (!*caches[i].cache)
 			goto fail;
 	}
+	xfs_dir_startup();	/* hashes of "." and ".." (block-dir conversion) */
+
 	/* intent items with inline extent arrays (sizes as in xfs_init_caches) */
 	xfs_efd_cache = kmem_cache_create("xfs_efd_item",
 			xfs_efd_log_item_sizeof(XFS_EFD_MAX_FAST_EXTENTS), 0, 0, NULL);

@@ -107,6 +107,10 @@ void *krealloc(const void *p, size_t new_size, gfp_t f)
 
 	if (!p)
 		return wfs_alloc(new_size, f);
+	if (!new_size) {	/* kernel: frees p (returns ZERO_SIZE_PTR) */
+		wfs_free((void *)p);
+		return NULL;
+	}
 	old = block_size(p);
 	n = wfs_alloc(new_size, f);
 	if (!n)
