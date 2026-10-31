@@ -28,4 +28,13 @@ wfs_err_t wfs_xfs_op_lookup(struct wfs_xfs *x, wfs_ino_t dir, const char *name, 
 wfs_err_t wfs_xfs_op_readdir(struct wfs_xfs *x, wfs_ino_t dir, uint64_t cookie,
 			     wfs_dirent_cb cb, void *ctx);
 
+/* wops.c (M3a T6) */
+wfs_err_t wfs_xfs_op_create(struct wfs_xfs *x, wfs_ino_t dir, const char *name, uint32_t len,
+			    uint32_t ftype, uint32_t mode, uint32_t uid, uint32_t gid,
+			    wfs_ino_t *out, wfs_stat *st);
+wfs_err_t wfs_xfs_op_unlink(struct wfs_xfs *x, wfs_ino_t dir, const char *name, uint32_t len);
+wfs_err_t wfs_xfs_op_rmdir(struct wfs_xfs *x, wfs_ino_t dir, const char *name, uint32_t len);
+wfs_err_t wfs_xfs_op_setattr(struct wfs_xfs *x, wfs_ino_t ino, const wfs_stat *st, uint32_t mask);
+void wfs_xfs_op_forget_w(struct wfs_xfs *x, uint64_t xino, uint64_t n);
+
 #endif

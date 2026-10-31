@@ -98,6 +98,12 @@ static inline int wfs_xfs_err(int e)
 	case ENOENT:		return -WFS_ENOENT;
 	case ENOTDIR:		return -WFS_ENOTDIR;
 	case EROFS:		return -WFS_EROFS;
+	case EEXIST:		return -WFS_EEXIST;
+	case ENOTEMPTY:		return -WFS_ENOTEMPTY;
+	case ENOSPC:		return -WFS_ENOSPC;
+	case ENAMETOOLONG:	return -WFS_ENAMETOOLONG;
+	case EISDIR:		return -WFS_EISDIR;
+	case EPERM:		return -WFS_EPERM;
 	default:		return -WFS_EIO;
 	}
 }

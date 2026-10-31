@@ -872,7 +872,13 @@ int xfs_buf_read_map(struct xfs_buftarg *target, struct xfs_buf_map *map,
 				clear_flags(bp, XBF_DONE);
 			else
 				wb->vops = ops;
-		} else if (ops && bp->b_ops != ops && wb->vops != ops) {
+		} else if (ops && bp->b_ops != ops && wb->vops != ops && !bp->b_log_item &&
+			   !(bp->b_flags & _XBF_DELWRI_Q)) {
+			/*
+			 * A logged or queued buffer may be modified in core: its CRC is only
+			 * set when it is written, so (like the kernel's xfs_buf_reverify,
+			 * which checks only a buffer without ops) it is not verified here.
+			 */
 			error = verify_copy(bp, ops);
 			if (error) {	/* the cached copy stays good for its own type */
 				xfs_buf_relse(bp);

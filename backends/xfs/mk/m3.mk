@@ -9,7 +9,7 @@ $(OUT)/gen/top/%.c: $(KERNEL_XFS_SRC)/%.c
 	cp $< $@ && chmod u+w $@
 $(OUT)/m3/%.o: $(OUT)/gen/top/%.c $(SHIM_HDR) Makefile
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(if $(SAN),-fno-sanitize=alignment) $(PIC) $(VIS) $(INC) $(KINC) -c -o $@ $<
+	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(if $(SAN),-fno-sanitize=alignment$(comma)null) $(PIC) $(VIS) $(INC) $(KINC) -c -o $@ $<
 # Patch 0004 (rmap merge length, LLP64): xfs_rmap.c from a patched copy.
 RMAP_PATCH = ../../third_party/linux-xfs-patches/0004-rmap-merge-len-u64.patch
 $(OUT)/gen/libxfs/xfs_rmap.c: $(KERNEL_XFS_SRC)/libxfs/xfs_rmap.c $(RMAP_PATCH)
@@ -17,6 +17,6 @@ $(OUT)/gen/libxfs/xfs_rmap.c: $(KERNEL_XFS_SRC)/libxfs/xfs_rmap.c $(RMAP_PATCH)
 	cp $< $@.tmp && chmod u+w $@.tmp && patch -s -p1 --no-backup-if-mismatch $@.tmp < $(RMAP_PATCH) && mv $@.tmp $@
 $(OUT)/libxfs/xfs_rmap.o: $(OUT)/libxfs/%.o: $(OUT)/gen/libxfs/%.c $(SHIM_HDR) Makefile
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(if $(SAN),-fno-sanitize=alignment) $(PIC) $(VIS) $(INC) $(KINC) -c -o $@ $<
+	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(if $(SAN),-fno-sanitize=alignment$(comma)null) $(PIC) $(VIS) $(INC) $(KINC) -c -o $@ $<
 m3-objs: $(M3_OBJ) $(LIBXFS_OBJ)
 .PHONY: m3-objs

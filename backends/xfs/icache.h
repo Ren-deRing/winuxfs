@@ -49,6 +49,8 @@ void wfs_xfs_iforget(struct wfs_xfs *x, xfs_ino_t ino, uint64_t n);
 
 /* Pin (root; never unpinned, the cache is destroyed at unmount). ip must be held. */
 void wfs_xfs_ipin(struct xfs_inode *ip);
+uint64_t wfs_xfs_inlookup(struct xfs_inode *ip);
+void wfs_xfs_idead(struct xfs_inode *ip);
 
 /* Statistics for tests. */
 size_t wfs_xfs_icache_count(struct wfs_xfs *x);		/* cached entries */

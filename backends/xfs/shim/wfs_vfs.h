@@ -103,8 +103,8 @@ static inline void inode_init_owner(const struct mnt_idmap *idmap, struct inode 
 {
 	(void)idmap; (void)dir;
 	inode->i_mode = mode;
-	inode->i_uid = 0;
-	inode->i_gid = 0;
+	inode->i_uid = current_fsuid();
+	inode->i_gid = current_fsgid();
 }
 #define IS_DAX(i)		0
 #define IS_I_VERSION(i)		1

@@ -27,6 +27,7 @@
 #include "xfs_error.h"
 
 #include "xfs_icache.h"
+#include "xfs_inode_item.h"
 
 struct ic_shard;
 
@@ -41,6 +42,7 @@ struct ic_ent {
 	int			err;		/* ENT_FAILED: the load error */
 	bool			pinned;
 	bool			on_lru;
+	bool			dead;		/* freed on disk (inactive ran): drop when idle */
 };
 
 /*
@@ -113,6 +115,8 @@ static void ent_free(struct ic_ent *e)
 		break;
 	}
 	xfs_ifork_zap_attr(ip);
+	if (ip->i_itemp)
+		xfs_inode_item_destroy(ip);
 	if (ip->i_cowfp) {
 		xfs_idestroy_fork(ip->i_cowfp);
 		kmem_cache_free(xfs_ifork_cache, ip->i_cowfp);
@@ -234,7 +238,12 @@ static void lru_push(struct ic_shard *s, struct ic_ent *e)
 
 static inline bool evictable(const struct ic_ent *e)
 {
-	return !e->refs && !e->nlookup && !e->pinned;
+	/* like kernel reclaim: no log item attached to a cluster buffer, not pinned in the log */
+	const struct xfs_inode *ip = &e->ip;
+	bool clean = !ip->i_itemp || list_empty(&ip->i_itemp->ili_item.li_bio_list);
+
+	return !e->refs && !e->nlookup && !e->pinned && clean &&
+	       !atomic_read(&ip->i_pincount);
 }
 
 /* Called with the shard lock held. */
@@ -265,6 +274,13 @@ static void trim(struct wfs_xfs_icache *c, struct ic_shard *s)
 /* Re-file e after a reference dropped. Lock held. */
 static void release_locked(struct wfs_xfs_icache *c, struct ic_shard *s, struct ic_ent *e)
 {
+	if (e->dead && evictable(e)) {
+		if (e->on_lru)
+			lru_remove(s, e);
+		hash_unlink(c, s, e);
+		ent_free(e);
+		return;
+	}
 	if (evictable(e) && !e->on_lru) {
 		lru_push(s, e);
 		trim(c, s);
@@ -548,6 +564,28 @@ void wfs_xfs_ilookup_ref(struct xfs_inode *ip)
 
 	spin_lock(&e->sh->lock);
 	e->nlookup++;
+	spin_unlock(&e->sh->lock);
+}
+
+/* Host lookup references of ip (forget path decides inactive on 0). */
+uint64_t wfs_xfs_inlookup(struct xfs_inode *ip)
+{
+	struct ic_ent *e = ent_of(ip);
+	uint64_t n;
+
+	spin_lock(&e->sh->lock);
+	n = e->nlookup;
+	spin_unlock(&e->sh->lock);
+	return n;
+}
+
+/* The inode was freed on disk: drop the entry as soon as the last reference goes. */
+void wfs_xfs_idead(struct xfs_inode *ip)
+{
+	struct ic_ent *e = ent_of(ip);
+
+	spin_lock(&e->sh->lock);
+	e->dead = true;
 	spin_unlock(&e->sh->lock);
 }
 
