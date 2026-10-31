@@ -1,35 +1,37 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * XFS buffer cache for the read-only port (replaces fs/xfs/xfs_buf.c).
- * Design: docs/superpowers/specs/2026-10-29-m2-xfs-readonly-design.md 7.1.
+ * XFS buffer cache (replaces fs/xfs/xfs_buf.c). Design: M2 design 7.1 for the
+ * cache (sharded hash, byte-limited LRU), kernel xfs_buf.c for the buffer
+ * contract (M3a T2):
  *
- * Buffer life cycle (state, protected by the buffer's shard lock):
- *   EMPTY    created by xfs_buf_get_map, no data read yet
- *   READING  one thread is doing I/O and/or running the verifier; every other
- *            thread that wants the buffer sleeps on the shard condvar
- *            (single-flight). The buffer is in the hash but unusable.
- *   VALID    data present and verified (against vops); immutable from here on
- *   FAILED   I/O or verifier failed: removed from the hash at once (never
- *            cached), error kept for the waiters, freed with the last ref.
- *            A waiter whose ops differ from the failed verify's retries.
+ *   - lookups return a referenced buffer; get/read return it locked
+ *     (b_sema), and the caller unlocks and releases (xfs_buf_relse);
+ *   - XBF_DONE means the data is valid; a read happens under the lock, so two
+ *     threads never read the same block at once (single flight);
+ *   - a failed read stales the buffer: it stays hashed until its last
+ *     release, and a later lookup recycles it and reads again (no negative
+ *     caching); a stale buffer is freed at its last release;
+ *   - b_pin_count (incremented by the log while a buffer's changes are only
+ *     in the in-core log) holds off writes: xfs_buf_submit waits for unpin;
+ *   - delwri lists queue locked buffers for later write (xfs_buf_delwri_*);
+ *   - I/O is synchronous: an async write completes (buf_ioend) before
+ *     xfs_buf_submit returns, a sync one in xfs_buf_iowait;
+ *   - a metadata write error shuts the filesystem down (no retries).
  *
- * After a buffer is VALID its xfs_buf fields (b_ops, b_error, b_addr...) are
- * never written by the cache, so holders read them without locks. Re-verifying
- * a VALID buffer against other ops runs on a private copy of the xfs_buf
- * (verify_copy); only the private vops field changes, under the shard lock.
+ * Hardening kept from M2: a valid buffer requested with other verifier ops
+ * is verified again, on a private copy, so a block cannot pass as two types.
  *
- * Locks (lock order: shard.lock -> lru_lock):
- *   shard.lock  one of NSHARD mutexes; guards its hash chains plus every
- *               field of the buffers hashed in it (state, refs, onlru, hashed,
- *               err, vops) and the shard condvar's predicate
- *   lru_lock    guards the LRU list and its links
- * The evictor holds lru_lock and takes a shard lock only with trylock (the
- * opposite order of the normal one), so it cannot deadlock; a busy shard is
- * skipped. Invariant: a buffer is on the LRU iff hashed, refs == 0 and state
- * is VALID or EMPTY, so a buffer in use is never evicted.
- * usage (bytes of buffer data held, in-use ones included) is atomic; the limit
- * is soft: pinned buffers can push usage above it until they are released.
- * Memory comes from the shim allocator, so wfs_mem_set_cap is honoured.
+ * Locks (order: b_sema -> shard.lock -> lru_lock):
+ *   b_sema      the buffer lock: contents, b_flags, b_ops, b_error
+ *   shard.lock  one of NSHARD mutexes; hash chains and refs/onlru/hashed of
+ *               the buffers hashed in it
+ *   lru_lock    the LRU list
+ * The evictor holds lru_lock and takes a shard lock only with trylock, so it
+ * cannot deadlock; a busy shard is skipped. Only unreferenced buffers are on
+ * the LRU, and every lock owner, delwri list and log item holds a reference,
+ * so nothing in use, queued, dirty or pinned is ever evicted. usage (bytes of
+ * buffer data held) is atomic; the limit is soft. Memory comes from the shim
+ * allocator, so wfs_mem_set_cap is honoured.
  */
 #include "buf.h"
 #include "xfs_format.h"
@@ -40,34 +42,24 @@
 #include "xfs_error.h"
 #include "xfs_trans.h"
 #include "xfs_ag.h"
+#include "xfs_buf_item.h"
+#include "xfs_log.h"
 #include "wfs_xfs.h"
 
 /* test_buf links buf.c without libxfs; perag_up is never set there. */
 #pragma weak xfs_group_get
 #pragma weak xfs_group_put
 
+/* Write-path hooks (backends/xfs: mount.c, the log); weak so test_buf links buf.c alone. */
+#pragma weak wfs_xfs_is_shutdown
+#pragma weak wfs_xfs_force_shutdown
+#pragma weak xfs_buf_item_done
+#pragma weak xfs_log_force
+#pragma weak xfs_log_in_recovery
+
 #define NSHARD		64
 #define NBUCKET		512		/* per shard */
 #define MAX_BUF_BB	8192		/* 4 MiB sanity bound on one buffer */
-
-#ifdef _WIN32
-typedef struct { void *p; } wfs_cv_t;
-void InitializeConditionVariable(wfs_cv_t *);
-void WakeAllConditionVariable(wfs_cv_t *);
-int SleepConditionVariableSRW(wfs_cv_t *, wfs_srw_t *, unsigned long, unsigned long);
-static void cv_init(wfs_cv_t *c) { InitializeConditionVariable(c); }
-static void cv_wait(wfs_cv_t *c, struct mutex *m) { SleepConditionVariableSRW(c, &m->l, 0xFFFFFFFFul, 0); }
-static void cv_broadcast(wfs_cv_t *c) { WakeAllConditionVariable(c); }
-static void cv_destroy(wfs_cv_t *c) { (void)c; }
-#else
-typedef pthread_cond_t wfs_cv_t;
-static void cv_init(wfs_cv_t *c) { pthread_cond_init(c, NULL); }
-static void cv_wait(wfs_cv_t *c, struct mutex *m) { pthread_cond_wait(c, &m->l); }
-static void cv_broadcast(wfs_cv_t *c) { pthread_cond_broadcast(c); }
-static void cv_destroy(wfs_cv_t *c) { pthread_cond_destroy(c); }
-#endif
-
-enum { ST_EMPTY, ST_READING, ST_VALID, ST_FAILED };
 
 struct lru_node { struct lru_node *prev, *next; };
 
@@ -76,21 +68,22 @@ struct wfs_xbuf {
 	struct wfs_xbuf		*hnext;
 	struct lru_node		lru;
 	struct wfs_xfs_bcache	*c;
-	const struct xfs_buf_ops *vops;	/* ops the data was verified against */
-	const struct xfs_buf_ops *err_ops; /* ops of the failed verify (FAILED) */
-	bool			err_verify; /* FAILED by verifier, not by I/O */
+	/*
+	 * Ops the data was last verified against as requested by a reader
+	 * (buffer lock). A dispatching verifier (xfs_da3_node_buf_ops) switches
+	 * b_ops to the concrete type, so readers asking for the dispatcher again
+	 * must not count as "other ops" and pay a CRC each time.
+	 */
+	const struct xfs_buf_ops *vops;
 	size_t			bytes;
-	int			state;
-	int			refs;
-	int			err;		/* valid in FAILED */
+	int			refs;		/* b_hold */
 	unsigned int		shard;
-	bool			hashed;
+	bool			hashed;		/* false: uncached, or evicted/killed */
 	bool			onlru;
 };
 
 struct bshard {
 	struct mutex	lock;
-	wfs_cv_t	cv;
 	struct wfs_xbuf	*bucket[NBUCKET];
 };
 
@@ -106,11 +99,33 @@ struct wfs_xfs_bcache {
 struct wfs_bdev {
 	struct wfs_xfs_bcache	*c;
 	int			role;
+	struct block_device	bdev;	/* bt_bdev: bio I/O to the same device */
 };
 
 /* b_priv, not a cast: a verifier may be handed a private copy of the xfs_buf */
 static inline struct wfs_xbuf *WB(struct xfs_buf *bp) { return bp->b_priv; }
 static inline struct wfs_bdev *BD(struct xfs_buftarg *t) { return t->bt_priv; }
+
+static bool buf_shutdown(struct xfs_buf *bp)
+{
+	return bp->b_mount && wfs_xfs_is_shutdown && wfs_xfs_is_shutdown(bp->b_mount);
+}
+
+static void buf_force_shutdown(struct xfs_buf *bp, uint32_t flags)
+{
+	if (bp->b_mount && wfs_xfs_force_shutdown)
+		wfs_xfs_force_shutdown(bp->b_mount, flags);
+}
+
+static inline void set_flags(struct xfs_buf *bp, unsigned int f)
+{
+	WRITE_ONCE(bp->b_flags, bp->b_flags | f);
+}
+
+static inline void clear_flags(struct xfs_buf *bp, unsigned int f)
+{
+	WRITE_ONCE(bp->b_flags, bp->b_flags & ~f);
+}
 
 /* ---- cache object ------------------------------------------------------ */
 
@@ -126,10 +141,8 @@ struct wfs_xfs_bcache *wfs_xfs_bcache_create(const struct wfs_xfs_blk *blk,
 	c->limit = limit_bytes;
 	mutex_init(&c->lru_lock);
 	c->lru.prev = c->lru.next = &c->lru;
-	for (i = 0; i < NSHARD; i++) {
+	for (i = 0; i < NSHARD; i++)
 		mutex_init(&c->shard[i].lock);
-		cv_init(&c->shard[i].cv);
-	}
 	return c;
 }
 
@@ -140,10 +153,8 @@ void wfs_xfs_bcache_destroy(struct wfs_xfs_bcache *c)
 	if (!c)
 		return;
 	wfs_xfs_bcache_purge(c);
-	for (i = 0; i < NSHARD; i++) {
+	for (i = 0; i < NSHARD; i++)
 		mutex_destroy(&c->shard[i].lock);
-		cv_destroy(&c->shard[i].cv);
-	}
 	mutex_destroy(&c->lru_lock);
 	kfree(c);
 }
@@ -232,6 +243,10 @@ static void unhash(struct wfs_xbuf *wb)
 
 static void free_buf(struct wfs_xbuf *wb)
 {
+	ASSERT(!(wb->b.b_flags & _XBF_DELWRI_Q));
+	ASSERT(atomic_read(&wb->b.b_pin_count) == 0);
+	if (wb->b.b_pag && xfs_group_put)
+		xfs_perag_put(wb->b.b_pag);
 	__atomic_sub_fetch(&wb->c->usage, wb->bytes, __ATOMIC_RELAXED);
 	if (wb->b.b_maps != &wb->b.__b_map)
 		kfree(wb->b.b_maps);
@@ -239,7 +254,12 @@ static void free_buf(struct wfs_xbuf *wb)
 	kfree(wb);
 }
 
-/* Evict unreferenced buffers, LRU tail first, until usage <= target. */
+/*
+ * Evict unreferenced buffers, LRU tail first, until usage <= target. Only
+ * buffers with no holder are on the LRU, and every lock owner, delwri queue
+ * and log item holds a reference, so nothing locked, queued, dirty or pinned
+ * is ever evicted.
+ */
 static void evict_to(struct wfs_xfs_bcache *c, size_t target)
 {
 	while (__atomic_load_n(&c->usage, __ATOMIC_RELAXED) > target) {
@@ -302,7 +322,7 @@ static struct wfs_xbuf *alloc_buf(struct wfs_xfs_bcache *c,
 	 * Zeroed slack behind every buffer (defence in depth): libxfs forms
 	 * pointers from on-disk offsets and may read a few hundred bytes past a
 	 * bad one (a directory entry near the end of a block). The slack is not
-	 * counted in b_length or in the cache usage.
+	 * counted in b_length or in the cache usage, and never written to disk.
 	 */
 	wb->b.b_addr = kzalloc(wb->bytes + WFS_BUF_SLACK, 0);
 	if (!wb->b.b_addr)
@@ -322,9 +342,14 @@ static struct wfs_xbuf *alloc_buf(struct wfs_xfs_bcache *c,
 	wb->b.b_target = t;
 	wb->b.b_mount = t->bt_mount;
 	wb->b.b_priv = wb;
+	sema_init(&wb->b.b_sema, 1);	/* unlocked (kernel xfs_buf_alloc) */
+	atomic_set(&wb->b.b_pin_count, 0);
+	init_waitqueue_head(&wb->b.b_waiters);
+	INIT_LIST_HEAD(&wb->b.b_list);
+	INIT_LIST_HEAD(&wb->b.b_li_list);
+	INIT_LIST_HEAD(&wb->b.b_lru);
 	wb->c = c;
 	wb->refs = 1;
-	wb->state = ST_EMPTY;
 	__atomic_add_fetch(&c->usage, wb->bytes, __ATOMIC_RELAXED);
 	return wb;
 fail:
@@ -345,6 +370,24 @@ static struct wfs_xbuf *alloc_buf_retry(struct wfs_xfs_bcache *c,
 		wb = alloc_buf(c, t, m, nmaps, len);
 	}
 	return wb;
+}
+
+/*
+ * The AG of a data-device buffer, held for the buffer's life like the
+ * kernel's b_pag (write paths use agbp->b_pag). Buffers made before the
+ * perags exist (mount) get theirs on a later lookup. Shard lock held.
+ */
+static void attach_pag(struct wfs_xbuf *wb)
+{
+	struct xfs_buf *bp = &wb->b;
+	struct wfs_xfs *x;
+
+	if (bp->b_pag || !bp->b_mount || !xfs_group_get || BD(bp->b_target)->role != WFS_DEV_DATA)
+		return;
+	x = wfs_xfs_of(bp->b_mount);
+	if (x && x->perag_up)
+		bp->b_pag = xfs_perag_get(bp->b_mount,
+				xfs_daddr_to_agno(bp->b_mount, xfs_buf_daddr(bp)));
 }
 
 /* ---- lookup / creation ---------------------------------------------------- */
@@ -375,7 +418,7 @@ static int check_maps(struct xfs_buftarg *t, const struct xfs_buf_map *m,
 }
 
 /* shard lock held; takes a reference */
-static struct wfs_xbuf *find_locked(struct bshard *s, unsigned int h,
+static struct wfs_xbuf *find_ref(struct bshard *s, unsigned int h,
 		struct xfs_buftarg *t, const struct xfs_buf_map *m, int nmaps,
 		int len)
 {
@@ -391,14 +434,14 @@ static struct wfs_xbuf *find_locked(struct bshard *s, unsigned int h,
 			wb->onlru = false;
 		}
 		wb->refs++;
+		attach_pag(wb);
 		return wb;
 	}
 	return NULL;
 }
 
-static bool put_locked(struct wfs_xbuf *wb);
-
-static int buf_get(struct xfs_buftarg *t, const struct xfs_buf_map *m,
+/* Kernel xfs_find_get_buf: a referenced, unlocked buffer. */
+static int buf_find(struct xfs_buftarg *t, const struct xfs_buf_map *m,
 		int nmaps, xfs_buf_flags_t flags, struct wfs_xbuf **out)
 {
 	int len = check_maps(t, m, nmaps, true);
@@ -415,20 +458,7 @@ static int buf_get(struct xfs_buftarg *t, const struct xfs_buf_map *m,
 	s = &c->shard[si];
 
 	mutex_lock(&s->lock);
-	wb = find_locked(s, h, t, m, nmaps, len);
-	if (wb && (flags & XBF_INCORE)) {
-		/* never hand out a buffer that is still being read */
-		while (wb->state == ST_READING)
-			cv_wait(&s->cv, &s->lock);
-		if (wb->state == ST_FAILED) {
-			bool freeit = put_locked(wb);
-
-			mutex_unlock(&s->lock);
-			if (freeit)
-				free_buf(wb);
-			return -ENOENT;
-		}
-	}
+	wb = find_ref(s, h, t, m, nmaps, len);
 	mutex_unlock(&s->lock);
 	if (wb) {
 		*out = wb;
@@ -443,13 +473,14 @@ static int buf_get(struct xfs_buftarg *t, const struct xfs_buf_map *m,
 	nw->shard = si;
 
 	mutex_lock(&s->lock);
-	wb = find_locked(s, h, t, m, nmaps, len);	/* lost a race? */
+	wb = find_ref(s, h, t, m, nmaps, len);	/* lost a race? */
 	if (!wb) {
 		struct wfs_xbuf **head = &s->bucket[bucket_of(h)];
 
 		nw->hnext = *head;
 		*head = nw;
 		nw->hashed = true;
+		attach_pag(nw);
 		wb = nw;
 		nw = NULL;
 	}
@@ -461,167 +492,335 @@ static int buf_get(struct xfs_buftarg *t, const struct xfs_buf_map *m,
 	return 0;
 }
 
-/* ---- I/O and verification ------------------------------------------------- */
-
-static int buf_io(struct wfs_xbuf *wb)
+/* Kernel xfs_buf_find_lock: lock, and recycle a stale buffer for reuse. */
+static int buf_find_lock(struct xfs_buf *bp, xfs_buf_flags_t flags)
 {
-	struct xfs_buftarg *t = wb->b.b_target;
-	struct wfs_xfs_bcache *c = BD(t)->c;
+	if (flags & XBF_TRYLOCK) {
+		if (!xfs_buf_trylock(bp))
+			return -EAGAIN;
+	} else {
+		xfs_buf_lock(bp);
+	}
+	if (bp->b_flags & XBF_STALE) {
+		if (flags & XBF_LIVESCAN) {
+			xfs_buf_unlock(bp);
+			return -ENOENT;
+		}
+		ASSERT(!(bp->b_flags & _XBF_DELWRI_Q));
+		clear_flags(bp, ~0u);
+		bp->b_ops = NULL;
+		WB(bp)->vops = NULL;
+	}
+	return 0;
+}
+
+/* ---- reference counting --------------------------------------------------- */
+
+void xfs_buf_hold(struct xfs_buf *bp)
+{
+	struct wfs_xbuf *wb = WB(bp);
+	struct bshard *s = &wb->c->shard[wb->shard];
+
+	mutex_lock(&s->lock);
+	ASSERT(wb->refs > 0);
+	wb->refs++;
+	mutex_unlock(&s->lock);
+}
+
+/* Kernel xfs_buf_rele: the last reference parks the buffer on the LRU, or
+ * frees it when it is uncached or stale. */
+void xfs_buf_rele(struct xfs_buf *bp)
+{
+	struct wfs_xbuf *wb = WB(bp);
+	struct wfs_xfs_bcache *c = wb->c;
+	struct bshard *s = &c->shard[wb->shard];
+	bool freeit = false;
+
+	mutex_lock(&s->lock);
+	ASSERT(wb->refs > 0);
+	if (--wb->refs == 0) {
+		if (!wb->hashed || (bp->b_flags & XBF_STALE)) {
+			if (wb->hashed)
+				unhash(wb);
+			freeit = true;
+		} else {
+			mutex_lock(&c->lru_lock);
+			lru_push_mru(c, &wb->lru);
+			mutex_unlock(&c->lru_lock);
+			wb->onlru = true;
+		}
+	}
+	mutex_unlock(&s->lock);
+	if (freeit)
+		free_buf(wb);
+	else
+		evict_to_limit(c);
+}
+
+/* ---- locking and pinning (kernel semantics) ------------------------------ */
+
+int xfs_buf_trylock(struct xfs_buf *bp)
+{
+	return down_trylock(&bp->b_sema) == 0;
+}
+
+/*
+ * A stale, pinned buffer is being reallocated and stays locked until the log
+ * is pushed: push it ourselves rather than wait for someone else (kernel).
+ */
+void xfs_buf_lock(struct xfs_buf *bp)
+{
+	if (atomic_read(&bp->b_pin_count) && (bp->b_flags & XBF_STALE) && xfs_log_force)
+		xfs_log_force(bp->b_mount, 0);
+	down(&bp->b_sema);
+}
+
+void xfs_buf_unlock(struct xfs_buf *bp)
+{
+	ASSERT(xfs_buf_islocked(bp));
+	up(&bp->b_sema);
+}
+
+static void buf_wait_unpin(struct xfs_buf *bp)
+{
+	DECLARE_WAITQUEUE(wait, current);
+
+	if (atomic_read(&bp->b_pin_count) == 0)
+		return;
+	add_wait_queue(&bp->b_waiters, &wait);
+	for (;;) {
+		set_current_state(TASK_UNINTERRUPTIBLE);
+		if (atomic_read(&bp->b_pin_count) == 0)
+			break;
+		io_schedule();
+	}
+	remove_wait_queue(&bp->b_waiters, &wait);
+	set_current_state(TASK_RUNNING);
+}
+
+/* ---- I/O ------------------------------------------------------------------ */
+
+static int buf_rw(struct xfs_buf *bp, bool write)
+{
+	struct xfs_buftarg *t = bp->b_target;
+	const struct wfs_xfs_blk *blk = BD(t)->c->blk;
+	int role = BD(t)->role;
 	size_t pos = 0;
 	int i;
 
-	for (i = 0; i < wb->b.b_map_count; i++) {
-		size_t n = (size_t)wb->b.b_maps[i].bm_len << 9;
+	for (i = 0; i < bp->b_map_count; i++) {
+		size_t n = (size_t)bp->b_maps[i].bm_len << 9;
+		uint64_t off = (uint64_t)bp->b_maps[i].bm_bn << 9;
+		int err = write ? wfs_xfs_blk_write(blk, role, off, (char *)bp->b_addr + pos, n)
+				: wfs_xfs_blk_read(blk, role, off, (char *)bp->b_addr + pos, n);
 
-		if (wfs_xfs_blk_read(c->blk, BD(t)->role,
-				     (uint64_t)wb->b.b_maps[i].bm_bn << 9,
-				     (char *)wb->b.b_addr + pos, n) != 0)
+		if (err)
 			return -EIO;
 		pos += n;
 	}
 	return 0;
 }
 
-/* Runs ops->verify_read on bp; the result is whatever the verifier left in
- * b_error (set by itself or by xfs_verifier_error). Negative errno. */
+/*
+ * Run ops->verify_read on bp. AG btree verifiers read bp->b_pag (sibling
+ * range checks): a data-device block outside every AG fails here. Returns the
+ * verifier's result (negative errno) and leaves b_error clear.
+ */
 static int run_verify(struct xfs_buf *bp, const struct xfs_buf_ops *ops)
 {
-	struct xfs_perag *pag = NULL;
 	int err;
 
 	bp->b_error = 0;
 	if (ops && ops->verify_read) {
 		struct wfs_xfs *x = bp->b_mount ? wfs_xfs_of(bp->b_mount) : NULL;
+		struct xfs_buf_ops const *saved = bp->b_ops;
 
-		/*
-		 * AG btree verifiers read bp->b_pag (sibling range checks).
-		 * The cache does not hold a perag reference per buffer: borrow
-		 * one for the duration of the verifier only.
-		 */
-		if (x && x->perag_up && BD(bp->b_target)->role == WFS_DEV_DATA)
-			pag = xfs_perag_get(bp->b_mount,
-					xfs_daddr_to_agno(bp->b_mount, xfs_buf_daddr(bp)));
 		bp->b_ops = ops;
-		if (x && x->perag_up && BD(bp->b_target)->role == WFS_DEV_DATA && !pag) {
+		if (x && x->perag_up && BD(bp->b_target)->role == WFS_DEV_DATA && !bp->b_pag)
 			bp->b_error = -EFSCORRUPTED;	/* block outside every AG */
-		} else {
-			bp->b_pag = pag;
+		else
 			ops->verify_read(bp);
-			bp->b_pag = NULL;
-		}
-		if (pag)
-			xfs_perag_put(pag);
+		if (bp->b_error)
+			bp->b_ops = saved;
 	}
 	err = bp->b_error;
 	bp->b_error = 0;
 	return err > 0 ? -err : err;
 }
 
-/* Re-verify a shared VALID buffer on a private copy: no shared field is written. */
-static int verify_copy(struct wfs_xbuf *wb, const struct xfs_buf_ops *ops)
+/*
+ * Verify a valid buffer against other ops than it was read with, on a
+ * private copy (M2 hardening: the kernel trusts the first verifier; a hostile
+ * image could otherwise get one block type through as another).
+ */
+static int verify_copy(struct xfs_buf *bp, const struct xfs_buf_ops *ops)
 {
-	struct xfs_buf tmp = wb->b;
+	/* Only what verifiers read: the lock and wait queues are live elsewhere. */
+	struct xfs_buf tmp = {
+		.b_rhash_key	= bp->b_rhash_key,
+		.b_length	= bp->b_length,
+		.b_flags	= bp->b_flags,
+		.b_pag		= bp->b_pag,
+		.b_mount	= bp->b_mount,
+		.b_target	= bp->b_target,
+		.b_addr		= bp->b_addr,
+		.b_maps		= bp->b_maps,
+		.b_map_count	= bp->b_map_count,
+		.b_ops		= bp->b_ops,
+		.b_priv		= bp->b_priv,
+	};
 
 	return run_verify(&tmp, ops);
 }
 
-/* shard lock held; drops one reference */
-static bool put_locked(struct wfs_xbuf *wb)
+static bool buf_verify_write(struct xfs_buf *bp)
 {
-	struct wfs_xfs_bcache *c = wb->c;
-
-	if (--wb->refs > 0)
+	if (bp->b_ops) {
+		bp->b_error = 0;
+		bp->b_ops->verify_write(bp);
+		if (bp->b_error)
+			return false;
+	} else if (bp->b_rhash_key != XFS_BUF_DADDR_NULL) {
+		/* v5 only: every cached metadata write must carry ops */
+		xfs_warn(bp->b_mount, "no buf ops on daddr 0x%llx len %d",
+			 (unsigned long long)xfs_buf_daddr(bp), bp->b_length);
+		bp->b_error = -EFSCORRUPTED;
 		return false;
-	if (!wb->hashed || wb->state == ST_FAILED ||
-	    (wb->b.b_flags & XBF_STALE)) {
-		if (wb->hashed)
-			unhash(wb);
-		return true;			/* caller frees */
 	}
-	mutex_lock(&c->lru_lock);
-	lru_push_mru(c, &wb->lru);
-	mutex_unlock(&c->lru_lock);
-	wb->onlru = true;
+	return true;
+}
+
+static void buf_ioend(struct xfs_buf *bp);
+
+/*
+ * Kernel xfs_buf_submit. I/O is synchronous here: an async buffer is
+ * completed (buf_ioend) before this returns; a sync one is completed by
+ * xfs_buf_iowait, as in the kernel.
+ */
+static void buf_submit(struct xfs_buf *bp)
+{
+	ASSERT(!(bp->b_flags & _XBF_DELWRI_Q));
+	if (buf_shutdown(bp)) {
+		xfs_buf_ioerror(bp, -EIO);
+		goto ioerror;
+	}
+	if (bp->b_flags & XBF_WRITE)
+		buf_wait_unpin(bp);
+	bp->b_error = 0;
+	if (bp->b_flags & XBF_WRITE) {
+		if (!buf_verify_write(bp)) {
+			buf_force_shutdown(bp, SHUTDOWN_CORRUPT_INCORE);
+			goto ioerror;
+		}
+		if (buf_rw(bp, true))
+			xfs_buf_ioerror(bp, -EIO);
+	} else {
+		if (buf_rw(bp, false))
+			xfs_buf_ioerror(bp, -EIO);
+	}
+	goto end_io;
+ioerror:
+	clear_flags(bp, XBF_DONE);
+	xfs_buf_stale(bp);
+end_io:
+	if (bp->b_flags & XBF_ASYNC)
+		buf_ioend(bp);
+}
+
+/*
+ * A failed write. Policy (stricter than the kernel's configurable retries):
+ * any metadata write error shuts the filesystem down; the buffer is staled so
+ * its contents are never written later. Returns false: ioend continues.
+ */
+static bool buf_ioend_handle_error(struct xfs_buf *bp)
+{
+	if (!buf_shutdown(bp)) {
+		xfs_buf_ioerror_alert(bp, __this_address);
+		buf_force_shutdown(bp, SHUTDOWN_META_IO_ERROR);
+	}
+	if (bp->b_flags & XBF_ASYNC)
+		set_flags(bp, XBF_WRITE_FAIL);
+	xfs_buf_stale(bp);
+	set_flags(bp, XBF_DONE);
+	clear_flags(bp, XBF_WRITE);
 	return false;
 }
 
-#define FILL_RETRY	1	/* failed under other ops: caller looks the block up again */
-
-/*
- * Bring wb to VALID verified against ops, doing at most one read system-wide
- * (single-flight). Consumes the caller's reference unless it returns 0.
- */
-static int buf_fill(struct wfs_xbuf *wb, const struct xfs_buf_ops *ops)
+/* Kernel xfs_buf_ioend. */
+static void buf_ioend(struct xfs_buf *bp)
 {
-	struct bshard *s = &wb->c->shard[wb->shard];
-	bool freeit;
-	int err;
+	bool async = bp->b_flags & XBF_ASYNC;
 
-	mutex_lock(&s->lock);
-	for (;;) {
-		if (wb->state == ST_READING) {
-			cv_wait(&s->cv, &s->lock);
-			continue;
-		}
-		if (wb->state == ST_FAILED) {
-			err = wb->err;
-			if (wb->err_verify && wb->err_ops != ops)
-				err = FILL_RETRY;
-			goto drop;
-		}
-		if (wb->state == ST_VALID && (!ops || wb->vops == ops)) {
-			mutex_unlock(&s->lock);
-			return 0;
-		}
-		break;
-	}
+	if (bp->b_flags & XBF_READ) {
+		if (!bp->b_error && bp->b_ops) {
+			int err = run_verify(bp, bp->b_ops);
 
-	if (wb->state == ST_EMPTY) {
-		bool io_ok;
-
-		wb->state = ST_READING;
-		mutex_unlock(&s->lock);
-		err = buf_io(wb);
-		io_ok = !err;
-		if (!err)
-			err = run_verify(&wb->b, ops);
-		mutex_lock(&s->lock);
-		if (err) {
-			wb->state = ST_FAILED;	/* never cached */
-			wb->err = err;
-			wb->err_verify = io_ok;
-			wb->err_ops = ops;
-			if (wb->hashed)
-				unhash(wb);
-			wb->b.b_ops = NULL;
+			if (err)
+				xfs_buf_ioerror(bp, err);
+		}
+		if (!bp->b_error)
+			set_flags(bp, XBF_DONE);
+	} else {
+		if (unlikely(bp->b_error)) {
+			buf_ioend_handle_error(bp);
 		} else {
-			wb->state = ST_VALID;
-			wb->vops = ops;
-			wb->b.b_flags |= XBF_DONE;
+			clear_flags(bp, XBF_WRITE_FAIL);
+			set_flags(bp, XBF_DONE);
 		}
-		cv_broadcast(&s->cv);
-		if (!err) {
-			mutex_unlock(&s->lock);
-			return 0;
-		}
-		goto drop;
+		if (bp->b_log_item && xfs_buf_item_done)
+			xfs_buf_item_done(bp);
+		if (bp->b_iodone)
+			bp->b_iodone(bp);
 	}
+	clear_flags(bp, XBF_READ | XBF_WRITE | XBF_READ_AHEAD);
+	if (async)
+		xfs_buf_relse(bp);
+}
 
-	/* VALID, verified against other ops: re-verify like the kernel, on a copy */
-	mutex_unlock(&s->lock);
-	err = verify_copy(wb, ops);
-	mutex_lock(&s->lock);
-	if (!err) {
-		wb->vops = ops;
-		mutex_unlock(&s->lock);
-		return 0;
-	}
-drop:
-	freeit = put_locked(wb);
-	mutex_unlock(&s->lock);
-	if (freeit)
-		free_buf(wb);
-	return err;
+int xfs_buf_iowait(struct xfs_buf *bp)
+{
+	ASSERT(!(bp->b_flags & XBF_ASYNC));
+	buf_ioend(bp);
+	return bp->b_error;
+}
+
+void xfs_buf_submit(struct xfs_buf *bp)
+{
+	buf_submit(bp);
+}
+
+int _xfs_buf_read(struct xfs_buf *bp)
+{
+	ASSERT(bp->b_maps[0].bm_bn != XFS_BUF_DADDR_NULL);
+	clear_flags(bp, XBF_WRITE | XBF_ASYNC | XBF_READ_AHEAD | XBF_DONE);
+	set_flags(bp, XBF_READ);
+	buf_submit(bp);
+	return xfs_buf_iowait(bp);
+}
+
+int xfs_bwrite(struct xfs_buf *bp)
+{
+	int error;
+
+	ASSERT(xfs_buf_islocked(bp));
+	set_flags(bp, XBF_WRITE);
+	clear_flags(bp, XBF_ASYNC | XBF_READ | _XBF_DELWRI_Q | XBF_DONE);
+	buf_submit(bp);
+	error = xfs_buf_iowait(bp);
+	if (error)
+		buf_force_shutdown(bp, SHUTDOWN_META_IO_ERROR);
+	return error;
+}
+
+/* Fail a locked buffer's pending I/O (log shutdown paths). */
+void xfs_buf_fail(struct xfs_buf *bp)
+{
+	ASSERT(xfs_buf_islocked(bp));
+	set_flags(bp, XBF_ASYNC);
+	clear_flags(bp, XBF_DONE);
+	xfs_buf_stale(bp);
+	xfs_buf_ioerror(bp, -EIO);
+	buf_ioend(bp);
 }
 
 /* ---- xfs_buf API ------------------------------------------------------------ */
@@ -630,10 +829,20 @@ int xfs_buf_get_map(struct xfs_buftarg *target, struct xfs_buf_map *map,
 		int nmaps, xfs_buf_flags_t flags, struct xfs_buf **bpp)
 {
 	struct wfs_xbuf *wb;
-	int err = buf_get(target, map, nmaps, flags, &wb);
+	int err;
 
-	*bpp = err ? NULL : &wb->b;
-	return err;
+	*bpp = NULL;
+	err = buf_find(target, map, nmaps, flags, &wb);
+	if (err)
+		return err;
+	err = buf_find_lock(&wb->b, flags);
+	if (err) {
+		xfs_buf_rele(&wb->b);
+		return err;
+	}
+	xfs_buf_ioerror(&wb->b, 0);
+	*bpp = &wb->b;
+	return 0;
 }
 
 int xfs_buf_read_map(struct xfs_buftarg *target, struct xfs_buf_map *map,
@@ -641,20 +850,56 @@ int xfs_buf_read_map(struct xfs_buftarg *target, struct xfs_buf_map *map,
 		const struct xfs_buf_ops *ops, xfs_failaddr_t fa)
 {
 	struct wfs_xbuf *wb;
-	int err;
+	struct xfs_buf *bp;
+	int error;
 
 	(void)fa;
 	*bpp = NULL;
-	do {
-		err = buf_get(target, map, nmaps, flags & ~XBF_INCORE, &wb);
-		if (err)
-			return err;
-		err = buf_fill(wb, ops);
-	} while (err == FILL_RETRY);
-	if (err)
-		return err;
-	*bpp = &wb->b;
+	flags &= XBF_TRYLOCK;
+	error = buf_find(target, map, nmaps, flags, &wb);
+	if (error)
+		return error;
+	bp = &wb->b;
+	error = buf_find_lock(bp, flags);
+	if (error) {
+		xfs_buf_rele(bp);
+		return error;
+	}
+	if (bp->b_flags & XBF_DONE) {
+		if (ops && !bp->b_ops) {
+			error = run_verify(bp, ops);
+			if (error)
+				clear_flags(bp, XBF_DONE);
+			else
+				wb->vops = ops;
+		} else if (ops && bp->b_ops != ops && wb->vops != ops) {
+			error = verify_copy(bp, ops);
+			if (error) {	/* the cached copy stays good for its own type */
+				xfs_buf_relse(bp);
+				return error == -EFSBADCRC ? -EFSCORRUPTED : error;
+			}
+			wb->vops = ops;
+		}
+	} else {
+		bp->b_ops = ops;
+		error = _xfs_buf_read(bp);
+		if (!error)
+			wb->vops = ops;
+	}
+	if (error)
+		goto out_ioerror;
+	*bpp = bp;
 	return 0;
+
+out_ioerror:
+	if (!buf_shutdown(bp) && error == -EIO)
+		xfs_buf_ioerror_alert(bp, fa);
+	clear_flags(bp, XBF_DONE);
+	bp->b_ops = NULL;
+	wb->vops = NULL;
+	xfs_buf_stale(bp);
+	xfs_buf_relse(bp);
+	return error == -EFSBADCRC ? -EFSCORRUPTED : error;
 }
 
 void xfs_buf_readahead_map(struct xfs_buftarg *target, struct xfs_buf_map *map,
@@ -663,6 +908,7 @@ void xfs_buf_readahead_map(struct xfs_buftarg *target, struct xfs_buf_map *map,
 	(void)target; (void)map; (void)nmaps; (void)ops;	/* design 7.1: no-op */
 }
 
+/* An uncached buffer, returned locked (kernel). */
 int xfs_buf_get_uncached(struct xfs_buftarg *target, size_t numblks,
 		struct xfs_buf **bpp)
 {
@@ -681,7 +927,7 @@ int xfs_buf_get_uncached(struct xfs_buftarg *target, size_t numblks,
 	if (!wb)
 		return -ENOMEM;
 	wb->shard = (unsigned int)(((uintptr_t)wb >> 6) % NSHARD);
-	wb->state = ST_VALID;
+	xfs_buf_lock(&wb->b);
 	*bpp = &wb->b;
 	return 0;
 }
@@ -691,7 +937,6 @@ int xfs_buf_read_uncached(struct xfs_buftarg *target, xfs_daddr_t daddr,
 		const struct xfs_buf_ops *ops)
 {
 	struct xfs_buf *bp;
-	struct wfs_xbuf *wb;
 	int err;
 
 	*bpp = NULL;
@@ -704,79 +949,51 @@ int xfs_buf_read_uncached(struct xfs_buftarg *target, xfs_daddr_t daddr,
 	err = xfs_buf_get_uncached(target, numblks, &bp);
 	if (err)
 		return err;
-	wb = WB(bp);
+	bp->b_rhash_key = XFS_BUF_DADDR_NULL;
 	bp->b_maps[0].bm_bn = daddr;
-	bp->b_rhash_key = daddr;
-	err = buf_io(wb);
-	if (!err)
-		err = run_verify(bp, ops);
+	set_flags(bp, XBF_READ);
+	bp->b_ops = ops;
+	buf_submit(bp);
+	err = xfs_buf_iowait(bp);
 	if (err) {
-		xfs_buf_rele(bp);
-		return err;
+		xfs_buf_relse(bp);
+		return err == -EFSBADCRC ? -EFSCORRUPTED : err;
 	}
-	wb->vops = ops;
-	bp->b_flags |= XBF_DONE;
 	*bpp = bp;
 	return 0;
 }
 
-/* Re-read into an existing buffer (verifying against its b_ops). */
-int _xfs_buf_read(struct xfs_buf *bp)
-{
-	struct wfs_xbuf *wb = WB(bp);
-	int err = buf_io(wb);
+/* ---- state ------------------------------------------------------------------ */
 
-	if (!err)
-		err = run_verify(bp, bp->b_ops);
-	if (err)
-		bp->b_flags &= ~XBF_DONE;
-	else
-		bp->b_flags |= XBF_DONE;
-	return err;
-}
+void xfs_buf_set_uptodate(struct xfs_buf *bp) { set_flags(bp, XBF_DONE); }
 
-void xfs_buf_hold(struct xfs_buf *bp)
-{
-	struct wfs_xbuf *wb = WB(bp);
-	struct bshard *s = &wb->c->shard[wb->shard];
-
-	mutex_lock(&s->lock);
-	wb->refs++;
-	mutex_unlock(&s->lock);
-}
-
-void xfs_buf_rele(struct xfs_buf *bp)
-{
-	struct wfs_xbuf *wb = WB(bp);
-	struct wfs_xfs_bcache *c = wb->c;
-	struct bshard *s = &c->shard[wb->shard];
-	bool freeit;
-
-	mutex_lock(&s->lock);
-	freeit = put_locked(wb);
-	mutex_unlock(&s->lock);
-	if (freeit)
-		free_buf(wb);
-	else
-		evict_to_limit(c);
-}
-
+/* Kernel: stale buffers stay hashed (a lookup recycles them) and are freed
+ * at their last release instead of going to the LRU. */
 void xfs_buf_stale(struct xfs_buf *bp)
 {
 	struct wfs_xbuf *wb = WB(bp);
 	struct bshard *s = &wb->c->shard[wb->shard];
 
+	ASSERT(xfs_buf_islocked(bp));
+	set_flags(bp, XBF_STALE);
+	clear_flags(bp, _XBF_DELWRI_Q);
 	mutex_lock(&s->lock);
-	bp->b_flags |= XBF_STALE;
-	if (wb->hashed)
-		unhash(wb);	/* later lookups make a fresh buffer */
+	if (wb->onlru) {	/* cannot be: the caller holds a reference */
+		mutex_lock(&wb->c->lru_lock);
+		lru_unlink(&wb->lru);
+		mutex_unlock(&wb->c->lru_lock);
+		wb->onlru = false;
+	}
 	mutex_unlock(&s->lock);
 }
 
-void xfs_buf_clear_stale(struct xfs_buf *bp) { bp->b_flags &= ~XBF_STALE; }
-void xfs_buf_set_uptodate(struct xfs_buf *bp) { bp->b_flags |= XBF_DONE; }
+void xfs_buf_clear_stale(struct xfs_buf *bp)
+{
+	ASSERT(bp->b_flags & XBF_STALE);
+	clear_flags(bp, XBF_STALE);
+}
+
 void xfs_buf_set_ref(struct xfs_buf *bp, int lru_ref) { (void)bp; (void)lru_ref; }
-void xfs_buf_fail(struct xfs_buf *bp) { (void)bp; }
 
 void __xfs_buf_ioerror(struct xfs_buf *bp, int error, xfs_failaddr_t failaddr)
 {
@@ -807,8 +1024,7 @@ void xfs_buf_corruption_error(struct xfs_buf *bp, xfs_failaddr_t fa)
 
 /*
  * Real libxfs verifiers report corruption only through these and rely on them
- * to leave the error in b_error, which run_verify() turns into a failed,
- * uncached read.
+ * to leave the error in b_error, which run_verify() turns into a failed read.
  */
 void xfs_verifier_error(struct xfs_buf *bp, int error, xfs_failaddr_t failaddr)
 {
@@ -834,10 +1050,6 @@ void xfs_buf_verifier_error(struct xfs_buf *bp, int error, const char *name,
 		bp->b_error = error;
 }
 
-/* Read-only mount: nothing is ever written. */
-int xfs_bwrite(struct xfs_buf *bp) { (void)bp; return -EROFS; }
-/* xfs_buf_delwri_submit/queue: -EROFS/false stubs live in stubs_ro.c */
-
 /* A buftarg without a mount is only used for v5 metadata here: assume CRC. */
 static int buf_magic_idx(const struct xfs_buf *bp)
 {
@@ -862,6 +1074,134 @@ bool xfs_verify_magic16(struct xfs_buf *bp, __be16 dmagic)
 	return dmagic == bp->b_ops->magic16[idx];
 }
 
+/* ---- delayed write lists (kernel semantics) ------------------------------- */
+
+static void buf_list_del(struct xfs_buf *bp)
+{
+	list_del_init(&bp->b_list);
+	wake_up_var(&bp->b_list);
+}
+
+void xfs_buf_delwri_cancel(struct list_head *list)
+{
+	struct xfs_buf *bp;
+
+	while (!list_empty(list)) {
+		bp = list_first_entry(list, struct xfs_buf, b_list);
+		xfs_buf_lock(bp);
+		clear_flags(bp, _XBF_DELWRI_Q);
+		buf_list_del(bp);
+		xfs_buf_relse(bp);
+	}
+}
+
+bool xfs_buf_delwri_queue(struct xfs_buf *bp, struct list_head *list)
+{
+	ASSERT(xfs_buf_islocked(bp));
+	ASSERT(!(bp->b_flags & XBF_READ));
+	if (bp->b_flags & _XBF_DELWRI_Q)
+		return false;
+	set_flags(bp, _XBF_DELWRI_Q);
+	if (list_empty(&bp->b_list)) {
+		xfs_buf_hold(bp);
+		list_add_tail(&bp->b_list, list);
+	}
+	return true;
+}
+
+void xfs_buf_delwri_queue_here(struct xfs_buf *bp, struct list_head *buffer_list)
+{
+	while (!list_empty(&bp->b_list)) {
+		xfs_buf_unlock(bp);
+		wait_var_event(&bp->b_list, list_empty(&bp->b_list));
+		xfs_buf_lock(bp);
+	}
+	ASSERT(!(bp->b_flags & _XBF_DELWRI_Q));
+	xfs_buf_delwri_queue(bp, buffer_list);
+}
+
+static int buf_cmp(void *priv, const struct list_head *a, const struct list_head *b)
+{
+	struct xfs_buf *ap = container_of(a, struct xfs_buf, b_list);
+	struct xfs_buf *bp = container_of(b, struct xfs_buf, b_list);
+	xfs_daddr_t diff = ap->b_maps[0].bm_bn - bp->b_maps[0].bm_bn;
+
+	(void)priv;
+	return diff < 0 ? -1 : diff > 0;
+}
+
+static bool delwri_submit_prep(struct xfs_buf *bp)
+{
+	if (!(bp->b_flags & _XBF_DELWRI_Q)) {	/* cancelled (staled) meanwhile */
+		buf_list_del(bp);
+		xfs_buf_relse(bp);
+		return false;
+	}
+	clear_flags(bp, _XBF_DELWRI_Q);
+	set_flags(bp, XBF_WRITE);
+	return true;
+}
+
+int xfs_buf_delwri_submit_nowait(struct list_head *buffer_list)
+{
+	struct xfs_buf *bp, *n;
+	int pinned = 0;
+
+	list_sort(NULL, buffer_list, buf_cmp);
+	list_for_each_entry_safe(bp, n, buffer_list, b_list) {
+		if (!xfs_buf_trylock(bp))
+			continue;
+		if (xfs_buf_ispinned(bp)) {
+			xfs_buf_unlock(bp);
+			pinned++;
+			continue;
+		}
+		if (!delwri_submit_prep(bp))
+			continue;
+		set_flags(bp, XBF_ASYNC);
+		buf_list_del(bp);
+		buf_submit(bp);
+	}
+	return pinned;
+}
+
+int xfs_buf_delwri_submit(struct list_head *buffer_list)
+{
+	LIST_HEAD(wait_list);
+	int error = 0, error2;
+	struct xfs_buf *bp, *n;
+
+	list_sort(NULL, buffer_list, buf_cmp);
+	list_for_each_entry_safe(bp, n, buffer_list, b_list) {
+		xfs_buf_lock(bp);
+		if (!delwri_submit_prep(bp))
+			continue;
+		clear_flags(bp, XBF_ASYNC);
+		list_move_tail(&bp->b_list, &wait_list);
+		buf_submit(bp);
+	}
+	while (!list_empty(&wait_list)) {
+		bp = list_first_entry(&wait_list, struct xfs_buf, b_list);
+		buf_list_del(bp);
+		error2 = xfs_buf_iowait(bp);
+		xfs_buf_relse(bp);
+		if (!error)
+			error = error2;
+	}
+	return error;
+}
+
+/* ---- buftarg ---------------------------------------------------------------- */
+
+/* No read-ahead and no I/O completion work queue: nothing is in flight. */
+void xfs_buftarg_wait(struct xfs_buftarg *btp) { (void)btp; }
+
+/* Drop every unreferenced buffer of the cache (log quiesce, unmount). */
+void xfs_buftarg_drain(struct xfs_buftarg *btp)
+{
+	wfs_xfs_bcache_purge(BD(btp)->c);
+}
+
 /* ---- buftarg binding ---------------------------------------------------------- */
 
 int wfs_xfs_buftarg_bind(struct xfs_buftarg *bt, struct wfs_xfs_bcache *c,
@@ -877,8 +1217,11 @@ int wfs_xfs_buftarg_bind(struct xfs_buftarg *bt, struct wfs_xfs_bcache *c,
 		return -ENOMEM;
 	bd->c = c;
 	bd->role = role;
+	bd->bdev.wfs_blk = c->blk;
+	bd->bdev.wfs_role = role;
 	ss = c->blk->sector_size[role] ? c->blk->sector_size[role] : 512;
 	bt->bt_priv = bd;
+	bt->bt_bdev = &bd->bdev;
 	bt->bt_meta_sectorsize = ss;
 	bt->bt_meta_sectormask = ss - 1;
 	bt->bt_logical_sectorsize = ss;
@@ -891,6 +1234,7 @@ void wfs_xfs_buftarg_unbind(struct xfs_buftarg *bt)
 {
 	kfree(bt->bt_priv);
 	bt->bt_priv = NULL;
+	bt->bt_bdev = NULL;
 }
 
 /*

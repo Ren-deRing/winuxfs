@@ -464,6 +464,17 @@ void xfs_irele(struct xfs_inode *ip)
 	spin_unlock(&s->lock);
 }
 
+/* ihold(): another transient reference, released by xfs_irele(). */
+void wfs_xfs_ihold(struct inode *inode)
+{
+	struct ic_ent *e = ent_of(XFS_I(inode));
+
+	spin_lock(&e->sh->lock);
+	ASSERT(e->refs > 0);	/* the kernel's ihold also requires a held inode */
+	e->refs++;
+	spin_unlock(&e->sh->lock);
+}
+
 void wfs_xfs_ilookup_ref(struct xfs_inode *ip)
 {
 	struct ic_ent *e = ent_of(ip);

@@ -1,0 +1,3 @@
+# Vendored byte for byte from the Linux kernel (GPL-2.0-or-later; see docs/licensing.md).
+# Check: (cd third_party/linux-lib && sha256sum -c SOURCE.sha256)
+# commit: d135ab453a7400a34930bdda1ef4bdc8acfac80e

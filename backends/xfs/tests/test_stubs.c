@@ -23,7 +23,6 @@ int xfs_trans_alloc(struct xfs_mount *, struct xfs_trans_res *, unsigned, unsign
 int xfs_trans_commit(struct xfs_trans *);
 int xfs_defer_finish(struct xfs_trans **);
 int xfs_trans_roll(struct xfs_trans **);
-int xfs_buf_delwri_submit(struct list_head *);
 int xfs_dec_freecounter(struct xfs_mount *, int, uint64_t, bool);
 void xfs_trans_log_inode(struct xfs_trans *, struct xfs_inode *, unsigned);
 void xfs_fs_mark_sick(struct xfs_mount *, unsigned);
@@ -52,7 +51,6 @@ int main(void)
 	CHECK(xfs_trans_commit(NULL) == -EROFS);
 	CHECK(xfs_defer_finish(&tp) == -EROFS);
 	CHECK(xfs_trans_roll(&tp) == -EROFS);
-	CHECK(xfs_buf_delwri_submit(NULL) == -EROFS);
 	CHECK(xfs_dec_freecounter(NULL, 0, 1, false) == -EROFS);
 	xfs_trans_log_inode(NULL, NULL, 0);
 	xfs_fs_mark_sick(NULL, 0);

@@ -24,13 +24,14 @@ SANFLAGS = $(if $(SAN),-fsanitize=address$(comma)undefined -fno-sanitize-recover
 KERNEL_XFS_SRC ?= $(firstword $(wildcard ../../third_party/linux-xfs))
 INC = -Ishim -I../../include
 SHIM_SRC = $(wildcard shim/*.c)
-SHIM_HDR = $(wildcard shim/*.h shim/*.inc) ../../include/winuxfs/errno.h
+LINUXLIB_STAMP = $(OUT)/gen/linux-lib/.patched
+SHIM_HDR = $(wildcard shim/*.h shim/linux/*.h shim/*.inc) ../../include/winuxfs/errno.h $(LINUXLIB_STAMP)
 LIBS = $(if $(CROSS),,-pthread)
 
 TEST = $(OUT)/test_shim$(EXE)
 PROBE = $(OUT)/ondisk_probe.o
 HAVE_KERNEL = $(and $(KERNEL_XFS_SRC),$(wildcard $(KERNEL_XFS_SRC)/libxfs/xfs_ondisk.h))
-KINC = -I$(KERNEL_XFS_SRC)/libxfs -I$(KERNEL_XFS_SRC)
+KINC = -I$(KERNEL_XFS_SRC)/libxfs -I$(KERNEL_XFS_SRC) -I$(OUT)/gen/linux-lib/include
 
 all: test-shim-build
 
@@ -86,7 +87,7 @@ LIBXFS_NAMES = xfs_sb xfs_ag xfs_group xfs_types xfs_bit xfs_ialloc xfs_ialloc_b
 LIBXFS_OBJ = $(addprefix $(OUT)/libxfs/,$(addsuffix .o,$(LIBXFS_NAMES)))
 # Backend code (entry, stubs, later tasks' files); mk/*.mk fragments append to
 # BACKEND_SRC (prerequisite lists expand at parse time, so add files here, not in mk/). Weak PENDING stubs live in stubs_pending.c.
-BACKEND_SRC += entry_stub.c stubs_ro.c buf.c logcheck.c mount.c options.c icache.c inomap.c statfs.c read.c dir.c xfs_dir2_readdir.c
+BACKEND_SRC += entry_stub.c stubs_ro.c buf.c bio.c logcheck.c mount.c options.c icache.c inomap.c statfs.c read.c dir.c xfs_dir2_readdir.c
 BACKEND_OBJ = $(addprefix $(OUT)/be/,$(BACKEND_SRC:.c=.o))
 # PENDING stubs: one object per stub in an archive that is searched last, so
 # a real definition in any directly linked object replaces the stub.
@@ -94,6 +95,8 @@ PENDING_SYMS = $(sort $(shell grep -o 'WFS_ONLY_[A-Za-z0-9_]*' stubs_pending.c |
 PENDING_OBJ = $(addprefix $(OUT)/pending/,$(addsuffix .o,$(PENDING_SYMS)))
 PENDING_LIB = $(OUT)/libxfs_pending.a
 SHIM_OBJ = $(patsubst shim/%.c,$(OUT)/shim/%.o,$(SHIM_SRC))
+# Kernel lib/ objects (mk/linuxlib.mk).
+LIB_OBJ = $(OUT)/lib/rbtree.o
 EXT = $(if $(CROSS),dll,so)
 PLUGIN_DIR ?= ../../target/plugins$(if $(CROSS),-win,)
 PLUGIN = $(PLUGIN_DIR)/winuxfs_backend_xfs.$(EXT)
@@ -124,7 +127,7 @@ $(PENDING_LIB): $(PENDING_OBJ)
 
 libxfs-objs: $(LIBXFS_OBJ)
 
-$(PLUGIN): $(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB)
+$(PLUGIN): $(LIBXFS_OBJ) $(SHIM_OBJ) $(LIB_OBJ) $(BACKEND_OBJ) $(PENDING_LIB)
 	@mkdir -p $(PLUGIN_DIR)
 	$(CC) $(SANFLAGS) -shared -Wl,--gc-sections -Wl,--no-undefined -o $@ $^ $(if $(CROSS),-static -lpthread,-pthread)
 
@@ -134,7 +137,7 @@ plugin: $(PLUGIN)
 # 29 files, not only those reachable from today's entry point, so later tasks
 # never meet a new unresolved symbol. Not shipped.
 FULL = $(OUT)/full_check.$(EXT)
-$(FULL): $(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB)
+$(FULL): $(LIBXFS_OBJ) $(SHIM_OBJ) $(LIB_OBJ) $(BACKEND_OBJ) $(PENDING_LIB)
 	$(CC) $(SANFLAGS) -shared -Wl,--no-gc-sections -Wl,--no-undefined -o $@ $^ $(if $(CROSS),-static -lpthread,-pthread)
 
 link-full: $(FULL)

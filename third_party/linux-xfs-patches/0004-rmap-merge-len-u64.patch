@@ -1,0 +1,41 @@
+SPDX-License-Identifier: GPL-2.0
+Widen the rmap merge length checks to 64 bits (LLP64).
+
+Why: three "can these records merge" checks add up to three 32-bit
+block counts in `unsigned long` and compare against XFS_RMAP_LEN_MAX
+(2^32 - 1). On Linux x86-64 `unsigned long` is 64 bits so the sum cannot
+wrap; on Windows x64 it is 32 bits, the sum wraps, and an over-long
+merge would pass the check and write an invalid rmap record.
+Why not a shim: `unsigned long` cannot be redefined for one expression.
+Scope: compiled from M3 on (rmap updates); unused while rmapbt is
+read-only.
+
+--- a/xfs_rmap.c	2026-10-31 23:11:29.715990159 +0900
++++ b/xfs_rmap.c	2026-10-31 23:11:29.717990250 +0900
+@@ -1120,7 +1120,7 @@
+ 		if (have_gt &&
+ 		    bno + len == gtrec.rm_startblock &&
+ 		    (ignore_off || offset + len == gtrec.rm_offset) &&
+-		    (unsigned long)ltrec.rm_blockcount + len +
++		    (unsigned long long)ltrec.rm_blockcount + len +
+ 				gtrec.rm_blockcount <= XFS_RMAP_LEN_MAX) {
+ 			/*
+ 			 * right edge also contiguous, delete right record
+@@ -1384,7 +1384,7 @@
+ 			 RMAP_RIGHT_FILLING | RMAP_RIGHT_CONTIG)) ==
+ 	    (RMAP_LEFT_FILLING | RMAP_LEFT_CONTIG |
+ 	     RMAP_RIGHT_FILLING | RMAP_RIGHT_CONTIG) &&
+-	    (unsigned long)LEFT.rm_blockcount + len +
++	    (unsigned long long)LEFT.rm_blockcount + len +
+ 	     RIGHT.rm_blockcount > XFS_RMAP_LEN_MAX)
+ 		state &= ~RMAP_RIGHT_CONTIG;
+ 
+@@ -1850,7 +1850,7 @@
+ 			 RMAP_RIGHT_FILLING | RMAP_RIGHT_CONTIG)) ==
+ 	    (RMAP_LEFT_FILLING | RMAP_LEFT_CONTIG |
+ 	     RMAP_RIGHT_FILLING | RMAP_RIGHT_CONTIG) &&
+-	    (unsigned long)LEFT.rm_blockcount + len +
++	    (unsigned long long)LEFT.rm_blockcount + len +
+ 	     RIGHT.rm_blockcount > XFS_RMAP_LEN_MAX)
+ 		state &= ~RMAP_RIGHT_CONTIG;
+ 

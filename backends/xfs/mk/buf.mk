@@ -3,7 +3,7 @@
 $(OUT)/be/buf.o: LIBXFS_BE_WNO = $(LIBXFS_WNO)
 BUF_TEST = $(OUT)/test_buf$(EXE)
 BUF_TSAN = $(OUT)/test_buf_tsan$(EXE)
-BUF_INC = $(LIBXFS_WNO) $(INC) -I. -I$(KERNEL_XFS_SRC)/libxfs -I$(KERNEL_XFS_SRC)
+BUF_INC = $(LIBXFS_WNO) $(INC) -I. $(KINC)
 BUF_SRC = buf.c tests/test_buf.c $(SHIM_SRC)
 BUF_DEPS = $(BUF_SRC) blk.h $(SHIM_HDR) Makefile mk/buf.mk
 
