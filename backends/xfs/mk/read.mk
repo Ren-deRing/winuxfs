@@ -3,9 +3,9 @@
 # (read.c is in BACKEND_SRC). Shares the fixture cache with mount.mk (FIXDIR).
 $(OUT)/be/read.o: LIBXFS_BE_WNO = $(LIBXFS_WNO)
 READ_TEST = $(OUT)/test_read$(EXE)
-$(READ_TEST): tests/test_read.c $(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) ops.h icache.h wfs_xfs.h Makefile mk/read.mk | $(OUT)
+$(READ_TEST): tests/test_read.c $(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) ops.h icache.h wfs_xfs.h Makefile mk/read.mk | $(OUT)
 	$(CC) $(CFLAGS) $(LIBXFS_WNO) -Wno-format-truncation $(SANFLAGS) $(INC) $(KINC) -I. -o $@ tests/test_read.c \
-		$(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
+		$(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
 
 test-read:
 ifneq ($(CROSS),)

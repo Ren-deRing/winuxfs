@@ -46,6 +46,7 @@ struct xfs_buftarg {
 	xfs_daddr_t		bt_nr_sectors;
 	void			*bt_priv;	/* backend: host device handle */
 	struct block_device	*bt_bdev;	/* bio I/O (log): same device */
+	unsigned int		bt_awu_min, bt_awu_max;	/* atomic writes: none (0) */
 };
 
 struct xfs_buf_map {
@@ -198,6 +199,7 @@ int xfs_buf_delwri_submit_nowait(struct list_head *);
 void xfs_buftarg_wait(struct xfs_buftarg *);
 void xfs_buftarg_drain(struct xfs_buftarg *);
 static inline bool xfs_buftarg_is_mem(struct xfs_buftarg *bt) { (void)bt; return false; }
+static inline bool xfs_readonly_buftarg(struct xfs_buftarg *bt) { return bdev_read_only(bt->bt_bdev); }
 static inline bool xfs_buf_is_uncached(struct xfs_buf *bp) { return bp->b_rhash_key == XFS_BUF_DADDR_NULL; }
 static inline xfs_daddr_t xfs_buf_daddr(struct xfs_buf *bp)
 {

@@ -56,10 +56,13 @@ void msleep(unsigned int msecs);
 
 struct task_struct {
 	unsigned int	flags;		/* PF_* (bookkeeping only) */
+	u32		fsuid, fsgid;	/* owner for inodes this thread creates */
 	char		comm[16];
 	void		*wfs_priv;	/* wfs_sched.c */
 };
 struct task_struct *wfs_current(void);
+/* Set the owner the next inode creations on this thread get. */
+void wfs_set_current_fsids(u32 uid, u32 gid);
 #define current			wfs_current()
 
 void wfs_set_current_state(long state);

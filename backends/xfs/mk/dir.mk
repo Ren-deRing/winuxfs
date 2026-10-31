@@ -45,9 +45,9 @@ $(OUT)/be/dir.o: LIBXFS_BE_WNO = $(LIBXFS_WNO)
 $(OUT)/libxfs/%.o: SANFLAGS += $(if $(SAN),-fno-sanitize=alignment)
 
 DIR_TEST = $(OUT)/test_dir$(EXE)
-$(DIR_TEST): tests/test_dir.c $(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) icache.h wfs_xfs.h Makefile mk/dir.mk | $(OUT)
+$(DIR_TEST): tests/test_dir.c $(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) icache.h wfs_xfs.h Makefile mk/dir.mk | $(OUT)
 	$(CC) $(CFLAGS) $(LIBXFS_WNO) -Wno-format-truncation $(SANFLAGS) $(INC) $(KINC) -I. -o $@ tests/test_dir.c \
-		$(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
+		$(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
 
 test-dir:
 ifneq ($(CROSS),)
@@ -70,9 +70,9 @@ test-dir-san:
 
 # Host performance baseline (docs/xfs-backend.md): make bench-dir IMG=... DIR=/many [FILE=/f]
 BENCH_DIR = $(OUT)/bench_dir$(EXE)
-$(BENCH_DIR): tests/bench_dir.c $(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) icache.h wfs_xfs.h Makefile mk/dir.mk | $(OUT)
+$(BENCH_DIR): tests/bench_dir.c $(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) icache.h wfs_xfs.h Makefile mk/dir.mk | $(OUT)
 	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(INC) $(KINC) -I. -o $@ tests/bench_dir.c \
-		$(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
+		$(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
 bench-dir:
 	$(MAKE) --no-print-directory $(BENCH_DIR)
 	$(BENCH_DIR) $(IMG) $(DIR) $(FILE)

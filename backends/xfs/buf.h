@@ -30,5 +30,7 @@ void wfs_xfs_bcache_purge(struct wfs_xfs_bcache *c);
 int wfs_xfs_buftarg_bind(struct xfs_buftarg *bt, struct wfs_xfs_bcache *c,
 		int role);
 void wfs_xfs_buftarg_unbind(struct xfs_buftarg *bt);
+/* A read-only mount: the kernel code sees a read-only device (xfs_readonly_buftarg). */
+void wfs_xfs_buftarg_set_read_only(struct xfs_buftarg *bt);
 
 #endif

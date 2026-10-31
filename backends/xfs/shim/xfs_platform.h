@@ -10,9 +10,14 @@
 #ifndef _XFS_PLATFORM_H
 #define _XFS_PLATFORM_H
 
+/* Kernel-only struct members (busy extent trees, perag work items) are used
+ * by the write path: libxfs is compiled as the kernel compiles it. */
+#define __KERNEL__ 1
+
 #include "wfs_shim.h"
 #include <linux/rbtree.h>	/* third_party/linux-lib, patched for LLP64 */
 #include "wfs_bio.h"
+#include "wfs_vfs.h"
 
 /* Config: read-only port, RT devices readable, no quota/scrub/debug. */
 #define CONFIG_XFS_RT 1
@@ -34,10 +39,13 @@ typedef unsigned long long	sector_t;
 typedef __u32			dev_t_;
 
 #include "xfs_stats.h"
+#include "xfs_sysfs.h"
 #include "xfs_drain.h"
 #include "xfs_hooks.h"
 #include "xfs_types.h"
 #include "xfs_fs.h"
+#include "xfs_super.h"
+#include "xfs_iops.h"
 #include "wfs_cksum.h"
 #include "xfs_buf.h"
 #include "xfs_message.h"

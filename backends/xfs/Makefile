@@ -14,11 +14,13 @@ CROSS ?=
 CC = $(CROSS)gcc
 OUT ?= ../../target/xfs-shim$(if $(CROSS),-win,)
 EXE = $(if $(CROSS),.exe,)
-CFLAGS ?= -O2 -g -std=gnu11 -Wall -Wextra -Werror -ffunction-sections -fdata-sections
+CFLAGS ?= -O2 -g -std=gnu11 -fno-strict-aliasing -Wall -Wextra -Werror -ffunction-sections -fdata-sections
 # Vendored kernel code is not -Wextra clean (the kernel never builds with it):
 # shim code and tests keep the strict flags, kernel-derived objects add these.
 LIBXFS_WNO = -Wno-sign-compare -Wno-unused-parameter -Wno-missing-field-initializers \
-	-Wno-type-limits -Wno-implicit-fallthrough -Wno-empty-body -Wno-override-init -Wno-parentheses -Wno-address-of-packed-member
+	-Wno-type-limits -Wno-implicit-fallthrough -Wno-empty-body -Wno-override-init -Wno-parentheses -Wno-address-of-packed-member \
+	-Wno-pointer-sign -Wno-unused-but-set-variable -Wno-pointer-to-int-cast \
+	-Wno-stringop-overflow  # as the kernel Makefile (GCC 11+ false positives on flex arrays)
 comma = ,
 SANFLAGS = $(if $(SAN),-fsanitize=address$(comma)undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
 KERNEL_XFS_SRC ?= $(firstword $(wildcard ../../third_party/linux-xfs))
@@ -83,11 +85,13 @@ LIBXFS_NAMES = xfs_sb xfs_ag xfs_group xfs_types xfs_bit xfs_ialloc xfs_ialloc_b
 	xfs_alloc xfs_alloc_btree xfs_btree xfs_bmap xfs_bmap_btree xfs_iext_tree \
 	xfs_inode_buf xfs_inode_fork xfs_inode_util xfs_da_btree xfs_dir2 xfs_dir2_block \
 	xfs_dir2_data xfs_dir2_leaf xfs_dir2_node xfs_dir2_sf xfs_symlink_remote \
-	xfs_attr_leaf xfs_rtgroup xfs_metafile xfs_rmap_btree xfs_refcount_btree
+	xfs_attr_leaf xfs_rtgroup xfs_metafile xfs_rmap_btree xfs_refcount_btree \
+	xfs_defer xfs_trans_resv xfs_trans_space xfs_log_rlimit xfs_trans_inode xfs_ag_resv \
+	xfs_btree_staging xfs_rmap xfs_refcount xfs_attr xfs_attr_remote
 LIBXFS_OBJ = $(addprefix $(OUT)/libxfs/,$(addsuffix .o,$(LIBXFS_NAMES)))
 # Backend code (entry, stubs, later tasks' files); mk/*.mk fragments append to
 # BACKEND_SRC (prerequisite lists expand at parse time, so add files here, not in mk/). Weak PENDING stubs live in stubs_pending.c.
-BACKEND_SRC += entry_stub.c stubs_ro.c buf.c bio.c logcheck.c mount.c options.c icache.c inomap.c statfs.c read.c dir.c xfs_dir2_readdir.c
+BACKEND_SRC += entry_stub.c stubs_ro.c glue.c kinit.c buf.c bio.c logcheck.c mount.c options.c icache.c inomap.c statfs.c read.c dir.c xfs_dir2_readdir.c
 BACKEND_OBJ = $(addprefix $(OUT)/be/,$(BACKEND_SRC:.c=.o))
 # PENDING stubs: one object per stub in an archive that is searched last, so
 # a real definition in any directly linked object replaces the stub.
@@ -95,8 +99,18 @@ PENDING_SYMS = $(sort $(shell grep -o 'WFS_ONLY_[A-Za-z0-9_]*' stubs_pending.c |
 PENDING_OBJ = $(addprefix $(OUT)/pending/,$(addsuffix .o,$(PENDING_SYMS)))
 PENDING_LIB = $(OUT)/libxfs_pending.a
 SHIM_OBJ = $(patsubst shim/%.c,$(OUT)/shim/%.o,$(SHIM_SRC))
+# M3 top-level fs/xfs objects (mk/m3.mk; the list is there, the objects here
+# because prerequisite lists expand at parse time).
+M3_TOP_NAMES = xfs_log xfs_log_cil xfs_trans xfs_trans_buf xfs_trans_ail xfs_buf_item \
+	xfs_buf_item_recover xfs_inode_item xfs_inode_item_recover xfs_icreate_item \
+	xfs_iunlink_item xfs_extfree_item xfs_extent_busy xfs_inode xfs_bmap_util \
+	xfs_bmap_item xfs_rmap_item xfs_refcount_item xfs_attr_item xfs_attr_inactive \
+	xfs_log_recover
+M3_OBJ = $(addprefix $(OUT)/m3/,$(addsuffix .o,$(M3_TOP_NAMES)))
 # Kernel lib/ objects (mk/linuxlib.mk).
 LIB_OBJ = $(OUT)/lib/rbtree.o
+# Every kernel-derived object a test binary or the plugin links.
+CORE_OBJ = $(LIBXFS_OBJ) $(M3_OBJ) $(LIB_OBJ)
 EXT = $(if $(CROSS),dll,so)
 PLUGIN_DIR ?= ../../target/plugins$(if $(CROSS),-win,)
 PLUGIN = $(PLUGIN_DIR)/winuxfs_backend_xfs.$(EXT)
@@ -114,6 +128,8 @@ $(OUT)/shim/%.o: shim/%.c $(SHIM_HDR) Makefile
 	$(CC) $(CFLAGS) $(SANFLAGS) $(PIC) $(VIS) $(INC) -c -o $@ $<
 # stubs include kernel headers: kernel-code warning relaxations apply
 $(OUT)/be/stubs_%.o: LIBXFS_BE_WNO = $(LIBXFS_WNO)
+$(OUT)/be/glue.o: LIBXFS_BE_WNO = $(LIBXFS_WNO)
+$(OUT)/be/kinit.o: LIBXFS_BE_WNO = $(LIBXFS_WNO)
 $(OUT)/be/%.o: %.c $(SHIM_HDR) Makefile
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LIBXFS_BE_WNO) $(SANFLAGS) $(PIC) $(VIS) $(INC) $(KINC) -c -o $@ $<
@@ -127,7 +143,7 @@ $(PENDING_LIB): $(PENDING_OBJ)
 
 libxfs-objs: $(LIBXFS_OBJ)
 
-$(PLUGIN): $(LIBXFS_OBJ) $(SHIM_OBJ) $(LIB_OBJ) $(BACKEND_OBJ) $(PENDING_LIB)
+$(PLUGIN): $(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB)
 	@mkdir -p $(PLUGIN_DIR)
 	$(CC) $(SANFLAGS) -shared -Wl,--gc-sections -Wl,--no-undefined -o $@ $^ $(if $(CROSS),-static -lpthread,-pthread)
 
@@ -137,7 +153,7 @@ plugin: $(PLUGIN)
 # 29 files, not only those reachable from today's entry point, so later tasks
 # never meet a new unresolved symbol. Not shipped.
 FULL = $(OUT)/full_check.$(EXT)
-$(FULL): $(LIBXFS_OBJ) $(SHIM_OBJ) $(LIB_OBJ) $(BACKEND_OBJ) $(PENDING_LIB)
+$(FULL): $(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB)
 	$(CC) $(SANFLAGS) -shared -Wl,--no-gc-sections -Wl,--no-undefined -o $@ $^ $(if $(CROSS),-static -lpthread,-pthread)
 
 link-full: $(FULL)
@@ -157,6 +173,10 @@ endif
 
 clean-objs:
 	rm -rf $(OUT)/libxfs
+
+print-core-count:
+	@echo $(words $(LIBXFS_OBJ) $(M3_OBJ))
+.PHONY: print-core-count
 
 test-link:
 	sh tests/test_link.sh

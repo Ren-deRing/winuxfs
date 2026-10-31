@@ -7,7 +7,7 @@
  * one process stay independent.
  *
  * Ownership and lifetime
- *   x->mp          the libxfs xfs_mount (embedded; mp.m_wfs points back to x)
+ *   x->mp          the libxfs xfs_mount (embedded: wfs_xfs_of() is container_of)
  *   x->blk         host devices + sector/size info; the buffer cache reads
  *                  through it and everything must outlive the cache
  *   x->bcache      metadata buffer cache (buf.c), one per mount
@@ -49,6 +49,7 @@
 
 struct wfs_xfs {
 	struct xfs_mount	mp;
+	struct super_block	sb;		/* mp.m_super */
 	const wfs_host_api	*api;
 	struct wfs_xfs_blk	blk;
 	struct wfs_xfs_bcache	*bcache;
@@ -58,22 +59,22 @@ struct wfs_xfs {
 	int			log_role;	/* WFS_DEV_DATA or WFS_DEV_LOG, -1 none */
 	bool			perag_up, rtg_up;	/* groups need freeing */
 	bool			root_loaded;	/* Task 8: wfs_xfs_load_root() succeeded */
+	bool			kinit;		/* holds a wfs_xfs_kinit_get() reference */
 	void			*icache;	/* Task 8 */
 	uint64_t		mem_budget;	/* added to the process allocation cap while mounted */
-	uint32_t		shutdown;	/* SHUTDOWN_* flags; nonzero = shut down (atomic) */
 };
 
 /*
- * Filesystem shutdown (kernel xfs_force_shutdown): after a metadata write or
- * log error, or in-core corruption, every later change fails and nothing more
- * is written. Reads keep working. The first call logs the reason.
+ * Filesystem shutdown (glue.c, kernel xfs_do_force_shutdown): after a metadata
+ * write or log error, or in-core corruption, every later change fails and
+ * nothing more is written. Reads keep working. The first call logs the reason.
  */
 bool wfs_xfs_is_shutdown(struct xfs_mount *mp);
 void wfs_xfs_force_shutdown(struct xfs_mount *mp, uint32_t flags);
 
 static inline struct wfs_xfs *wfs_xfs_of(struct xfs_mount *mp)
 {
-	return (struct wfs_xfs *)mp->m_wfs;
+	return container_of(mp, struct wfs_xfs, mp);
 }
 
 /* Kernel errno (negative or positive; libxfs/buf cache) -> -WFS_E*. */

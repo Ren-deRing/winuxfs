@@ -55,6 +55,19 @@ static inline int wfs_xfs_blk_read(const struct wfs_xfs_blk *b, int role,
 	return b->api->blk_read(b->dev[role], off, buf, len);
 }
 
+/* The host opened the device read-only (or there is no host: test fakes
+ * without a write hook count as read-only). */
+static inline bool wfs_xfs_blk_read_only(const struct wfs_xfs_blk *b, int role)
+{
+	if (role < 0 || role >= WFS_DEV_COUNT)
+		return true;
+	if (b->write)
+		return false;
+	if (!b->api || !b->dev[role] || !b->api->blk_read_only)
+		return true;
+	return b->api->blk_read_only(b->dev[role]) != 0;
+}
+
 /* 0 or -WFS_Exxx. Never called on a read-only mount (M2 contract). */
 static inline int wfs_xfs_blk_write(const struct wfs_xfs_blk *b, int role,
 		uint64_t off, const void *buf, size_t len)

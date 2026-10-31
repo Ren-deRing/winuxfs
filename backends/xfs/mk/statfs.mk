@@ -3,9 +3,9 @@
 # Makefile (statfs.c is in BACKEND_SRC). Fixture images: FIXDIR from mount.mk.
 $(OUT)/be/statfs.o: LIBXFS_BE_WNO = $(LIBXFS_WNO)
 STATFS_TEST = $(OUT)/test_statfs$(EXE)
-$(STATFS_TEST): tests/test_statfs.c $(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) ops.h wfs_xfs.h Makefile mk/statfs.mk | $(OUT)
+$(STATFS_TEST): tests/test_statfs.c $(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) ops.h wfs_xfs.h Makefile mk/statfs.mk | $(OUT)
 	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(INC) $(KINC) -I. -o $@ tests/test_statfs.c \
-		$(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
+		$(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
 
 test-statfs:
 ifneq ($(CROSS),)

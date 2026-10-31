@@ -35,4 +35,7 @@ xfs_aligned_fsb_count(xfs_fileoff_t offset_fsb, xfs_filblks_t count_fsb, xfs_ext
 	}
 	return count_fsb;
 }
+/* Zero a byte range of a file (the data write path, M3a T7). */
+int xfs_zero_range(struct xfs_inode *ip, loff_t pos, loff_t len,
+		struct xfs_zone_alloc_ctx *ac, bool *did_zero);
 #endif

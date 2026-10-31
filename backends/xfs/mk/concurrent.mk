@@ -9,9 +9,9 @@ CONC_TEST = $(OUT)/test_concurrent$(EXE)
 ifneq ($(TSAN),)
 SANFLAGS = -fsanitize=thread -fno-omit-frame-pointer
 endif
-$(CONC_TEST): tests/test_concurrent.c $(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) icache.h ops.h wfs_xfs.h Makefile mk/concurrent.mk | $(OUT)
+$(CONC_TEST): tests/test_concurrent.c $(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) icache.h ops.h wfs_xfs.h Makefile mk/concurrent.mk | $(OUT)
 	$(CC) $(CFLAGS) $(LIBXFS_WNO) -Wno-format-truncation $(SANFLAGS) $(INC) $(KINC) -I. -o $@ tests/test_concurrent.c \
-		$(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
+		$(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
 
 test-concurrent:
 ifneq ($(CROSS),)

@@ -42,6 +42,9 @@
 #include "xfs_log.h"
 #include "logcheck.h"
 #include "icache.h"
+#include "kinit.h"
+#include "xfs_trans.h"
+#include "xfs_trans_priv.h"	/* xfs_trans_init */
 #include <stdarg.h>
 #include <stdio.h>
 
@@ -397,7 +400,9 @@ static int read_sb(struct wfs_xfs *x)
 		return sb_verdict(error);
 	}
 	xfs_sb_from_disk(&mp->m_sb, bp->b_addr);
-	xfs_buf_relse(bp);
+	/* kernel xfs_readsb: the mount keeps the superblock buffer, unlocked */
+	mp->m_sb_bp = bp;
+	xfs_buf_unlock(bp);
 	mp->m_features |= xfs_sb_version_to_features(&mp->m_sb);
 	xfs_reinit_percpu_counters(mp);
 	return 0;
@@ -547,7 +552,6 @@ static int init_groups(struct wfs_xfs *x)
 {
 	struct xfs_mount *mp = &x->mp;
 	struct xfs_sb *sbp = &mp->m_sb;
-	xfs_agnumber_t agno;
 	int error;
 
 	error = xfs_initialize_perag(mp, 0, sbp->sb_agcount, sbp->sb_dblocks, &mp->m_maxagi);
@@ -562,6 +566,17 @@ static int init_groups(struct wfs_xfs *x)
 		return error;
 	}
 	x->rtg_up = true;
+	return 0;
+}
+
+/* After the log is up (kernel order): AGF verifiers check LSNs against it. */
+static int read_agfs(struct wfs_xfs *x)
+{
+	struct xfs_mount *mp = &x->mp;
+	struct xfs_sb *sbp = &mp->m_sb;
+	xfs_agnumber_t agno;
+	int error;
+
 	/* statfs needs the btree block counts of every AG (design 5.6) */
 	for (agno = 0; agno < sbp->sb_agcount; agno++) {
 		struct xfs_perag *pag = xfs_perag_get(mp, agno);
@@ -651,6 +666,19 @@ static void free_mount(struct wfs_xfs *x)
 	int r;
 
 	wfs_xfs_unload_root(x);
+	if (mp->m_log) {
+		xfs_log_unmount(mp);	/* read-only: quiesces, writes nothing */
+		mp->m_log = NULL;
+	}
+	if (mp->m_sync_workqueue)
+		destroy_workqueue(mp->m_sync_workqueue);
+	if (mp->m_sb_bp) {		/* kernel xfs_freesb */
+		struct xfs_buf *bp = mp->m_sb_bp;
+
+		xfs_buf_lock(bp);
+		mp->m_sb_bp = NULL;
+		xfs_buf_relse(bp);
+	}
 	/* Cached buffers hold perag references (b_pag): drop them first. */
 	if (x->bcache)
 		wfs_xfs_bcache_purge(x->bcache);
@@ -670,6 +698,8 @@ static void free_mount(struct wfs_xfs *x)
 	if (x->bcache)
 		wfs_xfs_bcache_destroy(x->bcache);
 	log_detach();
+	if (x->kinit)
+		wfs_xfs_kinit_put();
 	if (x->mem_budget)
 		wfs_mem_mount_budget(-(int64_t)x->mem_budget);
 	kfree(x);
@@ -698,7 +728,9 @@ wfs_err_t wfs_xfs_mount(const wfs_host_api *api, wfs_blkdev *const devs[WFS_DEV_
 	mp = &x->mp;
 	x->api = api;
 	x->log_role = -1;
-	mp->m_wfs = x;
+	mp->m_super = &x->sb;
+	x->sb.s_fs_info = mp;
+	x->sb.s_maxbytes = LLONG_MAX;	/* kernel: MAX_LFS_FILESIZE on 64-bit */
 	log_attach(api);
 
 	{
@@ -761,7 +793,21 @@ wfs_err_t wfs_xfs_mount(const wfs_host_api *api, wfs_blkdev *const devs[WFS_DEV_
 	error = init_groups(x);
 	if (error)
 		goto fail;
-	/* 6 */
+	/* 6: transaction reservations, process-wide caches, work queues, log */
+	xfs_trans_init(mp);
+	error = wfs_xfs_kinit_get();
+	if (error)
+		goto fail;
+	x->kinit = true;
+	mp->m_sync_workqueue = alloc_workqueue("xfs-sync", XFS_WQFLAGS(WQ_FREEZABLE), 0);
+	if (!mp->m_sync_workqueue) {
+		error = -ENOMEM;
+		goto fail;
+	}
+	/* read-only: the log must not write (stale block clearing, covering) */
+	for (r = 0; r < WFS_DEV_COUNT; r++)
+		if (x->bt_bound[r])
+			wfs_xfs_buftarg_set_read_only(&x->bt[r]);
 	if (mp->m_logdev_targp) {
 		error = xfs_log_mount_ro_check(mp, x->opts.norecovery, &log_dirty);
 		if (error) {
@@ -770,11 +816,28 @@ wfs_err_t wfs_xfs_mount(const wfs_host_api *api, wfs_blkdev *const devs[WFS_DEV_
 				       "recovery (use the norecovery option)");
 			goto fail;
 		}
+		error = xfs_log_mount(mp, mp->m_logdev_targp,
+				      XFS_FSB_TO_DADDR(mp, mp->m_sb.sb_logstart),
+				      XFS_FSB_TO_BB(mp, mp->m_sb.sb_logblocks));
+		if (error) {
+			LOGMSG(x, 0, "xfs: log mount failed (%d)", error);
+			goto fail;
+		}
 	}
+	error = read_agfs(x);
+	if (error)
+		goto fail;
 	/* 7 */
 	error = wfs_xfs_load_root(x);
 	if (error)
 		goto fail;
+	if (mp->m_log) {
+		error = xfs_log_mount_finish(mp);
+		if (error) {
+			LOGMSG(x, 0, "xfs: log mount finish failed (%d)", error);
+			goto fail;
+		}
+	}
 	/* 8 */
 	error = check_summary_counts(x, log_dirty);
 	if (error)
@@ -820,39 +883,4 @@ wfs_err_t wfs_xfs_probe(const wfs_host_api *api, wfs_blkdev *const devs[WFS_DEV_
 	if ((be16_to_cpu(dsb->sb_versionnum) & XFS_SB_VERSION_NUMBITS) != XFS_SB_VERSION_5)
 		return -WFS_EINVAL;
 	return 0;
-}
-
-/*
- * xfs_log_check_lsn: the AGF/AGFL verifiers ask whether a metadata LSN lies
- * ahead of the log head (an inconsistency left by xfs_repair -L). This mount
- * is read-only and never replays or writes the log, so the check is not
- * enforced: a metadata block is accepted whatever LSN it carries. That is the
- * safe direction for reading (the check is a diagnostic, never a bounds
- * property of the data) and a real definition, not a placeholder, so nothing is
- * logged per mount. A stricter check would need the log head, which a
- * norecovery mount may not have; revisit if a write backend lands (M3).
- */
-bool xfs_log_check_lsn(struct xfs_mount *mp, xfs_lsn_t lsn)
-{
-	(void)mp;
-	(void)lsn;
-	return true;
-}
-
-bool wfs_xfs_is_shutdown(struct xfs_mount *mp)
-{
-	struct wfs_xfs *x = wfs_xfs_of(mp);
-
-	return x && __atomic_load_n(&x->shutdown, __ATOMIC_ACQUIRE) != 0;
-}
-
-void wfs_xfs_force_shutdown(struct xfs_mount *mp, uint32_t flags)
-{
-	struct wfs_xfs *x = wfs_xfs_of(mp);
-
-	if (!x || !flags)
-		return;
-	if (__atomic_fetch_or(&x->shutdown, flags, __ATOMIC_ACQ_REL) == 0)
-		xfs_alert(mp, "filesystem shut down (reason 0x%x): no further changes are written",
-			  (unsigned int)flags);
 }

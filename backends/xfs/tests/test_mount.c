@@ -915,7 +915,8 @@ static void mount_unmount_leaves_no_leaks(void)
 	CHECK(wfs_mem_used() == mem_base);
 }
 
-/* xfs_log_check_lsn is a real definition (read-only: no LSN enforcement) and mounting logs nothing about it */
+/* xfs_log_check_lsn is the kernel's (the log is mounted): past LSNs pass, an LSN
+ * ahead of the log head is rejected, and mounting logs nothing about it */
 bool xfs_log_check_lsn(struct xfs_mount *, xfs_lsn_t);
 static void log_check_lsn_is_real_and_silent(void)
 {
@@ -924,10 +925,11 @@ static void log_check_lsn_is_real_and_silent(void)
 	NEED(tools_mkfs, "mkfs.xfs");
 	CHECK_RC(mnt_open(&m, base_img, NULL, NULL, "", 512), 0);
 	if (m.x) {
+		CHECK(m.x->mp.m_log != NULL);
 		CHECK(!log_has("xfs_log_check_lsn"));
 		CHECK(!log_has("pending"));
 		CHECK(xfs_log_check_lsn(&m.x->mp, 1));
-		CHECK(xfs_log_check_lsn(&m.x->mp, (xfs_lsn_t)0x7fffffffffffffffLL));
+		CHECK(!xfs_log_check_lsn(&m.x->mp, (xfs_lsn_t)0x7fffffff00000000LL));
 		mnt_unmount(&m);
 	}
 }

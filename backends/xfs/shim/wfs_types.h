@@ -152,6 +152,15 @@ typedef int64_t __kernel_loff_t;
 #define __iomem
 #define __counted_by(x)
 #define ____cacheline_aligned
+#define ____cacheline_aligned_in_smp
+/* sparse lock annotations */
+#define __releases(x)
+#define __acquires(x)
+#define __must_hold(x)
+#define __releases_shared(x)
+#define __acquires_shared(x)
+#define __must_hold_shared(x)
+#define __cond_acquires(x)
 #define __cacheline_aligned
 #define fallthrough	__attribute__((fallthrough))
 #define barrier()	__asm__ __volatile__("" ::: "memory")
@@ -432,11 +441,13 @@ struct iov_iter;
 /* TSan does not model fences: a seq_cst RMW on a shared word orders as well. */
 static long wfs_mb_word __attribute__((unused));
 #define smp_mb()		((void)__atomic_fetch_add(&wfs_mb_word, 0, __ATOMIC_SEQ_CST))
+#define smp_rmb()		smp_mb()
+#define smp_wmb()		smp_mb()
 #else
 #define smp_mb()		__atomic_thread_fence(__ATOMIC_SEQ_CST)
-#endif
 #define smp_rmb()		__atomic_thread_fence(__ATOMIC_ACQUIRE)
 #define smp_wmb()		__atomic_thread_fence(__ATOMIC_RELEASE)
+#endif
 
 
 #define _THIS_IP_		({ __label__ __l; __l: (uintptr_t)&&__l; })
@@ -469,8 +480,11 @@ static inline void *memchr_inv(const void *p, int c, size_t n)
 static inline u32 get_random_u32(void) { return (u32)rand() ^ ((u32)rand() << 16); }
 #define GLOBAL_ROOT_UID		0u
 #define GLOBAL_ROOT_GID		0u
-#define current_fsuid()		0u
-#define current_fsgid()		0u
+/* Calling thread's file-system ids (wfs_sched.c: per task, set by the glue). */
+u32 wfs_current_fsuid(void);
+u32 wfs_current_fsgid(void);
+#define current_fsuid()		wfs_current_fsuid()
+#define current_fsgid()		wfs_current_fsgid()
 /* ffz: first zero bit (word-size independent of LLP64). */
 #define ffz(x)			((unsigned long)__builtin_ctzl(~(unsigned long)(x)))
 /* Take a type or an object expression; optional gfp flags. */

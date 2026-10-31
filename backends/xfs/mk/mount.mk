@@ -12,9 +12,9 @@ MOUNT_TEST = $(OUT)/test_mount$(EXE)
 FIXDIR ?= $(abspath $(shell git rev-parse --git-common-dir 2>/dev/null)/../target/xfs-fixtures)
 ROOTFIX ?= ../../tests/xfs/root-fixtures
 BE_NOENTRY = $(filter-out $(OUT)/be/entry_stub.o,$(BACKEND_OBJ))
-$(MOUNT_TEST): tests/test_mount.c $(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) mount.h wfs_xfs.h Makefile mk/mount.mk | $(OUT)
+$(MOUNT_TEST): tests/test_mount.c $(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) mount.h wfs_xfs.h Makefile mk/mount.mk | $(OUT)
 	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(INC) $(KINC) -I. -o $@ tests/test_mount.c \
-		$(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
+		$(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
 
 # Regenerate when the generator or the manifest tool changes.
 $(FIXDIR)/.done: ../../tools/gen-fixtures.sh ../../tools/xfs_manifest.py

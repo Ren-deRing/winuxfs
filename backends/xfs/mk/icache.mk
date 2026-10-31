@@ -2,9 +2,9 @@
 # Inode cache + getattr (Task 8): make test-icache [SAN=1]. Included from Makefile.
 $(OUT)/be/icache.o $(OUT)/be/inomap.o: LIBXFS_BE_WNO = $(LIBXFS_WNO)
 ICACHE_TEST = $(OUT)/test_icache$(EXE)
-$(ICACHE_TEST): tests/test_icache.c $(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) icache.h wfs_xfs.h Makefile mk/icache.mk | $(OUT)
+$(ICACHE_TEST): tests/test_icache.c $(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) icache.h wfs_xfs.h Makefile mk/icache.mk | $(OUT)
 	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(INC) $(KINC) -I. -o $@ tests/test_icache.c \
-		$(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
+		$(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
 
 test-icache:
 ifneq ($(CROSS),)

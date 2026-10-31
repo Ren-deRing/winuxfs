@@ -36,9 +36,9 @@ endif
 # cache. Needs libxfs objects (as test-link) and mkfs.xfs; SKIPPED otherwise.
 AGF_TEST = $(OUT)/test_buf_agf$(EXE)
 AGF_IMG = $(OUT)/agf.img
-$(AGF_TEST): tests/test_buf_agf.c $(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) buf.h blk.h
+$(AGF_TEST): tests/test_buf_agf.c $(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) buf.h blk.h
 	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(BUF_INC) -o $@ tests/test_buf_agf.c \
-		$(LIBXFS_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
+		$(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
 $(AGF_IMG): | $(OUT)
 	rm -f $@; truncate -s 300m $@
 	mkfs.xfs -q -f -m crc=1 -b size=4096 -d agcount=2 $@
