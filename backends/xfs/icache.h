@@ -68,6 +68,7 @@ int wfs_xfs_host_iget_err(int error);	/* host-supplied ino: stale handle -> ESTA
 int wfs_xfs_dirent_iget_err(int error);	/* dirent target: unallocated -> EUCLEAN */
 
 /* design 8.2: fill *st from a held inode. -WFS_EUCLEAN for an unknown type. */
+int wfs_xfs_truncate(struct wfs_xfs *x, struct xfs_inode *ip, uint64_t newsize);
 int wfs_xfs_fill_stat(struct xfs_inode *ip, wfs_stat *st);
 
 #endif

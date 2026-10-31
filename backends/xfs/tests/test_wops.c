@@ -301,7 +301,9 @@ static void setattr_basic(void)
 	n.size = 0;
 	CHECK_RC(wfs_xfs_op_setattr(m.x, a, &n, WFS_SET_SIZE), 0);	/* no change */
 	n.size = 10;
-	CHECK_RC(wfs_xfs_op_setattr(m.x, a, &n, WFS_SET_SIZE), -WFS_EOPNOTSUPP);	/* T7 */
+	CHECK_RC(wfs_xfs_op_setattr(m.x, a, &n, WFS_SET_SIZE), 0);	/* grows (T7) */
+	CHECK_RC(wfs_xfs_op_getattr(m.x, a, &st), 0);
+	CHECK(st.size == 10);
 	CHECK_RC(mnt_close(&m), 0);
 	CHECK(repair_clean(img));
 	CHECK_RC(mnt_open(&m, img, "", false), 0);	/* persisted across remount */
