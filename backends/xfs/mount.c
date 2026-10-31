@@ -651,6 +651,9 @@ static void free_mount(struct wfs_xfs *x)
 	int r;
 
 	wfs_xfs_unload_root(x);
+	/* Cached buffers hold perag references (b_pag): drop them first. */
+	if (x->bcache)
+		wfs_xfs_bcache_purge(x->bcache);
 	if (x->rtg_up)
 		xfs_free_rtgroups(mp, 0, mp->m_sb.sb_rgcount);
 	if (x->perag_up)
@@ -834,4 +837,22 @@ bool xfs_log_check_lsn(struct xfs_mount *mp, xfs_lsn_t lsn)
 	(void)mp;
 	(void)lsn;
 	return true;
+}
+
+bool wfs_xfs_is_shutdown(struct xfs_mount *mp)
+{
+	struct wfs_xfs *x = wfs_xfs_of(mp);
+
+	return x && __atomic_load_n(&x->shutdown, __ATOMIC_ACQUIRE) != 0;
+}
+
+void wfs_xfs_force_shutdown(struct xfs_mount *mp, uint32_t flags)
+{
+	struct wfs_xfs *x = wfs_xfs_of(mp);
+
+	if (!x || !flags)
+		return;
+	if (__atomic_fetch_or(&x->shutdown, flags, __ATOMIC_ACQ_REL) == 0)
+		xfs_alert(mp, "filesystem shut down (reason 0x%x): no further changes are written",
+			  (unsigned int)flags);
 }

@@ -96,7 +96,7 @@ else
   miss=
   for s in xfs_trans_alloc xfs_trans_commit xfs_trans_roll xfs_defer_finish xfs_trans_log_inode \
            xfs_trans_log_buf xfs_trans_ijoin xfs_rmap_alloc xfs_rmap_free xfs_extent_busy_insert \
-           xfs_buf_delwri_submit xfs_dec_freecounter xfs_add_freecounter xfs_icreate_log \
+           xfs_dec_freecounter xfs_add_freecounter xfs_icreate_log \
            xfs_trans_mod_sb xfs_parent_addname xfs_refcount_alloc_cow_extent; do
     nm "$obj" | grep -q " T $s\$" || miss="$miss $s"
     # and the full link takes exactly that definition (no second one elsewhere)

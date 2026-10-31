@@ -52,6 +52,7 @@ void msleep(unsigned int msecs)
 
 struct wfs_task {
 	struct task_struct	t;
+	struct wfs_task		*reg_prev, *reg_next;	/* host-thread registry */
 	pthread_mutex_t		mu;
 	pthread_cond_t		cv;
 	long			state;		/* TASK_*; RUNNING after a wakeup */
@@ -67,6 +68,17 @@ struct wfs_task {
 
 static pthread_key_t task_key;
 static pthread_once_t task_once = PTHREAD_ONCE_INIT;
+static int task_key_live;
+
+/*
+ * Host threads get their task lazily and lose it at thread exit through the
+ * TSD destructor. The destructor lives in this plugin, so before the plugin
+ * is unloaded the key must go (or glibc/winpthreads would call into unmapped
+ * code when a host thread exits later): wfs_sched_unload() deletes it and
+ * frees the tasks of host threads still alive, found through this registry.
+ */
+static pthread_mutex_t reg_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct wfs_task *reg_head;
 
 static void task_free(struct wfs_task *k)
 {
@@ -75,19 +87,62 @@ static void task_free(struct wfs_task *k)
 	free(k);
 }
 
+static void reg_add(struct wfs_task *k)
+{
+	pthread_mutex_lock(&reg_lock);
+	k->reg_prev = NULL;
+	k->reg_next = reg_head;
+	if (reg_head)
+		reg_head->reg_prev = k;
+	reg_head = k;
+	pthread_mutex_unlock(&reg_lock);
+}
+
+static void reg_del(struct wfs_task *k)
+{
+	pthread_mutex_lock(&reg_lock);
+	if (k->reg_prev)
+		k->reg_prev->reg_next = k->reg_next;
+	else
+		reg_head = k->reg_next;
+	if (k->reg_next)
+		k->reg_next->reg_prev = k->reg_prev;
+	pthread_mutex_unlock(&reg_lock);
+}
+
 /* Thread exit of a host thread: its implicit task goes with it. */
 static void task_key_dtor(void *p)
 {
 	struct wfs_task *k = p;
 
-	if (k && !k->is_kthread)
+	if (k && !k->is_kthread) {
+		reg_del(k);
 		task_free(k);
+	}
 }
 
 static void task_key_init(void)
 {
 	if (pthread_key_create(&task_key, task_key_dtor) != 0)
 		abort();
+	task_key_live = 1;
+}
+
+__attribute__((destructor)) static void wfs_sched_unload(void)
+{
+	struct wfs_task *k, *n;
+
+	if (!task_key_live)
+		return;
+	pthread_key_delete(task_key);	/* no destructor runs after this */
+	task_key_live = 0;
+	pthread_mutex_lock(&reg_lock);
+	for (k = reg_head; k; k = n) {
+		n = k->reg_next;
+		task_free(k);
+	}
+	reg_head = NULL;
+	pthread_mutex_unlock(&reg_lock);
 }
 
 static struct wfs_task *task_new(void)
@@ -111,6 +166,7 @@ static struct wfs_task *self(void)
 	k = pthread_getspecific(task_key);
 	if (!k) {
 		k = task_new();
+		reg_add(k);
 		pthread_setspecific(task_key, k);
 	}
 	return k;
@@ -416,23 +472,46 @@ bool completion_done(struct completion *x)
 
 static bool sem_take(struct semaphore *s)
 {
-	bool got = false;
+	unsigned int c = __atomic_load_n(&s->count, __ATOMIC_RELAXED);
 
-	spin_lock(&s->wait.lock);
-	if (s->count) {
-		s->count--;
-		got = true;
+	while (c) {
+		if (__atomic_compare_exchange_n(&s->count, &c, c - 1, 1,
+						__ATOMIC_SEQ_CST, __ATOMIC_RELAXED))
+			return true;
 	}
-	spin_unlock(&s->wait.lock);
-	return got;
+	return false;
 }
 
+static inline void wfs_pause(void)
+{
+#if defined(__x86_64__) || defined(__i386__)
+	__builtin_ia32_pause();
+#elif defined(__aarch64__)
+	__asm__ __volatile__("yield");
+#endif
+}
+
+/* Spin budget before sleeping: buffer locks are held for microseconds, and a
+ * sleep/wake pair costs two context switches (like the kernel's mutex spin). */
+#define SEM_SPINS 200
+
+/*
+ * No lost wakeup: a sleeper increments `waiters` and enqueues itself before
+ * its final sem_take(); up() increments `count` before reading `waiters`.
+ * Both are seq_cst, so either the sleeper sees the count or up() sees the
+ * sleeper (which is already on the queue) and wakes it.
+ */
 void down(struct semaphore *s)
 {
 	DEFINE_WAIT(w);
+	int i;
 
-	if (sem_take(s))
-		return;
+	for (i = 0; i < SEM_SPINS; i++) {
+		if (sem_take(s))
+			return;
+		wfs_pause();
+	}
+	__atomic_add_fetch(&s->waiters, 1, __ATOMIC_SEQ_CST);
 	for (;;) {
 		prepare_to_wait_exclusive(&s->wait, &w, TASK_UNINTERRUPTIBLE);
 		if (sem_take(s))
@@ -440,6 +519,7 @@ void down(struct semaphore *s)
 		schedule();
 	}
 	finish_wait(&s->wait, &w);
+	__atomic_sub_fetch(&s->waiters, 1, __ATOMIC_SEQ_CST);
 }
 
 int down_trylock(struct semaphore *s)
@@ -449,10 +529,9 @@ int down_trylock(struct semaphore *s)
 
 void up(struct semaphore *s)
 {
-	spin_lock(&s->wait.lock);
-	s->count++;
-	spin_unlock(&s->wait.lock);
-	__wake_up(&s->wait, TASK_NORMAL, 1, NULL);
+	__atomic_add_fetch(&s->count, 1, __ATOMIC_SEQ_CST);
+	if (__atomic_load_n(&s->waiters, __ATOMIC_SEQ_CST))
+		__wake_up(&s->wait, TASK_NORMAL, 1, NULL);
 }
 
 /* ---- work queues ---------------------------------------------------- */
@@ -511,6 +590,7 @@ static void *worker_main(void *arg)
 
 	free(arg);
 	me = self();
+	reg_del(me);
 	me->is_kthread = 1;	/* freed by destroy_workqueue, not the key dtor */
 	pthread_mutex_lock(&wq->mu);
 	wq->tasks[a.idx] = me;

@@ -1,10 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * xfs_buf contract for the read-only port (Task 5 implements the cache).
- * Function signatures and field names follow the kernel's xfs_buf.h so
- * libxfs compiles unchanged; kernel-only members (hash node, LRU, workqueue,
- * log items, delwri lists) are dropped. Buffer locks are no-ops: a verified
- * buffer is immutable on a read-only mount (design 7.1).
+ * xfs_buf contract (buf.c implements the cache). Function signatures, field
+ * names and semantics follow the kernel's xfs_buf.h/xfs_buf.c so libxfs and
+ * the log compile unchanged: buffers are returned locked (b_sema), XBF_DONE
+ * marks valid data, pins hold off writes, delwri lists queue writes. The
+ * kernel's hash node, lockref, LRU refs and I/O work items are replaced by
+ * the cache's own bookkeeping (b_priv).
  */
 #ifndef __XFS_BUF_H__
 #define __XFS_BUF_H__
@@ -72,19 +73,21 @@ struct xfs_buf {
 	xfs_daddr_t		b_rhash_key;	/* cache key (daddr) */
 	int			b_length;	/* size of buffer in BBs */
 	xfs_buf_flags_t		b_flags;
-	struct semaphore	b_sema;		/* unused: locks are no-ops */
+	struct semaphore	b_sema;		/* buffer lock */
 	struct list_head	b_lru;
 	struct list_head	b_list;
 	struct xfs_perag	*b_pag;
 	struct xfs_mount	*b_mount;
 	struct xfs_buftarg	*b_target;
 	void			*b_addr;	/* data, b_length * 512 bytes */
-	struct xfs_buf_log_item	*b_log_item;	/* always NULL */
-	struct list_head	b_li_list;
-	struct xfs_trans	*b_transp;	/* always NULL */
+	wait_queue_head_t	b_waiters;	/* unpin waiters */
+	struct xfs_buf_log_item	*b_log_item;
+	struct list_head	b_li_list;	/* log items */
+	struct xfs_trans	*b_transp;
 	struct xfs_buf_map	*b_maps;
 	struct xfs_buf_map	__b_map;
 	int			b_map_count;
+	atomic_t		b_pin_count;
 	int			b_error;
 	void			(*b_iodone)(struct xfs_buf *bp);
 	const struct xfs_buf_ops *b_ops;
@@ -152,11 +155,10 @@ int _xfs_buf_read(struct xfs_buf *bp);
 void xfs_buf_hold(struct xfs_buf *bp);
 void xfs_buf_rele(struct xfs_buf *);
 
-/* Read-only: locking a verified buffer is a no-op. */
-static inline int xfs_buf_trylock(struct xfs_buf *bp) { (void)bp; return 1; }
-static inline void xfs_buf_lock(struct xfs_buf *bp) { (void)bp; }
-static inline void xfs_buf_unlock(struct xfs_buf *bp) { (void)bp; }
-#define xfs_buf_islocked(bp)	((void)(bp), 1)
+int xfs_buf_trylock(struct xfs_buf *bp);
+void xfs_buf_lock(struct xfs_buf *bp);
+void xfs_buf_unlock(struct xfs_buf *bp);
+#define xfs_buf_islocked(bp)	(__atomic_load_n(&(bp)->b_sema.count, __ATOMIC_RELAXED) == 0)
 
 static inline void xfs_buf_relse(struct xfs_buf *bp)
 {
@@ -164,7 +166,8 @@ static inline void xfs_buf_relse(struct xfs_buf *bp)
 	xfs_buf_rele(bp);
 }
 
-int xfs_bwrite(struct xfs_buf *bp);	/* stub: -EROFS */
+int xfs_bwrite(struct xfs_buf *bp);
+int xfs_buf_iowait(struct xfs_buf *bp);
 
 void __xfs_buf_ioerror(struct xfs_buf *bp, int error, xfs_failaddr_t failaddr);
 #define xfs_buf_ioerror(bp, err) __xfs_buf_ioerror((bp), (err), __this_address)
@@ -187,8 +190,15 @@ void xfs_buf_set_uptodate(struct xfs_buf *bp);
 void xfs_buf_stale(struct xfs_buf *bp);
 void xfs_buf_clear_stale(struct xfs_buf *bp);
 
-int xfs_buf_delwri_submit(struct list_head *);
+void xfs_buf_delwri_cancel(struct list_head *);
 bool xfs_buf_delwri_queue(struct xfs_buf *, struct list_head *);
+void xfs_buf_delwri_queue_here(struct xfs_buf *bp, struct list_head *bl);
+int xfs_buf_delwri_submit(struct list_head *);
+int xfs_buf_delwri_submit_nowait(struct list_head *);
+void xfs_buftarg_wait(struct xfs_buftarg *);
+void xfs_buftarg_drain(struct xfs_buftarg *);
+static inline bool xfs_buftarg_is_mem(struct xfs_buftarg *bt) { (void)bt; return false; }
+static inline bool xfs_buf_is_uncached(struct xfs_buf *bp) { return bp->b_rhash_key == XFS_BUF_DADDR_NULL; }
 static inline xfs_daddr_t xfs_buf_daddr(struct xfs_buf *bp)
 {
 	return bp->b_maps[0].bm_bn;
@@ -196,7 +206,7 @@ static inline xfs_daddr_t xfs_buf_daddr(struct xfs_buf *bp)
 
 void xfs_buf_set_ref(struct xfs_buf *bp, int lru_ref);
 static inline void xfs_buf_oneshot(struct xfs_buf *bp) { (void)bp; }
-static inline int xfs_buf_ispinned(struct xfs_buf *bp) { (void)bp; return 0; }
+static inline int xfs_buf_ispinned(struct xfs_buf *bp) { return atomic_read(&bp->b_pin_count); }
 
 static inline int
 xfs_buf_verify_cksum(struct xfs_buf *bp, unsigned long cksum_offset)

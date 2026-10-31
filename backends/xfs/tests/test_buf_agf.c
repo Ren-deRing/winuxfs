@@ -82,10 +82,10 @@ int main(int argc, char **argv)
 
 	flip_off = (uint64_t)agf * 512 + 100;		/* inside the AGF, CRC now wrong */
 	reads = 0;
-	CHECK(xfs_buf_read(&bt, agf, bbs, 0, &bp, &xfs_agf_buf_ops) == -EFSBADCRC && bp == NULL);
+	CHECK(xfs_buf_read(&bt, agf, bbs, 0, &bp, &xfs_agf_buf_ops) == -EFSCORRUPTED && bp == NULL);
 	CHECK(xfs_buf_incore(&bt, agf, bbs, 0, &bp) == -ENOENT);
 	CHECK(wfs_xfs_bcache_usage(c) == 0);
-	CHECK(xfs_buf_read(&bt, agf, bbs, 0, &bp, &xfs_agf_buf_ops) == -EFSBADCRC && reads == 2);
+	CHECK(xfs_buf_read(&bt, agf, bbs, 0, &bp, &xfs_agf_buf_ops) == -EFSCORRUPTED && reads == 2);
 
 	flip_off = (uint64_t)agf * 512;			/* magic number, CRC fixed up */
 	fix_crc = 1;

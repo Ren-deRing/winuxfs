@@ -218,13 +218,19 @@ bool try_wait_for_completion(struct completion *x);
 bool completion_done(struct completion *x);
 
 /* ---- semaphores ----------------------------------------------------- */
+/*
+ * count and waiters are atomics: take/release are lock-free when uncontended;
+ * the wait queue (and its lock) is used only when a down() has to sleep.
+ */
 struct semaphore {
 	unsigned int		count;
+	unsigned int		waiters;	/* down()s in the slow path */
 	struct wait_queue_head	wait;
 };
 static inline void sema_init(struct semaphore *s, int val)
 {
 	s->count = (unsigned int)val;
+	s->waiters = 0;
 	init_waitqueue_head(&s->wait);
 }
 void down(struct semaphore *s);

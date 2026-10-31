@@ -178,18 +178,6 @@ void xfs_btree_mark_sick(struct xfs_btree_cur *cur)
 	WFS_STUB_RO();
 }
 
-bool xfs_buf_delwri_queue(struct xfs_buf *a0, struct list_head *a1)
-{
-	WFS_STUB_RO();
-	return false;
-}
-
-int xfs_buf_delwri_submit(struct list_head *a0)
-{
-	WFS_STUB_RO();
-	return -EROFS;
-}
-
 void xfs_da_mark_sick(struct xfs_da_args *args)
 {
 	WFS_STUB_RO();

@@ -44,3 +44,59 @@ struct timespec64 current_time(struct inode *inode)
 	clock_gettime(CLOCK_REALTIME, &ts);
 	return (struct timespec64){ .tv_sec = ts.tv_sec, .tv_nsec = ts.tv_nsec };
 }
+
+/* list_sort: stable merge sort, like the kernel's (equal elements keep order). */
+#include <stdlib.h>
+void list_sort(void *priv, struct list_head *head,
+	       int (*cmp)(void *priv, const struct list_head *a, const struct list_head *b))
+{
+	struct list_head **v, **tmp, *p;
+	size_t n = 0, i, w;
+
+	list_for_each(p, head)
+		n++;
+	if (n < 2)
+		return;
+	v = malloc(2 * n * sizeof(*v));
+	if (!v) {
+		/* No memory: insertion sort in place (stable, O(n^2), never fails). */
+		struct list_head *cur = head->next->next;
+
+		while (cur != head) {
+			struct list_head *next = cur->next, *pos = cur->prev;
+
+			while (pos != head && cmp(priv, pos, cur) > 0)
+				pos = pos->prev;
+			if (pos != cur->prev) {
+				list_del(cur);
+				list_add(cur, pos);
+			}
+			cur = next;
+		}
+		return;
+	}
+	tmp = v + n;
+	i = 0;
+	list_for_each(p, head)
+		v[i++] = p;
+	for (w = 1; w < n; w *= 2) {
+		size_t lo;
+
+		for (lo = 0; lo < n; lo += 2 * w) {
+			size_t mid = lo + w < n ? lo + w : n, hi = lo + 2 * w < n ? lo + 2 * w : n;
+			size_t a = lo, b = mid, k = lo;
+
+			while (a < mid && b < hi)
+				tmp[k++] = cmp(priv, v[b], v[a]) < 0 ? v[b++] : v[a++];
+			while (a < mid)
+				tmp[k++] = v[a++];
+			while (b < hi)
+				tmp[k++] = v[b++];
+		}
+		{ struct list_head **t = v; v = tmp; tmp = t; }
+	}
+	INIT_LIST_HEAD(head);
+	for (i = 0; i < n; i++)
+		list_add_tail(v[i], head);
+	free(v < tmp ? v : tmp);
+}

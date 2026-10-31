@@ -16,7 +16,8 @@
 
 static int failures, checks;
 static pthread_mutex_t chk_lock = PTHREAD_MUTEX_INITIALIZER;
-#define CHECK(c) do { pthread_mutex_lock(&chk_lock); checks++; if (!(c)) { failures++; \
+/* The condition is evaluated outside chk_lock: it may block on a buffer lock. */
+#define CHECK(c) do { int ok_ = !!(c); pthread_mutex_lock(&chk_lock); checks++; if (!ok_) { failures++; \
 	fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #c); } \
 	pthread_mutex_unlock(&chk_lock); } while (0)
 
@@ -32,6 +33,21 @@ static int read_delay_us;
 static unsigned char pat(uint64_t off)
 {
 	return (unsigned char)(((off * 31) ^ (off >> 9)) & 0x7f);
+}
+
+/* Writes: recorded as "W<daddr> " in wtrace, then stored in the image. */
+static char wtrace[512];
+static int fail_writes;
+static int fake_write(void *ctx, int role, uint64_t off, const void *buf, size_t len)
+{
+	char t[32];
+
+	(void)ctx; (void)role;
+	snprintf(t, sizeof(t), "W%llu ", (unsigned long long)(off / 512));
+	strncat(wtrace, t, sizeof(wtrace) - strlen(wtrace) - 1);
+	if (fail_writes)
+		return -WFS_EIO;
+	return pwrite(img_fd, buf, len, (off_t)off) == (ssize_t)len ? 0 : -WFS_EIO;
 }
 
 static int fake_read(void *ctx, int role, uint64_t off, void *buf, size_t len)
@@ -58,7 +74,7 @@ static void make_image(const char *path)
 	fwrite(m, 1, IMG_BYTES, f);
 	fclose(f);
 	free(m);
-	img_fd = open(path, O_RDONLY);
+	img_fd = open(path, O_RDWR);
 }
 
 /* ---- fixture ------------------------------------------------------------- */
@@ -84,6 +100,9 @@ static void setup(size_t limit)
 	memset(&bt, 0, sizeof(bt));
 	memset(&blk, 0, sizeof(blk));
 	blk.read = fake_read;
+	blk.write = fake_write;
+	wtrace[0] = 0;
+	fail_writes = 0;
 	blk.size_bytes[WFS_DEV_DATA] = IMG_BYTES;
 	blk.sector_size[WFS_DEV_DATA] = 512;
 	cache = wfs_xfs_bcache_create(&blk, limit);
@@ -148,7 +167,7 @@ static void verifier_failure_not_cached(void)
 	CHECK(xfs_buf_read(&bt, BAD_DADDR, 8, 0, &a, &test_ops) == -EFSCORRUPTED);
 	CHECK(reads == 2 && verify_calls == 2);
 	CHECK(xfs_buf_incore(&bt, BAD_DADDR, 8, 0, &a) == -ENOENT);
-	CHECK(xfs_buf_read(&bt, 16, 8, 0, &a, &crc_ops) == -EFSBADCRC);
+	CHECK(xfs_buf_read(&bt, 16, 8, 0, &a, &crc_ops) == -EFSCORRUPTED);	/* kernel: EFSBADCRC -> EFSCORRUPTED */
 	CHECK(wfs_xfs_bcache_usage(cache) == 0);
 	teardown();
 }
@@ -169,11 +188,8 @@ static void eviction_respects_limit(void)
 		CHECK(wfs_xfs_bcache_usage(cache) <= lim);
 	}
 	reads_before = reads;
-	for (i = 0; i < 4; i++) {	/* pinned: still valid and cached */
+	for (i = 0; i < 4; i++)	/* held (locked): survived eviction, data intact */
 		CHECK(data_ok(pin[i], (uint64_t)i * 128, 65536));
-		CHECK(xfs_buf_read(&bt, i * 128, 128, 0, &bp, &test_ops) == 0 && bp == pin[i]);
-		xfs_buf_relse(bp);
-	}
 	CHECK(reads == reads_before);
 	/* shrink below the pinned size: pinned stay, everything else goes */
 	wfs_xfs_bcache_set_limit(cache, 65536);
@@ -215,6 +231,10 @@ static void *same_block_thread(void *arg)
 
 	pthread_barrier_wait(&bar);
 	thr_err[i] = xfs_buf_read(&bt, 4096, 8, 0, &thr_bp[i], &test_ops);
+	if (!thr_err[i]) {
+		CHECK(data_ok(thr_bp[i], 4096, 4096) && (thr_bp[i]->b_flags & XBF_DONE));
+		xfs_buf_relse(thr_bp[i]);
+	}
 	return NULL;
 }
 
@@ -231,13 +251,8 @@ static void concurrent_same_block_single_read(void)
 	for (i = 0; i < NTHR; i++)
 		pthread_join(t[i], NULL);
 	CHECK(reads == 1 && verify_calls == 1);
-	for (i = 0; i < NTHR; i++) {
+	for (i = 0; i < NTHR; i++)
 		CHECK(thr_err[i] == 0 && thr_bp[i] == thr_bp[0]);
-		if (!thr_err[i]) {
-			CHECK(data_ok(thr_bp[i], 4096, 4096));
-			xfs_buf_relse(thr_bp[i]);
-		}
-	}
 	pthread_barrier_destroy(&bar);
 	teardown();
 }
@@ -317,7 +332,7 @@ static void get_uncached_and_incore(void)
 	CHECK(xfs_buf_get_uncached(&bt, 2, &a) == 0 && a->b_length == 2);
 	xfs_buf_relse(a);
 	/* re-verify against different ops on a hit */
-	CHECK(xfs_buf_read(&bt, 8, 8, 0, &b, &crc_ops) == -EFSBADCRC);
+	CHECK(xfs_buf_read(&bt, 8, 8, 0, &b, &crc_ops) == -EFSCORRUPTED);
 	CHECK(xfs_buf_read(&bt, 8, 8, 0, &b, &test_ops) == 0);
 	xfs_buf_relse(b);
 	teardown();
@@ -337,15 +352,15 @@ static void verifier_error_reporting_fails_read(void)
 	struct xfs_buf *a = (void *)1;
 
 	setup(WFS_XFS_BUFCACHE_DEFAULT_BYTES);
-	CHECK(xfs_buf_read(&bt, 8, 8, 0, &a, &ops_badcrc) == -EFSBADCRC && a == NULL);
+	CHECK(xfs_buf_read(&bt, 8, 8, 0, &a, &ops_badcrc) == -EFSCORRUPTED && a == NULL);
 	CHECK(xfs_buf_read(&bt, 8, 8, 0, &a, &ops_corrupt) == -EFSCORRUPTED);
-	CHECK(xfs_buf_read(&bt, 8, 8, 0, &a, &ops_pos) == -EFSBADCRC);
+	CHECK(xfs_buf_read(&bt, 8, 8, 0, &a, &ops_pos) == -EFSCORRUPTED);
 	CHECK(wfs_xfs_bcache_usage(cache) == 0 && reads == 3);
 	CHECK(xfs_buf_incore(&bt, 8, 8, 0, &a) == -ENOENT);
 	/* reverify on a cached buffer fails the call but keeps the good data */
 	CHECK(xfs_buf_read(&bt, 8, 8, 0, &a, &test_ops) == 0);
 	xfs_buf_relse(a);
-	CHECK(xfs_buf_read(&bt, 8, 8, 0, &a, &ops_badcrc) == -EFSBADCRC);
+	CHECK(xfs_buf_read(&bt, 8, 8, 0, &a, &ops_badcrc) == -EFSCORRUPTED);
 	CHECK(xfs_buf_read(&bt, 8, 8, 0, &a, &test_ops) == 0 && reads == 4);
 	xfs_buf_relse(a);
 	teardown();
@@ -384,43 +399,23 @@ static void failed_read_not_inherited_by_other_ops(void)
 		pthread_join(t[i], NULL);
 	pthread_barrier_destroy(&bar);
 	for (i = 0; i < NTHR; i++)
-		CHECK(mo_err[i] == ((i & 1) ? 0 : -EFSBADCRC));
+		CHECK(mo_err[i] == ((i & 1) ? 0 : -EFSCORRUPTED));
 	teardown();
 }
 
-static int stop_readers;
-static const struct xfs_buf_ops *seen_ops;
-static void *ops_reader_thread(void *arg)
-{
-	struct xfs_buf *bp = arg;
-	while (!__atomic_load_n(&stop_readers, __ATOMIC_ACQUIRE)) {
-		seen_ops = bp->b_ops;	/* unlocked read, as libxfs does */
-		CHECK(bp->b_error == 0);
-	}
-	return NULL;
-}
-
-static void reverify_does_not_write_shared_fields(void)
+/* A cached buffer requested with other ops is verified on a copy: the call
+ * fails, the cached data and its ops stay (M2 hardening, kernel locking). */
+static void reverify_keeps_cached_buffer(void)
 {
 	struct xfs_buf *a, *b;
-	pthread_t t;
-	int i;
 
 	setup(WFS_XFS_BUFCACHE_DEFAULT_BYTES);
 	CHECK(xfs_buf_read(&bt, 8, 8, 0, &a, &test_ops) == 0);
-	stop_readers = 0;
-	pthread_create(&t, NULL, ops_reader_thread, a);
-	for (i = 0; i < 200; i++) {
-		CHECK(xfs_buf_read(&bt, 8, 8, 0, &b, (i & 1) ? &ops_slowok : &crc_ops) == ((i & 1) ? 0 : -EFSBADCRC));
-		if (i & 1)
-			xfs_buf_relse(b);
-		if (i > 3)
-			break;
-	}
-	__atomic_store_n(&stop_readers, 1, __ATOMIC_RELEASE);
-	pthread_join(t, NULL);
-	CHECK(a->b_ops == &test_ops);
 	xfs_buf_relse(a);
+	CHECK(xfs_buf_read(&bt, 8, 8, 0, &b, &crc_ops) == -EFSCORRUPTED);
+	CHECK(xfs_buf_read(&bt, 8, 8, 0, &b, &ops_slowok) == 0 && b == a);
+	CHECK(b->b_ops == &test_ops && b->b_error == 0 && reads == 1);
+	xfs_buf_relse(b);
 	teardown();
 }
 
@@ -436,8 +431,19 @@ static void *tiny_thread(void *arg)
 		struct xfs_buf *bp[3];
 		int k, n = 1 + (int)(rand_r(&seed) % 3);
 
+		int blks[3], j;
+
+		for (k = 0; k < n; k++) {	/* distinct blocks, ascending: no self/ABBA deadlock */
+			blks[k] = (int)(rand_r(&seed) % 48);
+			for (j = 0; j < k; j++)
+				if (blks[j] == blks[k]) { k--; break; }
+		}
+		for (k = 1; k < n; k++)
+			for (j = k; j > 0 && blks[j - 1] > blks[j]; j--) {
+				int t = blks[j]; blks[j] = blks[j - 1]; blks[j - 1] = t;
+			}
 		for (k = 0; k < n; k++) {
-			int blk = (int)(rand_r(&seed) % 48);
+			int blk = blks[k];
 
 			if (blk == 47) {	/* a bad block now and then */
 				CHECK(xfs_buf_read(&bt, BAD_DADDR, 8, 0, &bp[k], &test_ops) == -EFSCORRUPTED);
@@ -516,6 +522,128 @@ static void incore_waits_for_reading(void)
 	teardown();
 }
 
+
+/* ---- write side (M3a T2: kernel xfs_buf contract) ------------------------ */
+static int vw_calls;
+static void vw_ok(struct xfs_buf *bp) { (void)bp; vw_calls++; }
+static void vw_bad(struct xfs_buf *bp) { vw_calls++; xfs_verifier_error(bp, -EFSCORRUPTED, __this_address); }
+static const struct xfs_buf_ops wops = { .name = "w", .verify_read = verify_read, .verify_write = vw_ok };
+static const struct xfs_buf_ops wops_bad = { .name = "wbad", .verify_read = verify_read, .verify_write = vw_bad };
+
+static void bwrite_roundtrip_and_locking(void)
+{
+	struct xfs_buf *a, *b;
+
+	setup(WFS_XFS_BUFCACHE_DEFAULT_BYTES);
+	CHECK(xfs_buf_get(&bt, 2000, 8, &a) == 0);
+	CHECK(xfs_buf_islocked(a) && !(a->b_flags & XBF_DONE) && reads == 0);
+	CHECK(xfs_buf_trylock(a) == 0);			/* held: trylock fails */
+	memset(a->b_addr, 0x5A, 4096);
+	a->b_ops = &wops;
+	xfs_buf_set_uptodate(a);
+	vw_calls = 0;
+	CHECK(xfs_bwrite(a) == 0 && vw_calls == 1);
+	CHECK(strcmp(wtrace, "W2000 ") == 0);
+	CHECK(xfs_buf_islocked(a) && (a->b_flags & XBF_DONE));	/* bwrite keeps the lock */
+	xfs_buf_relse(a);
+	CHECK(!xfs_buf_islocked(a));
+	wfs_xfs_bcache_purge(cache);
+	CHECK(xfs_buf_read(&bt, 2000, 8, 0, &b, &wops) == 0);
+	CHECK(((unsigned char *)b->b_addr)[0] == 0x5A && ((unsigned char *)b->b_addr)[4095] == 0x5A);
+	xfs_buf_relse(b);
+	teardown();
+}
+
+static void delwri_sorted_pins_skipped(void)
+{
+	LIST_HEAD(q);
+	struct xfs_buf *x[3];
+	static const int at[3] = { 3000, 1000, 2000 };
+	int i;
+
+	setup(WFS_XFS_BUFCACHE_DEFAULT_BYTES);
+	for (i = 0; i < 3; i++) {
+		CHECK(xfs_buf_read(&bt, at[i], 8, 0, &x[i], &wops) == 0);
+		CHECK(xfs_buf_delwri_queue(x[i], &q));
+		CHECK(!xfs_buf_delwri_queue(x[i], &q));	/* already queued */
+		xfs_buf_relse(x[i]);			/* the list keeps a reference */
+	}
+	atomic_inc(&x[0]->b_pin_count);			/* 3000: in the in-core log */
+	CHECK(xfs_buf_delwri_submit_nowait(&q) == 1);	/* pinned one skipped */
+	CHECK(strcmp(wtrace, "W1000 W2000 ") == 0);	/* ascending daddr */
+	CHECK(!list_empty(&q) && x[0]->b_flags & _XBF_DELWRI_Q);
+	CHECK(!xfs_buf_islocked(x[1]) && !(x[1]->b_flags & _XBF_DELWRI_Q));
+	if (atomic_dec_and_test(&x[0]->b_pin_count))
+		wake_up_all(&x[0]->b_waiters);
+	CHECK(xfs_buf_delwri_submit(&q) == 0 && list_empty(&q));
+	CHECK(strcmp(wtrace, "W1000 W2000 W3000 ") == 0);
+	/* a cancelled list writes nothing */
+	CHECK(xfs_buf_read(&bt, 4000, 8, 0, &x[0], &wops) == 0);
+	CHECK(xfs_buf_delwri_queue(x[0], &q));
+	xfs_buf_relse(x[0]);
+	xfs_buf_delwri_cancel(&q);
+	CHECK(list_empty(&q) && strcmp(wtrace, "W1000 W2000 W3000 ") == 0);
+	teardown();
+}
+
+static void *unpin_later(void *arg)
+{
+	struct xfs_buf *bp = arg;
+
+	usleep(50000);
+	if (atomic_dec_and_test(&bp->b_pin_count))
+		wake_up_all(&bp->b_waiters);
+	return NULL;
+}
+
+static void write_waits_for_unpin(void)
+{
+	struct xfs_buf *a;
+	pthread_t t;
+
+	setup(WFS_XFS_BUFCACHE_DEFAULT_BYTES);
+	CHECK(xfs_buf_read(&bt, 2100, 8, 0, &a, &wops) == 0);
+	atomic_inc(&a->b_pin_count);
+	pthread_create(&t, NULL, unpin_later, a);
+	CHECK(xfs_bwrite(a) == 0);			/* returns only after unpin */
+	CHECK(atomic_read(&a->b_pin_count) == 0 && strcmp(wtrace, "W2100 ") == 0);
+	pthread_join(t, NULL);
+	xfs_buf_relse(a);
+	teardown();
+}
+
+static void write_failures_stale_and_write_nothing(void)
+{
+	struct xfs_buf *a;
+	size_t used;
+
+	setup(WFS_XFS_BUFCACHE_DEFAULT_BYTES);
+	/* write verifier refuses: nothing reaches the disk */
+	CHECK(xfs_buf_read(&bt, 2200, 8, 0, &a, &wops_bad) == 0);
+	CHECK(xfs_bwrite(a) == -EFSCORRUPTED && wtrace[0] == 0);
+	CHECK(a->b_flags & XBF_STALE);
+	xfs_buf_relse(a);				/* stale: freed, not cached */
+	CHECK(wfs_xfs_bcache_usage(cache) == 0);
+	/* device error */
+	CHECK(xfs_buf_read(&bt, 2300, 8, 0, &a, &wops) == 0);
+	fail_writes = 1;
+	CHECK(xfs_bwrite(a) == -EIO && (a->b_flags & XBF_STALE));
+	xfs_buf_relse(a);
+	fail_writes = 0;
+	/* a stale cached buffer is recycled by the next lookup and read again */
+	CHECK(xfs_buf_read(&bt, 2400, 8, 0, &a, &wops) == 0);
+	xfs_buf_hold(a);				/* keep it hashed past stale */
+	xfs_buf_stale(a);
+	xfs_buf_relse(a);
+	used = wfs_xfs_bcache_usage(cache);
+	CHECK(xfs_buf_read(&bt, 2400, 8, 0, &a, &wops) == 0);
+	CHECK(!(a->b_flags & XBF_STALE) && (a->b_flags & XBF_DONE));
+	CHECK(reads == 4 && wfs_xfs_bcache_usage(cache) == used);
+	xfs_buf_relse(a);
+	xfs_buf_rele(a);				/* the extra hold */
+	teardown();
+}
+
 int main(void)
 {
 	char path[] = "/tmp/wfs_test_buf_XXXXXX";
@@ -534,9 +662,13 @@ int main(void)
 	get_uncached_and_incore();
 	verifier_error_reporting_fails_read();
 	failed_read_not_inherited_by_other_ops();
-	reverify_does_not_write_shared_fields();
+	reverify_keeps_cached_buffer();
 	tiny_limit_concurrency();
 	range_guards();
+	bwrite_roundtrip_and_locking();
+	delwri_sorted_pins_skipped();
+	write_waits_for_unpin();
+	write_failures_stale_and_write_nothing();
 	incore_waits_for_reading();
 	close(img_fd);
 	unlink(path);
