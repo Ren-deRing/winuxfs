@@ -35,6 +35,11 @@ wfs_err_t wfs_xfs_op_create(struct wfs_xfs *x, wfs_ino_t dir, const char *name, 
 wfs_err_t wfs_xfs_op_unlink(struct wfs_xfs *x, wfs_ino_t dir, const char *name, uint32_t len);
 wfs_err_t wfs_xfs_op_rmdir(struct wfs_xfs *x, wfs_ino_t dir, const char *name, uint32_t len);
 wfs_err_t wfs_xfs_op_setattr(struct wfs_xfs *x, wfs_ino_t ino, const wfs_stat *st, uint32_t mask);
+/* wdata.c (M3a T7) */
+wfs_err_t wfs_xfs_op_write(struct wfs_xfs *x, wfs_ino_t ino, uint64_t off, const void *buf,
+			   size_t len, size_t *done);
+wfs_err_t wfs_xfs_op_fsync(struct wfs_xfs *x, wfs_ino_t ino, int datasync);
+wfs_err_t wfs_xfs_op_sync(struct wfs_xfs *x);
 void wfs_xfs_op_forget_w(struct wfs_xfs *x, uint64_t xino, uint64_t n);
 
 #endif

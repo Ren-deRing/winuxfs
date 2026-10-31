@@ -174,9 +174,10 @@ wfs_err_t wfs_xfs_op_setattr(struct wfs_xfs *x, wfs_ino_t ino, const wfs_stat *s
 	if (error)
 		return error;
 	inode = VFS_I(ip);
-	if ((mask & WFS_SET_SIZE) && st->size != (uint64_t)i_size_read(inode)) {
-		error = -WFS_EOPNOTSUPP;		/* T7 */
-		goto out;
+	if ((mask & WFS_SET_SIZE) && (!S_ISREG(inode->i_mode) || st->size != (uint64_t)i_size_read(inode))) {
+		error = wfs_xfs_truncate(x, ip, st->size);
+		if (error)
+			goto out;
 	}
 	mask &= ~WFS_SET_SIZE;
 	if (!mask)
