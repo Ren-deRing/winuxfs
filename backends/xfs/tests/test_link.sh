@@ -84,7 +84,7 @@ else
   else
     line=$(env -u WINUXFS_PLUGIN_PATH "$bin" list-backends --plugin-dir "$ROOT/target/xfs-link-native/plugin" 2>&1)
     case "$line" in
-      xfs\ *caps=readonly,hardlink,symlink*winuxfs_backend_xfs.so*) pass "$t: $(echo "$line" | tr -s ' ')" ;;
+      xfs\ *caps=hardlink,symlink*winuxfs_backend_xfs.so*) pass "$t: $(echo "$line" | tr -s ' ')" ;;
       *) fail $t "unexpected list-backends output: $line" ;;
     esac
   fi

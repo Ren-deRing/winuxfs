@@ -976,7 +976,7 @@ static void entry_point_mounts_and_probes(void)
 	CHECK(d && !strcmp(d->name, "xfs") && d->abi_version == WFS_ABI_VERSION);
 	CHECK(d->dev_required == (1u << WFS_DEV_DATA));
 	CHECK(d->dev_allowed == ((1u << WFS_DEV_DATA) | (1u << WFS_DEV_LOG) | (1u << WFS_DEV_RT)));
-	CHECK(d->caps == (WFS_CAP_READONLY | WFS_CAP_HARDLINK | WFS_CAP_SYMLINK));
+	CHECK(d->caps == (WFS_CAP_HARDLINK | WFS_CAP_SYMLINK));
 	memset(&m, 0, sizeof(m));
 	CHECK(dev_open(&m.dev[0], base_img, 512) == 0);
 	m.p[0] = &m.dev[0];
