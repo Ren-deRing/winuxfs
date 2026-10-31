@@ -106,6 +106,7 @@ struct wfs_xfs_bcache {
 struct wfs_bdev {
 	struct wfs_xfs_bcache	*c;
 	int			role;
+	struct block_device	bdev;	/* bt_bdev: bio I/O to the same device */
 };
 
 /* b_priv, not a cast: a verifier may be handed a private copy of the xfs_buf */
@@ -877,8 +878,11 @@ int wfs_xfs_buftarg_bind(struct xfs_buftarg *bt, struct wfs_xfs_bcache *c,
 		return -ENOMEM;
 	bd->c = c;
 	bd->role = role;
+	bd->bdev.wfs_blk = c->blk;
+	bd->bdev.wfs_role = role;
 	ss = c->blk->sector_size[role] ? c->blk->sector_size[role] : 512;
 	bt->bt_priv = bd;
+	bt->bt_bdev = &bd->bdev;
 	bt->bt_meta_sectorsize = ss;
 	bt->bt_meta_sectormask = ss - 1;
 	bt->bt_logical_sectorsize = ss;
@@ -891,6 +895,7 @@ void wfs_xfs_buftarg_unbind(struct xfs_buftarg *bt)
 {
 	kfree(bt->bt_priv);
 	bt->bt_priv = NULL;
+	bt->bt_bdev = NULL;
 }
 
 /*

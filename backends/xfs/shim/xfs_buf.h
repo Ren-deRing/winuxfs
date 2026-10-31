@@ -44,6 +44,7 @@ struct xfs_buftarg {
 	size_t			bt_logical_sectormask;
 	xfs_daddr_t		bt_nr_sectors;
 	void			*bt_priv;	/* backend: host device handle */
+	struct block_device	*bt_bdev;	/* bio I/O (log): same device */
 };
 
 struct xfs_buf_map {

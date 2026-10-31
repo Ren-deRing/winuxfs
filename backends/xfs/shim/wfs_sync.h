@@ -21,7 +21,7 @@ unsigned char TryAcquireSRWLockExclusive(wfs_srw_t *);
 unsigned char TryAcquireSRWLockShared(wfs_srw_t *);
 struct mutex { wfs_srw_t l; };
 struct rw_semaphore { wfs_srw_t l; };
-typedef struct { wfs_srw_t l; } spinlock_t;
+typedef struct spinlock { wfs_srw_t l; } spinlock_t;
 static inline void mutex_init(struct mutex *m) { InitializeSRWLock(&m->l); }
 static inline void mutex_lock(struct mutex *m) { AcquireSRWLockExclusive(&m->l); }
 static inline void mutex_unlock(struct mutex *m) { ReleaseSRWLockExclusive(&m->l); }
@@ -44,7 +44,7 @@ static inline void destroy_rwsem(struct rw_semaphore *r) { (void)r; }
 #include <pthread.h>
 struct mutex { pthread_mutex_t l; };
 struct rw_semaphore { pthread_rwlock_t l; };
-typedef struct { pthread_mutex_t l; } spinlock_t;
+typedef struct spinlock { pthread_mutex_t l; } spinlock_t;
 static inline void mutex_init(struct mutex *m) { pthread_mutex_init(&m->l, NULL); }
 static inline void mutex_lock(struct mutex *m) { pthread_mutex_lock(&m->l); }
 static inline void mutex_unlock(struct mutex *m) { pthread_mutex_unlock(&m->l); }

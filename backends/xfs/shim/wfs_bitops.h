@@ -13,7 +13,7 @@
 
 #include "wfs_types.h"
 
-#define BITS_PER_LONG		((int)(sizeof(long) * 8))
+#define BITS_PER_LONG		(__SIZEOF_LONG__ * 8)	/* usable in #if; 32 on LLP64 */
 #define BITS_PER_BYTE		8
 #define BITS_TO_LONGS(n)	DIV_ROUND_UP(n, BITS_PER_LONG)
 #define BIT(n)			(1ULL << (n))
