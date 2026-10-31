@@ -171,8 +171,15 @@ typedef int64_t __kernel_loff_t;
 #define KERN_INFO	"6"
 #define KERN_DEBUG	"7"
 
+#if defined(__SANITIZE_THREAD__)
+/* TSan treats volatile as plain: use relaxed atomics so kernel-style lockless
+ * reads are not reported (same codegen intent). */
+#define READ_ONCE(x)		({ __typeof__(x) __r; __atomic_load(&(x), &__r, __ATOMIC_RELAXED); __r; })
+#define WRITE_ONCE(x, v)	do { __typeof__(x) __w = (v); __atomic_store(&(x), &__w, __ATOMIC_RELAXED); } while (0)
+#else
 #define READ_ONCE(x)		(*(const volatile __typeof__(x) *)&(x))
 #define WRITE_ONCE(x, v)	(*(volatile __typeof__(x) *)&(x) = (v))
+#endif
 #define ACCESS_ONCE(x)		READ_ONCE(x)
 
 #define ARRAY_SIZE(a)		(sizeof(a) / sizeof((a)[0]))
@@ -297,6 +304,84 @@ static inline int list_empty(const struct list_head *h) { return h->next == h; }
 #define list_entry(p, t, m)	container_of(p, t, m)
 #define list_first_entry(p, t, m) list_entry((p)->next, t, m)
 #define list_next_entry(p, m)	list_entry((p)->m.next, __typeof__(*(p)), m)
+static inline int list_empty_careful(const struct list_head *h)
+{ struct list_head *n = h->next; return n == h && n == h->prev; }
+static inline int list_is_singular(const struct list_head *h) { return !list_empty(h) && h->next == h->prev; }
+static inline int list_is_last(const struct list_head *e, const struct list_head *h) { return e->next == h; }
+static inline int list_is_first(const struct list_head *e, const struct list_head *h) { return e->prev == h; }
+static inline void list_move(struct list_head *e, struct list_head *h)
+{ e->next->prev = e->prev; e->prev->next = e->next; list_add(e, h); }
+static inline void list_move_tail(struct list_head *e, struct list_head *h)
+{ e->next->prev = e->prev; e->prev->next = e->next; list_add_tail(e, h); }
+static inline void list_replace_init(struct list_head *o, struct list_head *n)
+{ n->next = o->next; n->next->prev = n; n->prev = o->prev; n->prev->next = n; INIT_LIST_HEAD(o); }
+static inline void __list_splice(const struct list_head *l, struct list_head *p, struct list_head *x)
+{ struct list_head *f = l->next, *t = l->prev; f->prev = p; p->next = f; t->next = x; x->prev = t; }
+static inline void list_splice(const struct list_head *l, struct list_head *h)
+{ if (!list_empty(l)) __list_splice(l, h, h->next); }
+static inline void list_splice_tail(const struct list_head *l, struct list_head *h)
+{ if (!list_empty(l)) __list_splice(l, h->prev, h); }
+static inline void list_splice_init(struct list_head *l, struct list_head *h)
+{ if (!list_empty(l)) { __list_splice(l, h, h->next); INIT_LIST_HEAD(l); } }
+static inline void list_splice_tail_init(struct list_head *l, struct list_head *h)
+{ if (!list_empty(l)) { __list_splice(l, h->prev, h); INIT_LIST_HEAD(l); } }
+static inline void list_cut_before(struct list_head *list, struct list_head *head, struct list_head *entry)
+{
+	if (head->next == entry) { INIT_LIST_HEAD(list); return; }
+	list->next = head->next; list->next->prev = list; list->prev = entry->prev;
+	list->prev->next = list; head->next = entry; entry->prev = head;
+}
+#define list_last_entry(p, t, m)	list_entry((p)->prev, t, m)
+#define list_prev_entry(p, m)		list_entry((p)->m.prev, __typeof__(*(p)), m)
+#define list_first_entry_or_null(p, t, m) \
+	({ struct list_head *__h = (p), *__n = READ_ONCE(__h->next); __n != __h ? list_entry(__n, t, m) : NULL; })
+#define list_entry_is_head(pos, head, m)	(&(pos)->m == (head))
+#define list_for_each_safe(pos, n, head) \
+	for (pos = (head)->next, n = pos->next; pos != (head); pos = n, n = pos->next)
+#define list_for_each_entry_reverse(pos, head, m) \
+	for (pos = list_last_entry(head, __typeof__(*pos), m); &pos->m != (head); pos = list_prev_entry(pos, m))
+#define list_for_each_entry_continue(pos, head, m) \
+	for (pos = list_next_entry(pos, m); &pos->m != (head); pos = list_next_entry(pos, m))
+#define list_for_each_entry_from(pos, head, m) \
+	for (; &pos->m != (head); pos = list_next_entry(pos, m))
+#define list_for_each_entry_safe_reverse(pos, n, head, m) \
+	for (pos = list_last_entry(head, __typeof__(*pos), m), n = list_prev_entry(pos, m); \
+	     &pos->m != (head); pos = n, n = list_prev_entry(n, m))
+
+/* hlist */
+struct hlist_node { struct hlist_node *next, **pprev; };
+struct hlist_head { struct hlist_node *first; };
+#define HLIST_HEAD_INIT		{ .first = NULL }
+#define INIT_HLIST_HEAD(h)	((h)->first = NULL)
+static inline void INIT_HLIST_NODE(struct hlist_node *n) { n->next = NULL; n->pprev = NULL; }
+static inline int hlist_unhashed(const struct hlist_node *n) { return !n->pprev; }
+static inline int hlist_empty(const struct hlist_head *h) { return !h->first; }
+static inline void hlist_add_head(struct hlist_node *n, struct hlist_head *h)
+{ struct hlist_node *f = h->first; n->next = f; if (f) f->pprev = &n->next; h->first = n; n->pprev = &h->first; }
+static inline void __hlist_del(struct hlist_node *n)
+{ struct hlist_node *next = n->next, **pprev = n->pprev; *pprev = next; if (next) next->pprev = pprev; }
+static inline void hlist_del(struct hlist_node *n) { __hlist_del(n); n->next = NULL; n->pprev = NULL; }
+static inline void hlist_del_init(struct hlist_node *n) { if (!hlist_unhashed(n)) { __hlist_del(n); INIT_HLIST_NODE(n); } }
+#define hlist_entry(p, t, m)	container_of(p, t, m)
+#define hlist_entry_safe(p, t, m) ({ __typeof__(p) __p = (p); __p ? hlist_entry(__p, t, m) : NULL; })
+#define hlist_for_each_entry(pos, head, m) \
+	for (pos = hlist_entry_safe((head)->first, __typeof__(*(pos)), m); pos; \
+	     pos = hlist_entry_safe((pos)->m.next, __typeof__(*(pos)), m))
+#define hlist_for_each_entry_safe(pos, n, head, m) \
+	for (pos = hlist_entry_safe((head)->first, __typeof__(*pos), m); \
+	     pos && ({ n = pos->m.next; 1; }); pos = hlist_entry_safe(n, __typeof__(*pos), m))
+
+/* Error pointers */
+#define MAX_ERRNO	4095
+#define IS_ERR_VALUE(x)	unlikely((uintptr_t)(x) >= (uintptr_t)-MAX_ERRNO)
+static inline void *ERR_PTR(long error) { return (void *)(intptr_t)error; }	/* LLP64: widen first */
+static inline long PTR_ERR(const void *ptr) { return (long)(intptr_t)ptr; }
+static inline bool IS_ERR(const void *ptr) { return IS_ERR_VALUE((uintptr_t)ptr); }
+static inline bool IS_ERR_OR_NULL(const void *ptr) { return !ptr || IS_ERR(ptr); }
+static inline void *ERR_CAST(const void *ptr) { return (void *)ptr; }
+static inline int PTR_ERR_OR_ZERO(const void *ptr) { return IS_ERR(ptr) ? (int)PTR_ERR(ptr) : 0; }
+#define offsetofend(T, m)	(offsetof(T, m) + sizeof_field(T, m))
+
 #define list_for_each(pos, head) for (pos = (head)->next; pos != (head); pos = pos->next)
 #define list_for_each_entry(pos, head, m) \
 	for (pos = list_first_entry(head, __typeof__(*pos), m); &pos->m != (head); pos = list_next_entry(pos, m))
@@ -312,11 +397,9 @@ static inline void sort(void *base, size_t num, size_t size, cmp_func_t cmp, voi
 void list_sort(void *priv, struct list_head *head,
 	       int (*cmp)(void *priv, const struct list_head *a, const struct list_head *b));
 
-/* Types libxfs structs mention but this read-only port never operates on. */
+/* Types libxfs structs mention but nothing here operates on (sleeping and
+ * work queues: wfs_sched.h). */
 struct rcu_head { void *next; };
-struct completion { int done; };
-struct work_struct { void *func; };
-struct delayed_work { struct work_struct work; };
 struct workqueue_struct;
 struct super_block;
 struct block_device;
@@ -327,10 +410,8 @@ struct file;
 struct dax_device;
 struct cpumask { int unused; };
 struct llist_head { void *first; };
-typedef struct { int unused; } wait_queue_head_t;
 struct xarray { void **xa_slots; unsigned char *xa_marks; unsigned long xa_n; };
 struct ratelimit_state { int unused; };
-struct semaphore { int count; };
 struct rb_node { unsigned long __rb_parent_color; struct rb_node *rb_right, *rb_left; };
 struct rb_root { struct rb_node *rb_node; };
 struct iomap;
@@ -339,10 +420,6 @@ struct seq_file;
 struct page;
 struct kiocb;
 struct iov_iter;
-#define init_completion(c)	((c)->done = 0)
-#define complete(c)		((c)->done = 1)
-#define wait_for_completion(c)	((void)0)
-#define init_waitqueue_head(w)	((void)(w))
 
 /* RCU: the read-only port takes no RCU-protected locks. */
 #define rcu_read_lock()		((void)0)
@@ -352,9 +429,14 @@ struct iov_iter;
 #define rcu_assign_pointer(p, v) WRITE_ONCE(p, v)
 #define RCU_INIT_POINTER(p, v)	((p) = (v))
 #define synchronize_rcu()	((void)0)
-#define cond_resched()		((void)0)
 #define might_sleep()		((void)0)
+#if defined(__SANITIZE_THREAD__)
+/* TSan does not model fences: a seq_cst RMW on a shared word orders as well. */
+static long wfs_mb_word __attribute__((unused));
+#define smp_mb()		((void)__atomic_fetch_add(&wfs_mb_word, 0, __ATOMIC_SEQ_CST))
+#else
 #define smp_mb()		__atomic_thread_fence(__ATOMIC_SEQ_CST)
+#endif
 #define smp_rmb()		__atomic_thread_fence(__ATOMIC_ACQUIRE)
 #define smp_wmb()		__atomic_thread_fence(__ATOMIC_RELEASE)
 
@@ -383,8 +465,6 @@ static inline void *memchr_inv(const void *p, int c, size_t n)
 	return NULL;
 }
 /* Allocation-scope flags are meaningless without direct reclaim. */
-#define memalloc_nofs_save()		0u
-#define memalloc_nofs_restore(f)	((void)(f))
 #define memalloc_noio_save()		0u
 #define memalloc_noio_restore(f)	((void)(f))
 #define DECLARE_BITMAP(name, bits) unsigned long name[DIV_ROUND_UP((bits), (int)(sizeof(long) * 8))]

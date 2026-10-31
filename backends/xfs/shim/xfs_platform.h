@@ -21,8 +21,6 @@
 #define PAGE_SHIFT		12
 #define PAGE_SIZE		(1UL << PAGE_SHIFT)
 #define PAGE_MASK		(~(PAGE_SIZE - 1))
-#define HZ			100
-#define jiffies			0UL
 
 /* Kernel specific type declarations for XFS. */
 typedef __s64			xfs_off_t;	/* <file offset> type */

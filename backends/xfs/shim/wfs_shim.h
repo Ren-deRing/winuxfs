@@ -11,6 +11,7 @@
 #include "wfs_byteorder.h"
 #include "wfs_bitops.h"
 #include "wfs_sync.h"
+#include "wfs_sched.h"
 #include "wfs_mem.h"
 #include "wfs_xarray.h"
 #include "wfs_crc32c.h"

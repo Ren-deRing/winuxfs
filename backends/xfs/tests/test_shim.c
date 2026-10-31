@@ -241,6 +241,200 @@ static void messages_and_assert(void)
 	{ int z = 0; trace_xfs_shim_test_event(z, "a"); (void)z; }
 }
 
+
+/* ---- wfs_sched.h: tasks, waits, completions, semaphores, work queues ---- */
+
+static int wake_early_fn(void *d)
+{
+	struct task_struct **t = d;
+
+	wake_up_process(*t);	/* lands between set_current_state and schedule */
+	return 7;
+}
+
+static void sched_wakeup_before_schedule_returns(void)
+{
+	struct task_struct *me = current, *k;
+
+	CHECK(me == current);
+	set_current_state(TASK_UNINTERRUPTIBLE);
+	k = kthread_run(wake_early_fn, &me, "waker");
+	CHECK(!IS_ERR(k));
+	msleep(20);
+	schedule();	/* would hang if the early wakeup were lost */
+	CHECK(kthread_stop(k) == 7);
+	CHECK(schedule_timeout_uninterruptible(2) == 0);	/* times out */
+}
+
+struct wq_arg {
+	wait_queue_head_t	wq;
+	int			flag;
+	atomic_t		woke;
+};
+
+static int waiter_fn(void *d)
+{
+	struct wq_arg *a = d;
+
+	wait_event(a->wq, READ_ONCE(a->flag) != 0);
+	atomic_inc(&a->woke);
+	return 0;
+}
+
+static void sched_wait_event_wakes_all(void)
+{
+	struct wq_arg a;
+	struct task_struct *k[3];
+	int i;
+
+	memset(&a, 0, sizeof(a));
+	init_waitqueue_head(&a.wq);
+	for (i = 0; i < 3; i++) k[i] = kthread_run(waiter_fn, &a, "w");
+	msleep(30);
+	CHECK(atomic_read(&a.woke) == 0);
+	WRITE_ONCE(a.flag, 1);
+	wake_up_all(&a.wq);
+	for (i = 0; i < 3; i++) kthread_stop(k[i]);
+	CHECK(atomic_read(&a.woke) == 3);
+	CHECK(!waitqueue_active(&a.wq));
+}
+
+struct comp_arg { struct completion c; struct semaphore s; atomic_t in; int max_in; };
+
+static int comp_fn(void *d)
+{
+	struct comp_arg *a = d;
+	int n;
+
+	down(&a->s);
+	n = atomic_inc_return(&a->in);
+	{ int m = __atomic_load_n(&a->max_in, __ATOMIC_RELAXED);
+	  while (n > m && !__atomic_compare_exchange_n(&a->max_in, &m, n, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) ; }
+	msleep(5);
+	atomic_dec(&a->in);
+	up(&a->s);
+	complete(&a->c);
+	return 0;
+}
+
+static void sched_completion_and_semaphore(void)
+{
+	struct comp_arg a;
+	struct task_struct *k[6];
+	int i;
+
+	memset(&a, 0, sizeof(a));
+	init_completion(&a.c);
+	sema_init(&a.s, 2);
+	for (i = 0; i < 6; i++) k[i] = kthread_run(comp_fn, &a, "c");
+	for (i = 0; i < 6; i++) wait_for_completion(&a.c);
+	CHECK(!try_wait_for_completion(&a.c));
+	for (i = 0; i < 6; i++) kthread_stop(k[i]);
+	CHECK(a.max_in <= 2);
+	CHECK(down_trylock(&a.s) == 0 && down_trylock(&a.s) == 0 && down_trylock(&a.s) == 1);
+	up(&a.s); up(&a.s);
+	{
+		DECLARE_COMPLETION_ONSTACK(d);
+		struct { struct completion c; } st = { .c = COMPLETION_INITIALIZER_ONSTACK(st.c) };
+
+		complete(&d);
+		wait_for_completion(&d);
+		complete_all(&st.c);
+		wait_for_completion(&st.c);
+		wait_for_completion(&st.c);	/* complete_all: stays done */
+		CHECK(completion_done(&st.c));
+	}
+}
+
+struct work_arg {
+	struct work_struct	w;
+	struct delayed_work	dw;
+	atomic_t		runs, inside, overlap;
+	u64			ran_at;
+};
+
+static void work_fn(struct work_struct *w)
+{
+	struct work_arg *a = container_of(w, struct work_arg, w);
+
+	if (atomic_inc_return(&a->inside) > 1)
+		atomic_inc(&a->overlap);
+	CHECK(current_work() == w);
+	msleep(1);
+	atomic_inc(&a->runs);
+	atomic_dec(&a->inside);
+}
+
+static void dwork_fn(struct work_struct *w)
+{
+	struct work_arg *a = container_of(to_delayed_work(w), struct work_arg, dw);
+
+	__atomic_store_n(&a->ran_at, wfs_monotonic_ns(), __ATOMIC_RELEASE);
+	atomic_inc(&a->runs);
+}
+
+static void sched_workqueue_runs_and_flushes(void)
+{
+	struct workqueue_struct *wq = alloc_workqueue("t-%s", WQ_UNBOUND, 4, "x");
+	struct work_arg a;
+	u64 t0;
+	int i, queued = 0;
+
+	CHECK(wq != NULL);
+	memset(&a, 0, sizeof(a));
+	INIT_WORK(&a.w, work_fn);
+	INIT_DELAYED_WORK(&a.dw, dwork_fn);
+	for (i = 0; i < 200; i++) {
+		queued += queue_work(wq, &a.w);
+		if (i % 10 == 0) msleep(1);
+	}
+	flush_workqueue(wq);
+	CHECK(!work_pending(&a.w));
+	CHECK(atomic_read(&a.runs) >= 1 && atomic_read(&a.runs) <= queued);
+	CHECK(atomic_read(&a.overlap) == 0);	/* never on two workers */
+
+	atomic_set(&a.runs, 0);
+	t0 = wfs_monotonic_ns();
+	CHECK(queue_delayed_work(wq, &a.dw, msecs_to_jiffies(50)));
+	CHECK(!queue_delayed_work(wq, &a.dw, 1));	/* already pending */
+	flush_workqueue(wq);			/* timers are not waited for */
+	CHECK(atomic_read(&a.runs) == 0);
+	msleep(120);
+	CHECK(atomic_read(&a.runs) == 1);
+	CHECK(__atomic_load_n(&a.ran_at, __ATOMIC_ACQUIRE) - t0 >= 40ull * 1000000);
+
+	CHECK(queue_delayed_work(wq, &a.dw, msecs_to_jiffies(1000)));
+	CHECK(cancel_delayed_work_sync(&a.dw));
+	CHECK(!delayed_work_pending(&a.dw));
+	CHECK(queue_delayed_work(wq, &a.dw, msecs_to_jiffies(1000)));
+	CHECK(flush_delayed_work(&a.dw));	/* runs the timer now */
+	CHECK(atomic_read(&a.runs) == 2);
+	CHECK(!mod_delayed_work(wq, &a.dw, 0));
+	flush_delayed_work(&a.dw);
+	CHECK(atomic_read(&a.runs) == 3);
+	destroy_workqueue(wq);
+}
+
+static int var_word;
+static int var_fn(void *d)
+{
+	(void)d;
+	msleep(10);
+	WRITE_ONCE(var_word, 1);
+	wake_up_var(&var_word);
+	return 0;
+}
+
+static void sched_wait_var_event(void)
+{
+	struct task_struct *k = kthread_run(var_fn, NULL, "v");
+
+	wait_var_event(&var_word, READ_ONCE(var_word) == 1);
+	CHECK(var_word == 1);
+	kthread_stop(k);
+	CHECK(time_after(jiffies + 1, jiffies) && msecs_to_jiffies(10) == 1);
+}
+
 int main(void)
 {
 	crc32c_known_vectors();
@@ -253,6 +447,11 @@ int main(void)
 	locks_threads();
 	alloc_cap_returns_null_beyond_cap();
 	messages_and_assert();
+	sched_wakeup_before_schedule_returns();
+	sched_wait_event_wakes_all();
+	sched_completion_and_semaphore();
+	sched_workqueue_runs_and_flushes();
+	sched_wait_var_event();
 	printf("test_shim: %d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;
 }
