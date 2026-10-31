@@ -344,10 +344,3 @@ int xfs_zero_range(struct xfs_inode *ip, loff_t pos, loff_t len,
 		*did_zero = false;
 	return -EOPNOTSUPP;
 }
-
-/* Symlinks (M3a T8 compiles xfs_symlink.c). */
-int xfs_inactive_symlink(struct xfs_inode *ip)
-{
-	(void)ip;
-	return -EOPNOTSUPP;
-}
