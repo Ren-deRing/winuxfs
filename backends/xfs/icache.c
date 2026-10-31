@@ -7,6 +7,7 @@
  * for the reference and locking rules.
  */
 #include "icache.h"
+#include <stdlib.h>
 #include "kinit.h"
 #include "xfs_bit.h"
 #include "xfs_types.h"
@@ -321,6 +322,7 @@ int wfs_xfs_icache_create(struct wfs_xfs *x)
 			return -ENOMEM;
 		}
 	}
+	init_rwsem(&x->rename_lock);
 	x->icache = c;
 	return 0;
 }
@@ -347,6 +349,7 @@ void wfs_xfs_icache_destroy(struct wfs_xfs *x)
 		}
 		kfree(s->bucket);
 	}
+	destroy_rwsem(&x->rename_lock);
 	kfree(c);
 	x->icache = NULL;
 	wfs_xfs_kinit_put();
@@ -565,6 +568,59 @@ void wfs_xfs_ilookup_ref(struct xfs_inode *ip)
 	spin_lock(&e->sh->lock);
 	e->nlookup++;
 	spin_unlock(&e->sh->lock);
+}
+
+/*
+ * Unmount: free every unlinked inode the host still references (the kernel does
+ * this when it evicts all inodes). Collects the numbers first; xfs_inactive
+ * needs the shard locks free.
+ */
+void wfs_xfs_icache_inactive_all(struct wfs_xfs *x)
+{
+	struct wfs_xfs_icache *c = ic_of(x);
+	xfs_ino_t *inos = NULL;
+	size_t n = 0, cap = 0, i, b, s;
+
+	if (!c || wfs_xfs_is_shutdown(&x->mp))
+		return;
+	for (s = 0; s < WFS_IC_SHARDS; s++) {
+		struct ic_shard *sh = &c->sh[s];
+
+		spin_lock(&sh->lock);
+		for (b = 0; b < c->nbuckets; b++) {
+			struct ic_ent *e;
+
+			for (e = sh->bucket[b]; e; e = e->hnext) {
+				if (e->state != ENT_READY || e->dead || VFS_I(&e->ip)->i_mode == 0 ||
+				    VFS_I(&e->ip)->i_nlink != 0)
+					continue;
+				if (n == cap) {
+					xfs_ino_t *t;
+
+					cap = cap ? cap * 2 : 16;
+					t = realloc(inos, cap * sizeof(*inos));
+					if (!t) {
+						spin_unlock(&sh->lock);
+						goto done;
+					}
+					inos = t;
+				}
+				inos[n++] = I_INO(&e->ip);
+			}
+		}
+		spin_unlock(&sh->lock);
+	}
+done:
+	for (i = 0; i < n; i++) {
+		struct xfs_inode *ip;
+
+		if (wfs_xfs_iget(x, inos[i], &ip))
+			continue;
+		if (VFS_I(ip)->i_nlink == 0 && xfs_inactive(ip) == 0)
+			wfs_xfs_idead(ip);
+		xfs_irele(ip);
+	}
+	free(inos);
 }
 
 /* Host lookup references of ip (forget path decides inactive on 0). */

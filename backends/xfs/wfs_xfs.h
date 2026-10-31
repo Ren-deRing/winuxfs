@@ -63,6 +63,7 @@ struct wfs_xfs {
 	bool			rw;		/* read-write mount (want_rw) */
 	bool			rw_up;		/* mount_rw ran: unmount_rw quiesces */
 	void			*icache;	/* Task 8 */
+	struct rw_semaphore	rename_lock;	/* serializes renames (ancestor check), T8 */
 	uint64_t		mem_budget;	/* added to the process allocation cap while mounted */
 };
 
@@ -104,6 +105,8 @@ static inline int wfs_xfs_err(int e)
 	case ENAMETOOLONG:	return -WFS_ENAMETOOLONG;
 	case EISDIR:		return -WFS_EISDIR;
 	case EPERM:		return -WFS_EPERM;
+	case EMLINK:		return -WFS_EMLINK;
+	case EXDEV:		return -WFS_EXDEV;
 	default:		return -WFS_EIO;
 	}
 }

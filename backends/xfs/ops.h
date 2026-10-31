@@ -40,6 +40,14 @@ wfs_err_t wfs_xfs_op_write(struct wfs_xfs *x, wfs_ino_t ino, uint64_t off, const
 			   size_t len, size_t *done);
 wfs_err_t wfs_xfs_op_fsync(struct wfs_xfs *x, wfs_ino_t ino, int datasync);
 wfs_err_t wfs_xfs_op_sync(struct wfs_xfs *x);
+/* wops.c (M3a T8) */
+wfs_err_t wfs_xfs_op_rename(struct wfs_xfs *x, wfs_ino_t odir, const char *oname, uint32_t olen,
+			    wfs_ino_t ndir, const char *nname, uint32_t nlen, uint32_t flags);
+wfs_err_t wfs_xfs_op_link(struct wfs_xfs *x, wfs_ino_t ino, wfs_ino_t ndir, const char *name,
+			  uint32_t len);
+wfs_err_t wfs_xfs_op_symlink(struct wfs_xfs *x, wfs_ino_t dir, const char *name, uint32_t len,
+			     const char *target, uint32_t tlen, uint32_t uid, uint32_t gid,
+			     wfs_ino_t *out, wfs_stat *st);
 void wfs_xfs_op_forget_w(struct wfs_xfs *x, uint64_t xino, uint64_t n);
 
 #endif

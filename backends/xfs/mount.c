@@ -809,6 +809,7 @@ static void unmount_rw(struct wfs_xfs *x)
 	struct xfs_mount *mp = &x->mp;
 
 	x->rw_up = false;
+	wfs_xfs_icache_inactive_all(x);	/* unlinked inodes the host still holds */
 	xfs_fs_unreserve_ag_blocks(mp);
 	xfs_log_force(mp, XFS_LOG_SYNC);
 	xfs_extent_busy_wait_all(mp);
