@@ -496,6 +496,7 @@ unsafe extern "system" fn get_security_by_name(
     guard("GetSecurityByName", || {
         // SAFETY: WinFsp passes our file system and a NUL-terminated name.
         let (c, name) = unsafe { (ctx(fs), wstr(name)) };
+        super::trace_path(name);
         let st = match stat_path(c, name) {
             Ok(st) => st,
             Err(status) => return status,
@@ -595,6 +596,7 @@ unsafe extern "system" fn open(
     guard("Open", || {
         // SAFETY: WinFsp passes our file system and a NUL-terminated name.
         let (c, name) = unsafe { (ctx(fs), wstr(name)) };
+        super::trace_path(name);
         // Backstop for the read-only descriptor: the owner is implicitly
         // granted WRITE_DAC, and backup privileges bypass the DACL.
         if c.read_only && granted_access & WRITE_ACCESS != 0 {
@@ -617,6 +619,14 @@ unsafe extern "system" fn open(
             c.vfs.close(h);
             return STATUS_FILE_IS_A_DIRECTORY;
         }
+        super::trace_line(|| {
+            format!(
+                "OPEN {:#x} opts={create_options:#x} acc={granted_access:#x} size={} {}",
+                h.0,
+                st.size,
+                String::from_utf8_lossy(&disk)
+            )
+        });
         // SAFETY: WinFsp's out pointers.
         unsafe { finish_open(c, h, &st, &disk, file_context, info) };
         STATUS_SUCCESS
@@ -637,6 +647,7 @@ unsafe extern "system" fn create(
     guard("Create", || {
         // SAFETY: WinFsp passes our file system and a NUL-terminated name.
         let (c, name) = unsafe { (ctx(fs), wstr(name)) };
+        super::trace_path(name);
         if c.read_only {
             return STATUS_MEDIA_WRITE_PROTECTED;
         }
@@ -985,6 +996,7 @@ unsafe extern "system" fn read(
         if done == 0 {
             return STATUS_END_OF_FILE;
         }
+        super::trace_line(|| format!("READ {:#x} off={offset} len={length} got={done} size={size}", h.0));
         // SAFETY: valid out pointer.
         unsafe { *transferred = done as u32 };
         STATUS_SUCCESS

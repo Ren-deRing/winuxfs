@@ -310,11 +310,64 @@ pub(crate) fn file_info(st: &Stat, read_only_mount: bool) -> FSP_FSCTL_FILE_INFO
 
 /// Runs a callback body, turning a panic into `STATUS_UNSUCCESSFUL`.
 pub(crate) fn guard(name: &str, f: impl FnOnce() -> NTSTATUS) -> NTSTATUS {
+    TRACE_PATH.with(|p| p.borrow_mut().clear());
     match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(st) => st,
+        Ok(st) => {
+            if st != 0 {
+                trace_failure(name, st);
+            }
+            st
+        }
         Err(p) => {
             log_panic(name, &*p);
             STATUS_UNSUCCESSFUL
+        }
+    }
+}
+
+thread_local! {
+    static TRACE_PATH: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Remembers the path of the callback running on this thread (trace only).
+pub(crate) fn trace_path(name: &[u16]) {
+    if trace_file().is_some() {
+        TRACE_PATH.with(|p| *p.borrow_mut() = String::from_utf16_lossy(name));
+    }
+}
+
+/// Opt-in diagnostics: `WINUXFS_TRACE=<file>` appends one line per failing callback.
+fn trace_file() -> Option<&'static std::sync::Mutex<std::fs::File>> {
+    static F: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> =
+        std::sync::OnceLock::new();
+    F.get_or_init(|| {
+        let path = std::env::var_os("WINUXFS_TRACE")?;
+        let f = std::fs::OpenOptions::new().create(true).append(true).open(path).ok()?;
+        Some(std::sync::Mutex::new(f))
+    })
+    .as_ref()
+}
+
+/// `WINUXFS_TRACE_ALL=1` additionally logs every successful Open and Read.
+pub(crate) fn trace_line(line: impl FnOnce() -> String) {
+    use std::io::Write;
+    static ALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ALL.get_or_init(|| std::env::var_os("WINUXFS_TRACE_ALL").is_some()) {
+        return;
+    }
+    if let Some(f) = trace_file() {
+        if let Ok(mut f) = f.lock() {
+            let _ = writeln!(f, "{}", line());
+        }
+    }
+}
+
+fn trace_failure(name: &str, st: NTSTATUS) {
+    use std::io::Write;
+    if let Some(f) = trace_file() {
+        let path = TRACE_PATH.with(|p| p.borrow().clone());
+        if let Ok(mut f) = f.lock() {
+            let _ = writeln!(f, "{name} {:#010x} {path}", st as u32);
         }
     }
 }
