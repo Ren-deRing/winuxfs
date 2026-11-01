@@ -117,6 +117,7 @@ pub fn mount_with(s: Setup, fill: impl FnOnce(&Vfs)) -> Mounted {
         volume_label: LABEL.to_string(),
         read_only: s.read_only,
         case_sensitive: !s.case_insensitive,
+        allow_users: false,
     };
     let fs = mount_vfs(&fsp, vfs.clone(), DRIVE, &opts).expect("mount_vfs");
     Mounted {

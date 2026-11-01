@@ -107,14 +107,17 @@ Known gaps, from the review ledger:
   `diskpart`, `select disk N` then `online disk`. A `winuxfs online` helper
   is not provided in M1.
 - **Service mounts.** `winuxfs service run` (started by the service manager,
-  LocalSystem, delayed auto-start, depends on `WinFsp.Launcher`) runs one
+  LocalSystem, auto-start, depends on `WinFsp.Launcher`) runs one
   `mount` per config line on its own thread. Stop, shutdown and pre-shutdown
   call `unmount` for each mount point in parallel and wait for the serving
   threads, so the XFS log is flushed before Windows goes down (pre-shutdown
   timeout 60 s). The mount-point claim objects live in the `Global\` namespace
-  so the CLI in any session can find them; they are readable only by SYSTEM and
-  administrators, so `unmount` needs an elevated prompt (as for any mount made
-  by an elevated process).
+  so the CLI in any session can find them. Their DACL (`D:(A;;GA;;;SY)(A;;GA;;;BA)
+  (A;;GA;;;OW)`) is explicit: the default DACL of a SYSTEM-created object lets
+  Administrators only read it, which would make `unmount` fail. `unmount` needs
+  an elevated prompt. The volume's own descriptor (`volume_sddl`) names the
+  mounting user, SYSTEM and Administrators; `--allow-users` (always on for
+  service mounts, whose mounting user is SYSTEM) adds Authenticated Users.
 - **`unmount` of nothing.** `winuxfs unmount X:` exits with the usage error
   code and prints "Nothing is mounted by winuxfs on X:" when no process serves
   X: (also when only a stale stop event of a killed process remains).

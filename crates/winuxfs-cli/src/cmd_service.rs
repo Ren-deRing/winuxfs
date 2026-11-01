@@ -162,10 +162,9 @@ mod win {
         OpenSCManagerW, OpenServiceW, QueryServiceStatus, RegisterServiceCtrlHandlerExW,
         SetServiceStatus, StartServiceCtrlDispatcherW, SC_MANAGER_CONNECT,
         SC_MANAGER_CREATE_SERVICE, SERVICE_ACCEPT_PRESHUTDOWN, SERVICE_ACCEPT_SHUTDOWN,
-        SERVICE_ACCEPT_STOP, SERVICE_AUTO_START, SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
-        SERVICE_CONFIG_DESCRIPTION, SERVICE_CONFIG_PRESHUTDOWN_INFO, SERVICE_CONTROL_INTERROGATE,
-        SERVICE_CONTROL_PRESHUTDOWN, SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP,
-        SERVICE_DELAYED_AUTO_START_INFO, SERVICE_DESCRIPTIONW, SERVICE_ERROR_NORMAL,
+        SERVICE_ACCEPT_STOP, SERVICE_AUTO_START, SERVICE_CONFIG_DESCRIPTION,
+        SERVICE_CONFIG_PRESHUTDOWN_INFO, SERVICE_CONTROL_INTERROGATE, SERVICE_CONTROL_PRESHUTDOWN,
+        SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP, SERVICE_DESCRIPTIONW, SERVICE_ERROR_NORMAL,
         SERVICE_PRESHUTDOWN_INFO, SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_START_PENDING,
         SERVICE_STATUS, SERVICE_STOP, SERVICE_STOPPED, SERVICE_STOP_PENDING, SERVICE_TABLE_ENTRYW,
         SERVICE_WIN32_OWN_PROCESS,
@@ -287,14 +286,6 @@ mod win {
                 svc.0,
                 SERVICE_CONFIG_DESCRIPTION,
                 &d as *const _ as *const c_void,
-            );
-            let delayed = SERVICE_DELAYED_AUTO_START_INFO {
-                fDelayedAutostart: TRUE,
-            };
-            ChangeServiceConfig2W(
-                svc.0,
-                SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
-                &delayed as *const _ as *const c_void,
             );
             // Time Windows waits for the unmounts at shutdown.
             let pre = SERVICE_PRESHUTDOWN_INFO {
@@ -523,7 +514,12 @@ mod win {
                 .and_then(Path::parent)
                 .or(dir.as_deref()),
         ) {
-            Ok(m) => {
+            Ok(mut m) => {
+                // The mounting user is SYSTEM: without this nobody else could
+                // open the volume.
+                for x in &mut m {
+                    x.allow_users = true;
+                }
                 log(&format!("{} mount(s) configured", m.len()));
                 m
             }
@@ -541,6 +537,10 @@ mod win {
             if stopping() {
                 return;
             }
+            log(&format!(
+                "mounting {} ({}), attempt {attempt}",
+                m.mountpoint, m.device
+            ));
             match cmd_mount::mount(&m) {
                 Ok(()) => {
                     log(&format!("{} unmounted", m.mountpoint));

@@ -28,10 +28,13 @@ arguments of `winuxfs mount`:
 Y: disk:1 --partition 1 --type xfs --case-insensitive
 ```
 
-Then `sc.exe start winuxfs` (or reboot; it starts a short while after Windows).
+Then `sc.exe start winuxfs` (or reboot; it starts with Windows).
 Because the service runs as SYSTEM, the drive letter is visible in every session
 (File Explorer, Steam, other users), unlike a mount made from an elevated shell,
-which a non-elevated Explorer does not see. Stopping the service or shutting
+which a non-elevated Explorer does not see. Service mounts are open to all
+signed-in users (Authenticated Users get full access, as `--allow-users` does
+for a manual mount; without it only the mounting user, SYSTEM and
+Administrators can open the volume). Stopping the service or shutting
 Windows down unmounts cleanly (the file system log is flushed). A mount that
 fails (disk not ready yet) is retried every 5 s for 2 minutes. Progress and
 errors go to `winuxfs-service.log` next to the config. Edit the config, then

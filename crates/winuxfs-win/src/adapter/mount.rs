@@ -186,17 +186,10 @@ fn current_user_sid() -> Result<String, WinFspError> {
     res
 }
 
-/// The fixed descriptor of this milestone: owner and group are the mounting
-/// user, who gets full access, as do SYSTEM and Administrators. On a
-/// read-only mount they get read and execute access only, so Windows' own
-/// access check refuses write opens (WinFsp's `ReadOnlyVolume` flag only
-/// reports the volume as read-only; it does not refuse write opens).
-fn security_descriptor(read_only: bool) -> Result<Vec<u8>, WinFspError> {
+/// The descriptor of every file of the mount, see [`super::volume_sddl`].
+fn security_descriptor(read_only: bool, allow_users: bool) -> Result<Vec<u8>, WinFspError> {
     let sid = current_user_sid()?;
-    let r = if read_only { "FRFX" } else { "FA" };
-    let sddl = wide(&format!(
-        "O:{sid}G:{sid}D:P(A;;{r};;;{sid})(A;;{r};;;SY)(A;;{r};;;BA)"
-    ));
+    let sddl = wide(&super::volume_sddl(&sid, read_only, allow_users));
     let mut psd: *mut c_void = std::ptr::null_mut();
     let mut len = 0u32;
     // SAFETY: sddl is NUL-terminated; psd receives a LocalAlloc'd
@@ -292,7 +285,7 @@ pub fn mount_vfs(
         read_only: opts.read_only,
         case_insensitive: !opts.case_sensitive,
         label,
-        sd: security_descriptor(opts.read_only)?,
+        sd: security_descriptor(opts.read_only, opts.allow_users)?,
         open: Mutex::new(HashSet::new()),
     }));
     let interface = Box::into_raw(Box::new(FSP_FILE_SYSTEM_INTERFACE {
@@ -996,7 +989,12 @@ unsafe extern "system" fn read(
         if done == 0 {
             return STATUS_END_OF_FILE;
         }
-        super::trace_line(|| format!("READ {:#x} off={offset} len={length} got={done} size={size}", h.0));
+        super::trace_line(|| {
+            format!(
+                "READ {:#x} off={offset} len={length} got={done} size={size}",
+                h.0
+            )
+        });
         // SAFETY: valid out pointer.
         unsafe { *transferred = done as u32 };
         STATUS_SUCCESS

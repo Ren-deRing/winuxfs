@@ -342,7 +342,11 @@ fn trace_file() -> Option<&'static std::sync::Mutex<std::fs::File>> {
         std::sync::OnceLock::new();
     F.get_or_init(|| {
         let path = std::env::var_os("WINUXFS_TRACE")?;
-        let f = std::fs::OpenOptions::new().create(true).append(true).open(path).ok()?;
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()?;
         Some(std::sync::Mutex::new(f))
     })
     .as_ref()
@@ -402,6 +406,26 @@ pub struct MountOptions {
     pub read_only: bool,
     /// Must match the Vfs: `true` iff the Vfs is not case-insensitive.
     pub case_sensitive: bool,
+    /// Also grants access to Authenticated Users. The default descriptor
+    /// admits only the mounting user, SYSTEM and Administrators, which locks
+    /// out everybody else when the mounting user is SYSTEM (the service).
+    pub allow_users: bool,
+}
+
+/// The security descriptor (SDDL) of every file of a mount: owner and group
+/// are the mounting user `sid`, who gets full access, as do SYSTEM and
+/// Administrators (and Authenticated Users with `allow_users`). On a
+/// read-only mount they get read and execute access only, so Windows' own
+/// access check refuses write opens (WinFsp's `ReadOnlyVolume` flag only
+/// reports the volume as read-only; it does not refuse write opens).
+pub fn volume_sddl(sid: &str, read_only: bool, allow_users: bool) -> String {
+    let r = if read_only { "FRFX" } else { "FA" };
+    let users = if allow_users {
+        format!("(A;;{r};;;AU)")
+    } else {
+        String::new()
+    };
+    format!("O:{sid}G:{sid}D:P(A;;{r};;;{sid})(A;;{r};;;SY)(A;;{r};;;BA){users}")
 }
 
 #[cfg(windows)]
@@ -415,6 +439,20 @@ mod tests {
     use super::*;
     use winuxfs_core::plugin::{FileType, Stat, Timespec};
     use winuxfs_core::Errno;
+
+    #[test]
+    fn sddl_is_private_unless_users_are_allowed() {
+        let a = volume_sddl("S-1-5-18", false, false);
+        assert_eq!(
+            a,
+            "O:S-1-5-18G:S-1-5-18D:P(A;;FA;;;S-1-5-18)(A;;FA;;;SY)(A;;FA;;;BA)"
+        );
+        assert!(!a.contains("AU"));
+        let b = volume_sddl("S-1-5-21-1-2-3-1001", false, true);
+        assert!(b.ends_with("(A;;FA;;;BA)(A;;FA;;;AU)"), "{b}");
+        let c = volume_sddl("S-1-5-18", true, true);
+        assert!(c.ends_with("(A;;FRFX;;;AU)") && !c.contains("FA"), "{c}");
+    }
 
     #[test]
     fn panics_in_callbacks_become_status_unsuccessful() {
