@@ -48,7 +48,7 @@ The install can be watched in a browser at <http://127.0.0.1:8006>.
 | `vm/shared/` | `/shared` | Samba share. Gitignored. |
 | `vm/snapshots/` | - | `vmctl.py snapshot` output. Gitignored. |
 | `vm/.ssh/` | - | The rig's dedicated SSH key pair. Gitignored. |
-| `~/다운로드/Windows11_Client_x64_en-us_26300_9457.iso` | `/custom.iso` (ro) | Local install media; override with `WINUXFS_ISO`. |
+| `~/다운로드/Windows11_Client_x64_en-us_26300_9457.iso` | `/custom.iso` (ro) | Local install media; override with `WINUXFS_ISO`. A `tiny11.iso` (the stripped image the project targets) also installs, and the XFS write acceptance passes on it. |
 
 `vm/run.sh` environment overrides: `WINUXFS_VM_NAME` (default `winuxfs-vm`),
 `WINUXFS_VM_IMAGE` (default `docker.io/dockurr/windows:6.06`), `WINUXFS_ISO`,
@@ -315,3 +315,21 @@ Observations (build 26300, WinFsp 2.1, 2026-10-29):
    delete them. Press Ctrl-C in the terminal (or run `winuxfs unmount Y:`)
    to unmount.
 5. `tools/vmctl.py down`. To discard changes, `tools/vmctl.py restore clean`.
+
+## Lessons from the write acceptance (2026-11)
+
+- `vm/oem/` needs `winfsp.msi` and `openssh.msi` before the first `up`
+  (install.bat does not download them).
+- `attach-disk` always overwrites `vm/storage2/data2.img` with a fresh copy and
+  restarts the VM. A stale image from an earlier run contaminates experiments
+  (a previous run's writes look like bugs); re-attach the pristine
+  `target/xfs-vm/disk.img` before each run. `check.sh --vm` does this, then
+  `vmctl down` and verifies the disk on the host with `xfs_repair -n`.
+- Processes started through ssh die when the session ends (and take their WinFsp
+  mount with them). Start long-lived mounts detached:
+  `Invoke-CimMethod Win32_Process -MethodName Create` (drive `Y:` then lives in
+  session 0).
+- Do not `pkill -f` a pattern that also matches your own shell command line.
+- A hang under multi-threaded writes was the SRWLOCK recursive-read deadlock
+  (see `docs/xfs-backend.md`, Write support). `crashdbg_win.c` in the plugin
+  prints the exception code and module+RVA frames to stderr on a crash.

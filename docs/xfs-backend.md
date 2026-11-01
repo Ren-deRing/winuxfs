@@ -1,6 +1,6 @@
-# XFS backend (M2, read-only)
+# XFS backend (M2 read, M3 write + journal)
 
-`backends/xfs` mounts XFS v5 file systems read-only. The design is in
+`backends/xfs` mounts XFS v5 file systems read-write (read-only when a feature or option demands it; see "Write support"). The design is in
 `docs/superpowers/specs/2026-10-29-m2-xfs-readonly-design.md`; this page is
 the operating summary: what it is, how to mount, what can go wrong, how it is
 tested, and how fast it is.
@@ -25,10 +25,10 @@ winuxfs_backend_xfs.dll  (C, statically linked, mingw / gcc)
 The kernel's own `libxfs` read path (29 files) is compiled against a small
 shim, so on-disk parsing, CRC32C checks and verifiers are the kernel's. The
 backend adds the mount sequence, the caches, the log check and the ABI
-adapter. All write operations are NULL in the table; the core answers them
-with `ENOSYS`, and the volume is read-only (`WFS_CAP_READONLY`), so Windows
-refuses writes before they reach the backend. Capabilities are
-`READONLY | HARDLINK | SYMLINK`; the backend is thread-safe (no
+adapter. Write operations (wops.c, wdata.c, the log in the vendored `xfs_log*`
+and `xfs_trans*`) are filled in; `WFS_CAP_READONLY` is not declared, the mount
+decides at runtime (`want_rw`, mount.c) and reports a read-only volume
+otherwise. Capabilities are `HARDLINK | SYMLINK`; the backend is thread-safe (no
 `SINGLE_THREADED`), and `forget` never does I/O.
 
 Build: `make -C backends/xfs plugin` (host) or
@@ -67,6 +67,49 @@ bits, `sb_inprogress`. Extended attributes and ACLs are validated but not
 exposed (ABI v1 has no xattr operation); the Windows security descriptor is
 derived from the mode bits.
 
+## Write support (M3)
+
+Status: create/mkdir/unlink/rmdir/rename/link/symlink, write (direct IO with
+unwritten-extent ordering), truncate, setattr (incl. mtime/ctime on overwrite),
+log writing and recovery, rmapbt/reflink metadata updates. Not done: background
+log/AIL threads and `commit_interval_ms`/`dirty_limit_bytes` (M3c), kernel-written
+log fixtures (M3b rest), reflink CoW (M4).
+
+An rw mount is demoted to read-only (the reason is printed) for: `norecovery`,
+read-only host device, missing log device, unknown ro-compat bits, realtime
+device, quota accounting, **parent pointers and metadir** (`xfs_parent.c` is not
+vendored; the newest `mkfs.xfs` enables parent pointers by default, so use
+`-n parent=0` for a writable image).
+
+**Reflink-shared inodes.** Without CoW, an inode flagged `REFLINK` refuses
+write, shrinking truncate, last-unlink and rename-over with `EOPNOTSUPP`
+(`wdata.c`, `wops.c`). Only tested with the flag set through `xfs_db`, not with
+real shared extents.
+
+**Windows.** The shim's `rw_semaphore` is a reader-preferring SRWLOCK +
+CONDITION_VARIABLE: SRWLOCK is writer-fair and the kernel nests read locks, which
+deadlocks. Do not replace it with a bare SRWLOCK. Real-device writes are not
+recommended yet; use the test VM.
+
+### Write tests
+
+All use images made with `WFEAT` (mkfs feature string, default in each test as
+`PLAIN`); `-san` variants run ASan/UBSan.
+
+| Target (`make -C backends/xfs ...`) | What |
+|---|---|
+| `test-wops test-wdata test-wlink test-recover` | namespace ops, data path, links, log recovery |
+| `test-crash` (`WCRASH_POINTS=N`) | records device writes/flushes, replays every prefix, checks `xfs_repair`-clean state |
+| `test-wstress`, `test-wstress-tsan` | parallel writers; TSan uses `tests/tsan.supp` |
+| `test-wrmap` | the above suites on a rmapbt+reflink image (`WFEAT=...`) |
+| `test-wfuzz-all` | mutate metadata sectors after a write workload, rw mount incl. replay, ASan/UBSan, CRC-skip build (env `WFUZZ_ITERS/SEED/MUT/ONLY/STRICT`) |
+
+`tests/tsan.supp` lists only the kernel's intentional lock-free reads (per
+function, each with a reason). A new race report must be fixed, not
+suppressed, unless it is the same kind of lockless read of a word the kernel
+also reads unlocked. Fuzz detection power was not checked with a deliberately
+planted bug.
+
 ## Error mapping
 
 The backend returns `-(Linux errno)`; the core turns that into `Errno`, and the
@@ -82,7 +125,7 @@ WinFsp adapter into an `NTSTATUS`.
 | Missing name | `-ENOENT` | `STATUS_OBJECT_NAME_NOT_FOUND` |
 | Not a directory / is a directory | `-ENOTDIR` / `-EISDIR` | `STATUS_NOT_A_DIRECTORY` / `STATUS_FILE_IS_A_DIRECTORY` |
 | `readlink` of something that is not a symlink | `-EINVAL` | (not reachable from Windows yet) |
-| Any write | `ENOSYS` / `EROFS` | `STATUS_MEDIA_WRITE_PROTECTED` |
+| Write on a read-only mount | `EROFS` | `STATUS_MEDIA_WRITE_PROTECTED` |
 
 A corrupt file or directory fails only that operation; the mount stays up.
 The details (which check failed, hex masks) go to the backend log, which the
@@ -95,7 +138,7 @@ winuxfs: Backend 'xfs' could not mount disk:1 (error 117): check --type, --parti
 
 ## Limits and known behavior
 
-- Read-only. No log replay (use Linux to replay, or `norecovery`).
+- Log replay is done at an rw mount; a read-only mount of a dirty log is refused unless `norecovery`.
 - Symlinks appear as regular files whose size is the target length (the
   adapter has no reparse points yet). **Reading one returns the target
   text** (the same bytes as `readlink`, so size and content agree, like a
@@ -157,8 +200,8 @@ stage with `--vm`).
 `tools/check.sh --vm` ends with the XFS stage:
 
 1. `tools/xfs_vm_acceptance.py prepare` builds one GPT disk
-   (`target/xfs-vm/disk.img`, about 560 MB on disk, sparse) with four
-   partitions: 1 the clean matrix image `m00-b1024-s512-ddef-plain`, 2 a copy
+   (`target/xfs-vm/disk.img`, about 560 MB on disk, sparse) with five
+   partitions (the fifth is the write image, below): 1 the clean matrix image `m00-b1024-s512-ddef-plain`, 2 a copy
    with a dirty log (a start-transaction record whose tail is mkfs's unmount
    record, same layout as `backends/xfs/tests/test_logcheck.c`), 3
    `hole-unwritten.img`, 4 a 768 MiB image with one 512 MiB file.
@@ -183,7 +226,9 @@ stage with `--vm`).
 | `symlink_reported` | the three symlinks are listed with size = target length |
 | `dirty_image_refused_with_message` | mount of the dirty image exits nonzero, message names `norecovery` and the log |
 | `norecovery_option_mounts` | the same image mounts with `--options norecovery` and equals the manifest |
-| `readonly_attribute_and_write_refused` | volume is `ReadOnly`; overwrite, append, create, mkdir, delete, rename, set-attribute all fail; `tiny.txt` unchanged |
+| `readonly_attribute_and_write_refused` | on a `--options ro` mount the volume is `ReadOnly`; overwrite, append, create, mkdir, delete, rename, set-attribute all fail; `tiny.txt` unchanged |
+| `windows_write_roundtrip` | partition 5 (320 MiB rmapbt/reflink image, `parent=0`) mounted rw: create/overwrite/append/rename/copy/truncate/delete, many files, Korean name, rmdir, 40 MiB file, setattr-then-write; checked live and after remount (7 stages) |
+| `xfs_repair_clean_after_windows_writes` | `xfs_repair -n` on the attached data disk after the run (`--data-disk`) |
 
 Set `XFS_FIXTURES` to the fixture directory (default `tests/xfs/images`,
 generated on demand) and `WINUXFS_VMCTL` in a worktree.

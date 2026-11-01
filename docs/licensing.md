@@ -332,7 +332,7 @@ Bill Zissimopoulos <billziss at navimatics.com>.
 
 ### 범위
 
-- 커밋 `d135ab453a7400a34930bdda1ef4bdc8acfac80e`의 `fs/xfs` 중 158개 파일을 **바이트 단위로 그대로** 복사했다(`tools/vendor-xfs.sh --src <fs/xfs>`). M2(읽기 경로) 123개: `libxfs/*.c` 29개(M2 설계 5.1), `libxfs/*.h` 전부 65개, 최상위 편집 대상 6개(M2 설계 5.3), 최상위 헤더 23개. M3(쓰기·로그, 2026-10-31 추가) 35개: M3 설계 3절의 `libxfs/*.c` 11개, 최상위 `.c` 21개와 그 `.c`들이 `#include`하는 최상위 헤더 3개. 최상위 헤더는 참고용이고 실제 컴파일은 `backends/xfs/shim/`의 헤더를 쓴다.
+- 커밋 `d135ab453a7400a34930bdda1ef4bdc8acfac80e`의 `fs/xfs` 중 159개 파일을 **바이트 단위로 그대로** 복사했다(`tools/vendor-xfs.sh --src <fs/xfs>`). M2(읽기 경로) 123개: `libxfs/*.c` 29개(M2 설계 5.1), `libxfs/*.h` 전부 65개, 최상위 편집 대상 6개(M2 설계 5.3), 최상위 헤더 23개. M3(쓰기·로그, 2026-10-31 추가) 35개: M3 설계 3절의 `libxfs/*.c` 11개, 최상위 `.c` 21개와 그 `.c`들이 `#include`하는 최상위 헤더 3개, 그리고 M3a T4(2026-11-01)에서 `xfs_fsops.c` 1개. 최상위 헤더는 참고용이고 실제 컴파일은 `backends/xfs/shim/`의 헤더를 쓴다.
 - 파일별 SHA-256과 커밋 SHA는 `third_party/linux-xfs/SOURCE`에 있다. `tools/vendor-xfs.sh --verify`(`tools/check.sh`가 실행)가 어긋남, 누락, 추가 파일을 모두 실패로 처리한다.
 - 수정이 필요하면 `third_party/linux-xfs-patches/`의 패치로만 한다. 반입 트리는 수정하지 않는다.
 - `third_party/`는 Rust 크레이트가 아니다(워크스페이스 멤버 아님). `cargo deny`/`fmt`/`clippy`에 영향이 없다.
