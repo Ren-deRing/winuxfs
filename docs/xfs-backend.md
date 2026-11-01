@@ -52,6 +52,7 @@ external log and realtime devices. `--type auto` probes all backends.
 | `norecovery` | Mount a file system whose log is dirty (or that has `NEEDSREPAIR`) without replaying it. Metadata may be stale or inconsistent; summary counters are recomputed from the AG headers. An external log device may then be absent. |
 | `bufcache_bytes=N` | Buffer cache limit, 1 MiB..64 GiB, default 64 MiB. |
 | `inodecache_entries=N` | Inode cache limit, 64..2^24 entries, default 16384. |
+| `commit_interval_ms=N` | Period of the kernel log worker (10..3600000 ms, default 30000): how long a change that nobody synced can stay only in memory. It is a process-wide kernel global, so with several mounts the last one wins. A crash loses at most this much; the file system stays consistent. `fsync`/`sync` do not wait for it. |
 
 Unknown options and bad values fail the mount with a message. Default memory
 is about 130 MiB (buffers 64 MiB plus inodes, plus constants). File data is
@@ -71,9 +72,11 @@ derived from the mode bits.
 
 Status: create/mkdir/unlink/rmdir/rename/link/symlink, write (direct IO with
 unwritten-extent ordering), truncate, setattr (incl. mtime/ctime on overwrite),
-log writing and recovery, rmapbt/reflink metadata updates. Not done: background
-log/AIL threads and `commit_interval_ms`/`dirty_limit_bytes` (M3c), kernel-written
-log fixtures (M3b rest), reflink CoW (M4).
+log writing and recovery, rmapbt/reflink metadata updates, kernel-written log
+fixtures. The kernel's own background machinery runs unmodified (`xfsaild`, log
+worker, CIL push workqueue). Not done: reflink CoW (M4). There is no
+`dirty_limit_bytes`: file data is never cached (direct IO) and dirty metadata is
+bounded by the log size, so there is nothing to limit.
 
 An rw mount is demoted to read-only (the reason is printed) for: `norecovery`,
 read-only host device, missing log device, unknown ro-compat bits, realtime
@@ -91,6 +94,18 @@ CONDITION_VARIABLE: SRWLOCK is writer-fair and the kernel nests read locks, whic
 deadlocks. Do not replace it with a bare SRWLOCK. Real-device writes are not
 recommended yet; use the test VM.
 
+### Write ordering and cost
+
+A write into a hole allocates an unwritten extent, writes the data, then
+converts the extent. There is **no device flush per write**: the log write of the
+checkpoint that carries the conversion starts with a device flush (`PREFLUSH`,
+the kernel's `XLOG_ICL_NEED_FLUSH`), so the data is durable before the
+conversion can be. `test-crash` proves it: disabling that `PREFLUSH` in `bio.c`
+is detected (bad crash images). Before this change every 4 KiB write cost one
+device flush. `make bench-write [IMG=...] [OPTS=...]` prints files/s and MiB/s
+with device write and flush counts (file-backed device, so it measures the
+backend's own cost, not the disk).
+
 ### Write tests
 
 All use images made with `WFEAT` (mkfs feature string, default in each test as
@@ -102,6 +117,7 @@ All use images made with `WFEAT` (mkfs feature string, default in each test as
 | `test-crash` (`WCRASH_POINTS=N`) | records device writes/flushes, replays every prefix, checks `xfs_repair`-clean state |
 | `test-wstress`, `test-wstress-tsan` | parallel writers; TSan uses `tests/tsan.supp` |
 | `test-wrmap` | the above suites on a rmapbt+reflink image (`WFEAT=...`) |
+| `test-recover` | also: replay of a log written by the real kernel (`root-fixtures/dirty-log`), and the background commit (`commit_interval_ms`) making an unsynced change survive a crash |
 | `test-wfuzz-all` | mutate metadata sectors after a write workload, rw mount incl. replay, ASan/UBSan, CRC-skip build (env `WFUZZ_ITERS/SEED/MUT/ONLY/STRICT`) |
 
 `tests/tsan.supp` lists only the kernel's intentional lock-free reads (per

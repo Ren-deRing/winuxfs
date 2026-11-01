@@ -397,6 +397,44 @@ static void kernel_written_log(void)
 	CHECK(repair_clean(img));
 }
 
+/* The kernel's log worker forces the log every commit_interval_ms: a change nobody synced
+ * survives a "crash" (an image copy) taken after the interval, and does not before it. */
+static void background_commit(void)
+{
+	const char *img = mkimg("bc", PLAIN);
+	const char *early, *late;
+	struct mnt m;
+	wfs_ino_t f, g;
+	wfs_stat st;
+
+	CHECK(img != NULL);
+	if (!img)
+		return;
+	CHECK_RC(mnt_open(&m, img, "commit_interval_ms=300", false), 0);
+	if (!m.x)
+		return;
+	CHECK_RC(mk(&m, ROOT, "unsynced", WFS_FT_REG, 0644, &f, &st), 0);
+	early = cpimg(img, "bc_early");		/* immediately: still only in memory */
+	usleep(1500 * 1000);			/* a few log-worker periods */
+	late = cpimg(img, "bc_late");
+	CHECK(early && late);
+	CHECK_RC(mnt_close(&m), 0);
+	if (!early || !late)
+		return;
+	CHECK_RC(mnt_open(&m, early, "", false), 0);
+	if (m.x) {
+		CHECK(lk(&m, ROOT, "unsynced", &g, &st) != 0);
+		CHECK_RC(mnt_close(&m), 0);
+	}
+	CHECK_RC(mnt_open(&m, late, "", false), 0);
+	if (m.x) {
+		CHECK_RC(lk(&m, ROOT, "unsynced", &g, &st), 0);
+		CHECK_RC(mnt_close(&m), 0);
+	}
+	CHECK(repair_clean(early));
+	CHECK(repair_clean(late));
+}
+
 /* Replaying twice gives the same result (the first replay's own crash is T9). */
 static void replay_is_idempotent(void)
 {
@@ -446,6 +484,7 @@ int main(int argc, char **argv)
 	RUN(replay_after_crash);
 	RUN(replay_is_idempotent);
 	RUN(kernel_written_log);
+	RUN(background_commit);
 	if (!failures)
 		sh("rm -rf '%s'", tmp);
 	else

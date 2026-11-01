@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Mount option parser (Task 6). Grammar: item { "," item }, item =
- *   norecovery | ro | rw | bufcache_bytes=N | inodecache_entries=N
+ *   norecovery | ro | rw | bufcache_bytes=N | inodecache_entries=N | commit_interval_ms=N
  * N is a plain decimal number (digits only, no sign/space/suffix).
  * Ranges: bufcache_bytes 1 MiB..64 GiB, inodecache_entries 64..2^24.
  */
@@ -50,6 +50,7 @@ int wfs_xfs_parse_options(const wfs_host_api *api, const char *str,
 	o->ro = false;
 	o->bufcache_bytes = WFS_XFS_BUFCACHE_DEF;
 	o->inodecache_entries = WFS_XFS_INODECACHE_DEF;
+	o->commit_interval_ms = WFS_XFS_COMMIT_MS_DEF;
 	if (!p)
 		return 0;
 	while (*p) {
@@ -93,6 +94,16 @@ int wfs_xfs_parse_options(const wfs_host_api *api, const char *str,
 				return -WFS_EINVAL;
 			}
 			o->inodecache_entries = (uint32_t)v;
+		} else if (klen == 18 && !memcmp(p, "commit_interval_ms", 18)) {
+			if (!eq || !parse_u64(eq + 1, len - klen - 1, &v)) {
+				opt_err(api, "needs a decimal number", p, len);
+				return -WFS_EINVAL;
+			}
+			if (v < WFS_XFS_COMMIT_MS_MIN || v > WFS_XFS_COMMIT_MS_MAX) {
+				opt_err(api, "out of range (10..3600000)", p, len);
+				return -WFS_EINVAL;
+			}
+			o->commit_interval_ms = (uint32_t)v;
 		} else {
 			opt_err(api, "unknown option", p, len);
 			return -WFS_EINVAL;

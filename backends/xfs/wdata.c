@@ -5,7 +5,10 @@
  *   1. holes in the range are allocated as UNWRITTEN extents (transaction),
  *   2. the data is written to the device (head/tail padding of new blocks is
  *      zero-filled, sub-sector edges are read-modify-write),
- *   3. blk_flush, then unwritten extents are converted (transaction),
+ *   3. unwritten extents are converted (transaction). No flush here: the log
+ *      write of the checkpoint carrying this conversion starts with a device
+ *      flush (the kernel's XLOG_ICL_NEED_FLUSH), so the data is durable
+ *      before the conversion can be; fsync/sync force the log,
  *   4. i_size grows in a last small transaction.
  * So a crash never exposes stale block contents and the size never covers
  * data that is not durable. Overwrites of written extents are in place.
@@ -296,8 +299,6 @@ static int write_chunk(struct wfs_xfs *x, struct xfs_inode *ip, uint64_t pos, co
 		p = seg_end;
 	}
 	if (alloced || unwritten) {
-		if (wfs_xfs_blk_flush(&x->blk, WFS_DEV_DATA))
-			return -WFS_EIO;
 		error = convert_range(ip, fsb, endfsb);
 		if (error)
 			return error;

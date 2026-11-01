@@ -153,6 +153,12 @@ void xfs_fs_measure_sickness(struct xfs_mount *mp, unsigned int *sick, unsigned 
 	*sick = *checked = 0;
 }
 
+void xfs_group_measure_sickness(struct xfs_group *xg, unsigned int *sick, unsigned int *checked)
+{
+	(void)xg;
+	*sick = *checked = 0;
+}
+
 void xfs_inode_measure_sickness(struct xfs_inode *ip, unsigned int *sick, unsigned int *checked)
 {
 	(void)ip;

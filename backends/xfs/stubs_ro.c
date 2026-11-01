@@ -121,11 +121,6 @@ void xfs_group_mark_sick(struct xfs_group *xg, unsigned int mask)
 	WFS_STUB_RO();
 }
 
-void xfs_group_measure_sickness(struct xfs_group *xg, unsigned int *sick, unsigned int *checked)
-{
-	WFS_STUB_RO();
-}
-
 void xfs_iflush_rtrefcount(struct xfs_inode *ip, struct xfs_dinode *dip)
 {
 	WFS_STUB_RO();

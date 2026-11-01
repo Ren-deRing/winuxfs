@@ -32,3 +32,15 @@ test-wstress-tsan:
 		OUT=$(OUT)-tsan
 
 .PHONY: test-wstress test-wstress-san test-wstress-tsan
+
+# Host write performance baseline: make bench-write [IMG=...] [OPTS=...]  (default: a fresh 2 GiB image)
+BENCH_WRITE = $(OUT)/bench_write$(EXE)
+$(BENCH_WRITE): tests/bench_write.c $(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) wfs_xfs.h Makefile mk/wstress.mk | $(OUT)
+	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(INC) $(KINC) -I. -o $@ tests/bench_write.c \
+		$(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
+bench-write: $(BENCH_WRITE)
+	@img=$(if $(IMG),$(IMG),$(WSTRESS_TMP)/bench_write.img); \
+	if [ -z "$(IMG)" ]; then mkdir -p $(WSTRESS_TMP); rm -f $$img; truncate -s 2g $$img && \
+	  mkfs.xfs -q -f -m crc=1,rmapbt=0,reflink=0,metadir=0 -n parent=0 -i sparse=1 $$img; fi; \
+	$(BENCH_WRITE) $$img "$(OPTS)"; r=$$?; [ -n "$(IMG)" ] || rm -f $$img; exit $$r
+.PHONY: bench-write

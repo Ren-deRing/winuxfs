@@ -20,6 +20,9 @@ struct wfs_xfs;
 #define WFS_XFS_INODECACHE_MIN		64u
 #define WFS_XFS_INODECACHE_MAX		(1u << 24)
 #define WFS_XFS_INODECACHE_DEF		16384u
+#define WFS_XFS_COMMIT_MS_MIN		10u
+#define WFS_XFS_COMMIT_MS_MAX		3600000u
+#define WFS_XFS_COMMIT_MS_DEF		30000u
 #define WFS_XFS_MAX_AGCOUNT		(1u << 20)	/* hostile-sb guard, see prevalidate_sb */
 
 struct wfs_xfs_options {
@@ -27,6 +30,7 @@ struct wfs_xfs_options {
 	bool		ro;			/* read-only even on a writable device */
 	uint64_t	bufcache_bytes;		/* WFS_XFS_BUFCACHE_MIN..MAX */
 	uint32_t	inodecache_entries;	/* WFS_XFS_INODECACHE_MIN..MAX */
+	uint32_t	commit_interval_ms;	/* log worker period (process-wide, last mount wins) */
 };
 
 /*

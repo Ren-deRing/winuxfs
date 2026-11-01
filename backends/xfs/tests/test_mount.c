@@ -773,7 +773,7 @@ static void option_parser_rejects_bad_values(void)
 		"bufcache_bytes=68719476737", "bufcache_bytes=99999999999999999999999",
 		"bufcache_bytes=18446744073709551616", "bufcache_bytes=0", "=5", "=",
 		"inodecache_entries", "inodecache_entries=63", "inodecache_entries=16777217",
-		"inodecache_entries=0", "inodecache_entries=4294967296", "inodecache_entries=1e3",
+		"inodecache_entries=0", "commit_interval_ms", "commit_interval_ms=9", "commit_interval_ms=3600001", "commit_interval_ms=x", "inodecache_entries=4294967296", "inodecache_entries=1e3",
 		"Norecovery", "norecovery,bogus", "bufcache=5", "norecovery bufcache_bytes=2097152",
 		"norecoveryx", "bufcache_bytes=2097152;norecovery",
 	};
@@ -796,6 +796,9 @@ static void option_parser_rejects_bad_values(void)
 	CHECK(wfs_xfs_parse_options(&api, "bufcache_bytes=68719476736", &o) == 0 &&
 	      o.bufcache_bytes == 68719476736ull);
 	CHECK(wfs_xfs_parse_options(&api, "inodecache_entries=64", &o) == 0 && o.inodecache_entries == 64);
+	CHECK(wfs_xfs_parse_options(&api, "", &o) == 0 && o.commit_interval_ms == 30000);
+	CHECK(wfs_xfs_parse_options(&api, "commit_interval_ms=10", &o) == 0 && o.commit_interval_ms == 10);
+	CHECK(wfs_xfs_parse_options(&api, "commit_interval_ms=3600000", &o) == 0 && o.commit_interval_ms == 3600000);
 	CHECK(wfs_xfs_parse_options(&api, "inodecache_entries=16777216", &o) == 0 &&
 	      o.inodecache_entries == 16777216);
 	CHECK(wfs_xfs_parse_options(&api, "norecovery,bufcache_bytes=2097152,inodecache_entries=100", &o) == 0 &&

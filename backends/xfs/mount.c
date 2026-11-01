@@ -972,6 +972,8 @@ wfs_err_t wfs_xfs_mount(const wfs_host_api *api, wfs_blkdev *const devs[WFS_DEV_
 	}
 	/* 5b. read-only: the log must not write (stale block clearing, covering) */
 	x->rw = want_rw(x);
+	/* the kernel's log worker reads this global: the period is process-wide */
+	xfs_syncd_centisecs = (int)((x->opts.commit_interval_ms + 9) / 10);
 	if (x->rw) {
 		clear_bit(XFS_OPSTATE_READONLY, &mp->m_opstate);
 		x->sb.s_flags &= ~SB_RDONLY;
