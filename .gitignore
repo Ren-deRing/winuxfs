@@ -11,3 +11,6 @@ vm/.ssh/
 .worktrees/
 __pycache__/
 tests/xfs/images/
+
+# Design/plan documents written by the superpowers skills
+docs/superpowers/
