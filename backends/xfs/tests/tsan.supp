@@ -21,3 +21,6 @@ race:xfs_inode_item_format_data_fork
 race:xfs_iflush_finish
 race:xlog_cil_ctx_switch
 race:xlog_cil_flush
+#   xlog_valid_lsn: l_curr_cycle/l_curr_block read without the iclog lock; the caller only
+#     asserts the LSN is not ahead of the head, and the head only moves forward
+race:xlog_valid_lsn
