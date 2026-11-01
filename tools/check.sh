@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 set -euo pipefail
 cd "$(dirname "$0")/.."
-# Usage: tools/check.sh [--vm] [--fuzz]
+# Usage: tools/check.sh [--vm | --vm-only] [--fuzz]
 #   (no flag)  fast host checks (including test-fuzz: corpus + clean walk, seconds).
 #   --fuzz     the same, then `make fuzz-sample`: the seed-fixed 1% sample of all
 #              sector mutations in both CRC modes (about a minute; the full set is
@@ -13,15 +13,20 @@ cd "$(dirname "$0")/.."
 #              lib/bin unit tests of winuxfs-win and winuxfs-cli) run in the VM.
 #              WINUXFS_VMCTL overrides the vmctl.py to use (a worktree has no
 #              vm/ state; point it at the main checkout's tools/vmctl.py).
+#   --vm-only  only the Windows stages of --vm (cross-build, VM restore, Windows tests, XFS
+#              acceptance); skips the host checks, for a run right after a green host run.
 vm=0
 fuzz=0
+vm_only=0
 for a in "$@"; do
   case "$a" in
     --vm) vm=1 ;;
+    --vm-only) vm=1; vm_only=1 ;;	# skip the host checks (they ran already): Windows stages only
     --fuzz) fuzz=1 ;;
-    *) echo "usage: $0 [--vm] [--fuzz]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--vm | --vm-only] [--fuzz]" >&2; exit 2 ;;
   esac
 done
+if [ "$vm_only" = 0 ]; then  # host checks
 cargo fmt --check
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
@@ -125,6 +130,7 @@ if [ ${#skipped[@]} -gt 0 ]; then
 fi
 
 
+fi  # vm_only
 [ "$vm" = 1 ] || exit 0
 
 echo "== Windows cross-build"
