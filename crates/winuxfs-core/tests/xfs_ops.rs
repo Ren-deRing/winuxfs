@@ -310,9 +310,14 @@ fn read_only_write_ops_fail() {
     let dir = need!(fixtures(), "no fixture cache");
     let img = images(&dir).into_iter().next().unwrap();
     let m = be.mount(devs_for(&img), "").unwrap();
-    assert_eq!(m.write(1, 0, b"x"), Err(Errno::ENOSYS));
-    assert_eq!(m.unlink(1, b"nothing"), Err(Errno::ENOSYS));
-    assert!(be.caps() & 1 != 0, "read-only capability not declared");
+    // the fixture devices are opened read-only: the backend mounts read-only
+    assert_eq!(m.write(1, 0, b"x"), Err(Errno::EROFS));
+    assert_eq!(m.unlink(1, b"nothing"), Err(Errno::EROFS));
+    assert_eq!(
+        be.caps() & 1,
+        0,
+        "the xfs backend decides read-only at mount time"
+    );
 }
 
 #[test]
