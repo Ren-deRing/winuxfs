@@ -44,6 +44,18 @@ args=(
   -v "$VM_DIR/shared:/shared:Z"
 )
 
+# A host block device, READ-ONLY, as an NVMe disk of the guest:
+#   WINUXFS_HOST_DISK=/dev/nvme0n1p1 tools/vmctl.py up
+# The device must be unmounted on the host and readable by this user (setfacl -m u:$USER:r DEV).
+# It is not given to dockur as /diskN (dockur would open it read-write): QEMU gets it as a
+# read-only block node, so even a "format" in the guest cannot write to it.
+if [ -n "${WINUXFS_HOST_DISK:-}" ]; then
+  args+=(
+    --device "$WINUXFS_HOST_DISK:/xraw"
+    -e ARGUMENTS="-blockdev driver=host_device,node-name=xrawf,filename=/xraw,read-only=on -blockdev driver=raw,node-name=xrawd,file=xrawf,read-only=on -device nvme,serial=winuxfsx,drive=xrawd"
+  )
+fi
+
 # Second disk: dockur uses an existing /storage2/data2.img as-is. Mount the
 # directory only when an image is present; otherwise dockur would create a
 # blank 64G data2.img on every boot.
