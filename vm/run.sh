@@ -44,15 +44,16 @@ args=(
   -v "$VM_DIR/shared:/shared:Z"
 )
 
-# A host block device, READ-ONLY, as an NVMe disk of the guest:
+# A host block device as an NVMe disk of the guest, READ-ONLY unless WINUXFS_HOST_DISK_RW=1:
 #   WINUXFS_HOST_DISK=/dev/nvme0n1p1 tools/vmctl.py up
-# The device must be unmounted on the host and readable by this user (setfacl -m u:$USER:r DEV).
-# It is not given to dockur as /diskN (dockur would open it read-write): QEMU gets it as a
-# read-only block node, so even a "format" in the guest cannot write to it.
+# The device must be unmounted on the host and readable (setfacl -m u:$USER:r DEV; rw for the
+# read-write mode). It is not given to dockur as /diskN (dockur would open it read-write): QEMU
+# gets it as a block node, read-only by default, so even a "format" in the guest cannot write.
+host_ro=on; [ "${WINUXFS_HOST_DISK_RW:-0}" = 1 ] && host_ro=off
 if [ -n "${WINUXFS_HOST_DISK:-}" ]; then
   args+=(
     --device "$WINUXFS_HOST_DISK:/xraw"
-    -e ARGUMENTS="-blockdev driver=host_device,node-name=xrawf,filename=/xraw,read-only=on -blockdev driver=raw,node-name=xrawd,file=xrawf,read-only=on -device nvme,serial=winuxfsx,drive=xrawd"
+    -e ARGUMENTS="-blockdev driver=host_device,node-name=xrawf,filename=/xraw,read-only=$host_ro -blockdev driver=raw,node-name=xrawd,file=xrawf,read-only=$host_ro -device nvme,serial=winuxfsx,drive=xrawd"
   )
 fi
 
