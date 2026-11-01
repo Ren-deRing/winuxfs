@@ -166,24 +166,6 @@ int xfs_metadir_mkdir(struct xfs_inode *dp, const char *path, struct xfs_inode *
 	return -EROFS;
 }
 
-int xfs_parent_addname(struct xfs_trans *tp, struct xfs_parent_args *ppargs, struct xfs_inode *dp, const struct xfs_name *parent_name, struct xfs_inode *child)
-{
-	WFS_STUB_RO();
-	return -EROFS;
-}
-
-int xfs_parent_removename(struct xfs_trans *tp, struct xfs_parent_args *ppargs, struct xfs_inode *dp, const struct xfs_name *parent_name, struct xfs_inode *child)
-{
-	WFS_STUB_RO();
-	return -EROFS;
-}
-
-int xfs_parent_replacename(struct xfs_trans *tp, struct xfs_parent_args *ppargs, struct xfs_inode *old_dp, const struct xfs_name *old_name, struct xfs_inode *new_dp, const struct xfs_name *new_name, struct xfs_inode *child)
-{
-	WFS_STUB_RO();
-	return -EROFS;
-}
-
 int xfs_rtbitmap_create(struct xfs_rtgroup *rtg, struct xfs_inode *ip, struct xfs_trans *tp, bool init)
 {
 	WFS_STUB_RO();

@@ -87,7 +87,7 @@ LIBXFS_NAMES = xfs_sb xfs_ag xfs_group xfs_types xfs_bit xfs_ialloc xfs_ialloc_b
 	xfs_dir2_data xfs_dir2_leaf xfs_dir2_node xfs_dir2_sf xfs_symlink_remote \
 	xfs_attr_leaf xfs_rtgroup xfs_metafile xfs_rmap_btree xfs_refcount_btree \
 	xfs_defer xfs_trans_resv xfs_trans_space xfs_log_rlimit xfs_trans_inode xfs_ag_resv \
-	xfs_btree_staging xfs_rmap xfs_refcount xfs_attr xfs_attr_remote
+	xfs_btree_staging xfs_rmap xfs_refcount xfs_attr xfs_attr_remote xfs_parent
 LIBXFS_OBJ = $(addprefix $(OUT)/libxfs/,$(addsuffix .o,$(LIBXFS_NAMES)))
 # Backend code (entry, stubs, later tasks' files); mk/*.mk fragments append to
 # BACKEND_SRC (prerequisite lists expand at parse time, so add files here, not in mk/). Weak PENDING stubs live in stubs_pending.c.

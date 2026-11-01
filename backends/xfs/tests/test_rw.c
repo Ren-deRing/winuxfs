@@ -270,10 +270,11 @@ static void read_only_demotion_writes_nothing(void)
 	const char *plain = mkimg("ro", PLAIN);
 	const char *rmap = mkimg("rmap", "-m crc=1,rmapbt=1,reflink=1 -n parent=0");
 	const char *ppt = mkimg("ppt", "-m crc=1,rmapbt=1,reflink=1 -n parent=1");
+	const char *mdir = mkimg("mdir", "-m crc=1,metadir=1");
 	struct mnt m;
 
-	CHECK(plain && rmap && ppt);
-	if (!plain || !rmap || !ppt)
+	CHECK(plain && rmap && ppt && mdir);
+	if (!plain || !rmap || !ppt || !mdir)
 		return;
 	nwrites = nflushes = 0;
 	CHECK_RC(mnt_open(&m, plain, "ro", false), 0);
@@ -287,12 +288,17 @@ static void read_only_demotion_writes_nothing(void)
 	CHECK_RC(mnt_close(&m), 0);
 
 	log_reset();
-	CHECK_RC(mnt_open(&m, ppt, "", false), 0);
+	CHECK_RC(mnt_open(&m, mdir, "", false), 0);
 	CHECK(m.x && !m.x->rw);
-	CHECK(log_has("parent pointer"));
+	CHECK(log_has("metadir"));
 	CHECK_RC(mnt_close(&m), 0);
 
 	CHECK(nwrites == 0 && nflushes == 0);
+	/* parent pointers are writable now */
+	log_reset();
+	CHECK_RC(mnt_open(&m, ppt, "", false), 0);
+	CHECK(m.x && m.x->rw);
+	CHECK_RC(mnt_close(&m), 0);
 	/* rmapbt and reflink are writable now (M3d) */
 	log_reset();
 	CHECK_RC(mnt_open(&m, rmap, "", false), 0);

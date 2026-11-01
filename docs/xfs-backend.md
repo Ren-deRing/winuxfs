@@ -80,9 +80,9 @@ bounded by the log size, so there is nothing to limit.
 
 An rw mount is demoted to read-only (the reason is printed) for: `norecovery`,
 read-only host device, missing log device, unknown ro-compat bits, realtime
-device, quota accounting, **parent pointers and metadir** (`xfs_parent.c` is not
-vendored; the newest `mkfs.xfs` enables parent pointers by default, so use
-`-n parent=0` for a writable image).
+device, quota accounting, **metadir**. Parent pointers (the newest `mkfs.xfs` default) are
+writable: libxfs `xfs_parent.c` is vendored and the kernel's create/link/unlink/rename
+code maintains the pointers as attributes with their log intents.
 
 **Reflink-shared inodes.** Without CoW, an inode flagged `REFLINK` refuses
 write, shrinking truncate, last-unlink and rename-over with `EOPNOTSUPP`
@@ -116,7 +116,7 @@ All use images made with `WFEAT` (mkfs feature string, default in each test as
 | `test-wops test-wdata test-wlink test-recover` | namespace ops, data path, links, log recovery |
 | `test-crash` (`WCRASH_POINTS=N`) | records device writes/flushes, replays every prefix, checks `xfs_repair`-clean state |
 | `test-wstress`, `test-wstress-tsan` | parallel writers; TSan uses `tests/tsan.supp` |
-| `test-wrmap` | the above suites on a rmapbt+reflink image (`WFEAT=...`) |
+| `test-wrmap`, `test-wpptr` | the above suites on a rmapbt+reflink image, and on one with parent pointers (`WFEAT=...`); `test-recover` also changes kernel-written parent-pointer images (`root-fixtures/sparse`, `reflink`) and `xfs_repair -n` checks every pointer |
 | `test-recover` | also: replay of a log written by the real kernel (`root-fixtures/dirty-log`), and the background commit (`commit_interval_ms`) making an unsynced change survive a crash |
 | `test-wfuzz-all` | mutate metadata sectors after a write workload, rw mount incl. replay, ASan/UBSan, CRC-skip build (env `WFUZZ_ITERS/SEED/MUT/ONLY/STRICT`) |
 
@@ -243,7 +243,7 @@ stage with `--vm`).
 | `dirty_image_refused_with_message` | mount of the dirty image exits nonzero, message names `norecovery` and the log |
 | `norecovery_option_mounts` | the same image mounts with `--options norecovery` and equals the manifest |
 | `readonly_attribute_and_write_refused` | on a `--options ro` mount the volume is `ReadOnly`; overwrite, append, create, mkdir, delete, rename, set-attribute all fail; `tiny.txt` unchanged |
-| `windows_write_roundtrip` | partition 5 (320 MiB rmapbt/reflink image, `parent=0`) mounted rw: create/overwrite/append/rename/copy/truncate/delete, many files, Korean name, rmdir, 40 MiB file, setattr-then-write; checked live and after remount (7 stages) |
+| `windows_write_roundtrip` | partition 5 (320 MiB rmapbt/reflink image with parent pointers, `parent=1`) mounted rw: create/overwrite/append/rename/copy/truncate/delete, many files, Korean name, rmdir, 40 MiB file, setattr-then-write; checked live and after remount (7 stages) |
 | `xfs_repair_clean_after_windows_writes` | `xfs_repair -n` on the attached data disk after the run (`--data-disk`) |
 
 Set `XFS_FIXTURES` to the fixture directory (default `tests/xfs/images`,

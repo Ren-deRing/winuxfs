@@ -33,7 +33,7 @@ xfs_log_recover.c xfs_log_priv.h"
 # libxfs ones byte for byte, the top-level ones like 5.3 through patches/shim).
 M3_LIBXFS_C="xfs_defer xfs_trans_resv xfs_trans_space xfs_log_rlimit
 xfs_trans_inode xfs_ag_resv xfs_btree_staging xfs_rmap xfs_refcount xfs_attr
-xfs_attr_remote"
+xfs_attr_remote xfs_parent"
 M3_TOP_C="xfs_log.c xfs_log_cil.c xfs_trans.c xfs_trans_buf.c xfs_trans_ail.c
 xfs_buf_item.c xfs_buf_item_recover.c xfs_inode_item.c xfs_inode_item_recover.c
 xfs_icreate_item.c xfs_iunlink_item.c xfs_extfree_item.c xfs_extent_busy.c

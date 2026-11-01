@@ -218,7 +218,7 @@ def cmd_prepare(argv):
     if os.path.exists(wimg):
         os.unlink(wimg)
     if subprocess.run(["truncate", "-s", "320m", wimg]).returncode or subprocess.run(
-            ["mkfs.xfs", "-q", "-f", "-m", "crc=1,rmapbt=1,reflink=1,metadir=0", "-n", "parent=0",
+            ["mkfs.xfs", "-q", "-f", "-m", "crc=1,rmapbt=1,reflink=1,metadir=0", "-n", "parent=1",
              "-i", "sparse=1", wimg]).returncode:
         print("mkfs.xfs for the write image failed", file=sys.stderr)
         return 1

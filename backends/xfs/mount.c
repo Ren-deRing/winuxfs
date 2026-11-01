@@ -683,8 +683,8 @@ static bool want_rw(struct wfs_xfs *x)
 		why = "realtime device writes are not supported";
 	else if (sbp->sb_qflags & XFS_ALL_QUOTA_ACCT)
 		why = "quota accounting is not supported";
-	else if (xfs_has_parent(mp) || xfs_has_metadir(mp))
-		why = "parent pointer/metadir updates are not supported";
+	else if (xfs_has_metadir(mp))
+		why = "metadir updates are not supported";
 	if (why) {
 		LOGMSG(x, 1, "xfs: mounting read-only: %s", why);
 		return false;

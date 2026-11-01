@@ -37,6 +37,7 @@
 #include "xfs_rmap_item.h"
 #include "xfs_refcount_item.h"
 #include "xfs_bmap_item.h"
+#include "xfs_parent.h"
 #include "xfs_attr_item.h"
 #include "xfs_super.h"
 #include "kinit.h"
@@ -99,6 +100,7 @@ static struct cache_def caches[] = {
 	{ &xfs_attrd_cache,	"xfs_attrd_item", sizeof(struct xfs_attrd_log_item) },
 	{ &xfs_attri_cache,	"xfs_attri_item", sizeof(struct xfs_attri_log_item) },
 	{ &xfs_iunlink_cache,	"xfs_iul_item",	sizeof(struct xfs_iunlink_item) },
+	{ &xfs_parent_args_cache, "xfs_parent_args", sizeof(struct xfs_parent_args) },
 };
 
 static void caches_destroy(void)
