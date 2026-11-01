@@ -277,29 +277,7 @@ int xfs_reflink_recover_cow(struct xfs_mount *mp)
 	return 0;
 }
 
-/* ---- parent pointers, exchange-range, quota: not written ----------------- */
-
-struct kmem_cache *xfs_parent_args_cache;
-
-xfs_dahash_t xfs_parent_hashattr(struct xfs_mount *mp, const uint8_t *name, int namelen,
-				 const void *value, int valuelen)
-{
-	(void)mp; (void)name; (void)namelen; (void)value; (void)valuelen;
-	return 0;
-}
-
-/* Parent pointer attributes are not understood: treat them as invalid. */
-bool xfs_parent_namecheck(unsigned int attr_flags, const void *name, size_t length)
-{
-	(void)attr_flags; (void)name; (void)length;
-	return false;
-}
-
-bool xfs_parent_valuecheck(struct xfs_mount *mp, const void *value, size_t valuelen)
-{
-	(void)mp; (void)value; (void)valuelen;
-	return false;
-}
+/* ---- exchange-range, quota: not written ----------------- */
 
 int xfs_exchmaps_intent_init_cache(void) { return 0; }
 void xfs_exchmaps_intent_destroy_cache(void) { }

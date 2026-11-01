@@ -435,6 +435,80 @@ static void background_commit(void)
 	CHECK(repair_clean(late));
 }
 
+/* Images the real kernel wrote with parent pointers (root fixtures sparse, reflink): change the
+ * namespace of files that already carry kernel-written pointers, then xfs_repair -n must find every
+ * pointer consistent. */
+static void kernel_parent_pointer_images(void)
+{
+	static const struct { const char *fx, *a, *b; } cases[] = {
+		{ "sparse", "gap_1g.bin", "tail_hole.bin" },
+		{ "reflink", "clone.bin", "clone.bin" },	/* shared extents: rename and link only */
+	};
+	char zst[700], img[700];
+	size_t k;
+
+	for (k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+		struct mnt m;
+		wfs_ino_t a, d, d2, f, lnk;
+		wfs_stat st;
+
+		snprintf(zst, sizeof(zst), "../../tests/xfs/root-fixtures/%s.img.zst", cases[k].fx);
+		if (access(zst, R_OK)) {
+			printf("SKIP kernel_parent_pointer_images (no %s)\n", zst);
+			skipped++;
+			return;
+		}
+		snprintf(img, sizeof(img), "%s/kpp_%s.img", tmp, cases[k].fx);
+		CHECK(sh("zstd -dqf '%s' -o '%s'", zst, img) == 0);
+		CHECK(repair_clean(img));
+		CHECK_RC(mnt_open(&m, img, "", false), 0);
+		if (!m.x)
+			continue;
+		CHECK(xfs_has_parent(&m.x->mp));
+		CHECK_RC(lk(&m, ROOT, cases[k].a, &a, &st), 0);
+		CHECK_RC(mk(&m, ROOT, "newdir", WFS_FT_DIR, 0755, &d, &st), 0);
+		CHECK_RC(mk(&m, ROOT, "otherdir", WFS_FT_DIR, 0755, &d2, &st), 0);
+		/* move a kernel-created file into a new directory, hard-link it elsewhere */
+		CHECK_RC(wfs_xfs_op_rename(m.x, ROOT, cases[k].a, (uint32_t)strlen(cases[k].a), d, "moved.bin", 9, 0), 0);
+		CHECK_RC(wfs_xfs_op_link(m.x, a, d2, "hardlink.bin", 12), 0);
+		CHECK_RC(wfs_xfs_op_symlink(m.x, d2, "sym", 3, "../newdir/moved.bin", 19, 0, 0, &lnk, &st), 0);
+		CHECK_RC(mk(&m, d, "fresh", WFS_FT_REG, 0644, &f, &st), 0);
+		/* rename a whole directory (the pointers of its children are not rewritten) */
+		CHECK_RC(wfs_xfs_op_rename(m.x, ROOT, "newdir", 6, d2, "renamed", 7, 0), 0);
+		if (strcmp(cases[k].a, cases[k].b)) {	/* not a shared-extent file: it can be deleted */
+			CHECK_RC(lk(&m, ROOT, cases[k].b, &f, &st), 0);
+			CHECK_RC(ul(&m, ROOT, cases[k].b), 0);
+		}
+		CHECK_RC(mnt_close(&m), 0);
+		CHECK(!log_is_dirty(img));
+		CHECK(repair_clean(img));
+
+		/* and once more after a crash-like copy that needs replay */
+		CHECK_RC(mnt_open(&m, img, "", false), 0);
+		if (m.x) {
+			CHECK_RC(lk(&m, d2, "hardlink.bin", &f, &st), 0);
+			CHECK_RC(wfs_xfs_op_rename(m.x, d2, "hardlink.bin", 12, ROOT, "back.bin", 8, 0), 0);
+			xfs_log_force(&m.x->mp, XFS_LOG_SYNC);
+			{
+				const char *crashed = cpimg(img, "kpp_crash");
+
+				CHECK(crashed != NULL);
+				CHECK_RC(mnt_close(&m), 0);
+				if (crashed) {
+					CHECK(log_is_dirty(crashed));
+					CHECK_RC(mnt_open(&m, crashed, "", false), 0);
+					if (m.x) {
+						CHECK_RC(lk(&m, ROOT, "back.bin", &f, &st), 0);
+						CHECK_RC(mnt_close(&m), 0);
+					}
+					CHECK(repair_clean(crashed));
+				}
+			}
+		}
+		unlink(img);
+	}
+}
+
 /* Replaying twice gives the same result (the first replay's own crash is T9). */
 static void replay_is_idempotent(void)
 {
@@ -485,6 +559,7 @@ int main(int argc, char **argv)
 	RUN(replay_is_idempotent);
 	RUN(kernel_written_log);
 	RUN(background_commit);
+	RUN(kernel_parent_pointer_images);
 	if (!failures)
 		sh("rm -rf '%s'", tmp);
 	else

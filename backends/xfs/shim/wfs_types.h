@@ -192,6 +192,8 @@ typedef int64_t __kernel_loff_t;
 #define ACCESS_ONCE(x)		READ_ONCE(x)
 
 #define ARRAY_SIZE(a)		(sizeof(a) / sizeof((a)[0]))
+#define upper_32_bits(n)	((u32)(((n) >> 16) >> 16))
+#define lower_32_bits(n)	((u32)((n) & 0xffffffff))
 #define sizeof_field(t, f)	sizeof(((t *)0)->f)
 #define container_of(ptr, type, member) \
 	((type *)((char *)(ptr) - offsetof(type, member)))

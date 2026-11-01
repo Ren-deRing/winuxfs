@@ -70,6 +70,7 @@ if command -v gcc >/dev/null && command -v mkfs.xfs >/dev/null && command -v xfs
   WCRASH_POINTS=400 make -s -C backends/xfs test-crash
   make -s -C backends/xfs test-wstress
   WCRASH_POINTS=400 make -s -C backends/xfs test-wrmap
+  WCRASH_POINTS=400 make -s -C backends/xfs test-wpptr
   make -s -C backends/xfs test-wstress-tsan
   # fuzzing after writes: mutated images mounted read-write and written to (ASan+UBSan, CRC on and off)
   make -s -C backends/xfs test-wfuzz-all
