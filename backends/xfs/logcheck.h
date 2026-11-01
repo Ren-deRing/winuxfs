@@ -51,6 +51,14 @@ int wfs_log_check(const struct wfs_log_params *p,
 		  bool *dirty_out);
 
 /*
+ * As wfs_log_check, but with recover=true a dirty (parsable) log is accepted
+ * (*dirty_out set): the caller replays it with the kernel's xlog_recover,
+ * which needs a read-write mount (M3a T5).
+ */
+int wfs_log_check_ex(const struct wfs_log_params *p, const struct wfs_log_reader *r,
+		     bool norecovery, bool recover, bool *dirty_out);
+
+/*
  * Task 6 provides this: fill *r for the device holding mp's log. Returning
  * non-zero fails the check with that error.
  */
@@ -62,6 +70,6 @@ void wfs_log_set_reader_provider(wfs_log_reader_provider fn);
  * Mount-time entry point (M2 design 6.2): derives the parameters from
  * mp->m_sb, gets the reader from the provider and runs wfs_log_check().
  */
-int xfs_log_mount_ro_check(struct xfs_mount *mp, bool norecovery, bool *dirty_out);
+int xfs_log_mount_ro_check(struct xfs_mount *mp, bool norecovery, bool recover, bool *dirty_out);
 
 #endif
