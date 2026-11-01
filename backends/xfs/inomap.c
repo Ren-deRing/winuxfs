@@ -53,7 +53,7 @@ int wfs_xfs_fill_stat(struct xfs_inode *ip, wfs_stat *st)
 	st->uid = i_uid_read(inode);
 	st->gid = i_gid_read(inode);
 	st->nlink = inode->i_nlink;
-	st->size = (uint64_t)inode->i_size;
+	st->size = (uint64_t)XFS_ISIZE(ip);	/* dirs: i_disk_size (the VFS size is not kept for them) */
 	/* xfs_vn_getattr: (nblocks + delayed) in filesystem blocks -> 512 B */
 	st->blocks = XFS_FSB_TO_BB(mp, ip->i_nblocks + ip->i_delayed_blks);
 	if (ft == WFS_FT_CHR || ft == WFS_FT_BLK) {
