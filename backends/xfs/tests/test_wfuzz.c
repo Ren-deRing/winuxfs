@@ -604,6 +604,8 @@ static void build_bases(struct base *bs)
 			exit(1);
 		snprintf(bs[k].path, sizeof(bs[k].path), "%s", img);
 		CHECK_RC(mnt_open(&m, img, "", false), 0);
+		if (!m.x)
+			exit(1);
 		wmap = calloc(1, m.dev.size / 512 + 1);
 		m.dev.wmap = wmap;
 		base_workload(&m);
@@ -701,12 +703,19 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	setvbuf(stdout, NULL, _IOLBF, 0);
-	snprintf(tmp, sizeof(tmp), "%s", argv[1]);
+	/* a private directory per process: san and nocrc builds may run in parallel */
+	snprintf(tmp, sizeof(tmp), "%s/test_wfuzz.%d", argv[1], (int)getpid());
+	if (sh("mkdir -p '%s'", tmp))
+		return 2;
 	if (sh("command -v mkfs.xfs >/dev/null && command -v xfs_repair >/dev/null && command -v xfs_logprint >/dev/null")) {
 		printf("SKIPPED: xfsprogs not installed\n");
 		return 0;
 	}
 	RUN(fuzz_main);
+	if (!failures)
+		sh("rm -rf '%s'", tmp);
+	else
+		printf("images kept in %s\n", tmp);
 	printf("test_wfuzz: %d checks, %d failures, %d skipped\n", checks, failures, skipped);
 	return failures ? 1 : 0;
 }
