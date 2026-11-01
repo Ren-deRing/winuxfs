@@ -164,7 +164,8 @@ sync; umnt "$TMP/m"; detach "$dev"; finish devnodes "$img"
 # checkpointing; unmounting a shut-down file system writes no unmount record,
 # so the log keeps transactions that only a replay applies.
 img=$(newimg dirty 300M); dev=$(attach "$img")
-mkfs.xfs -q -f "$dev"
+# parent=0: the write backend cannot replay (or rw-mount) parent-pointer file systems yet
+mkfs.xfs -q -f -n parent=0 "$dev"
 mnt "$dev" "$TMP/m"
 xfs_io -f -c "pwrite -S 0x49 0 64k" "$TMP/m/before.bin" >/dev/null
 sync
@@ -172,9 +173,12 @@ for i in $(seq 0 199); do : > "$TMP/m/new_$i"; done
 mkdir "$TMP/m/new_dir"
 xfs_io -x -c "shutdown -f" "$TMP/m"
 umnt "$TMP/m"
-if xfs_logprint -t "$dev" 2>&1 | grep -q 'state: <DIRTY>'; then
+lp=$(xfs_logprint -t "$dev" 2>&1 || true)
+if [[ $lp == *'state: <DIRTY>'* ]]; then
   detach "$dev"; finish dirty-log "$img"
 else
+  printf '%s\n' "$lp" | head -8 >&2
+  uname -r >&2
   echo "ERROR: log of dirty-log image is not DIRTY; not writing it" >&2
   exit 1
 fi
@@ -183,7 +187,7 @@ fi
 for variant in extlog-rt rt-extsize; do
   img=$(newimg "$variant" 300M); logimg=$(newimg "$variant.log" 100M); rtimg=$(newimg "$variant.rt" 200M)
   dev=$(attach "$img"); logdev=$(attach "$logimg"); rtdev=$(attach "$rtimg")
-  extsz=1; [ "$variant" = rt-extsize ] && extsz=16k
+  extsz=4k; [ "$variant" = rt-extsize ] && extsz=16k
   mkfs.xfs -q -f -m reflink=0,rmapbt=0 -l logdev="$logdev",size=64m -r rtdev="$rtdev",extsize=$extsz "$dev"
   mnt "$dev" "$TMP/m" "logdev=$logdev,rtdev=$rtdev"
   mkdir "$TMP/m/rt"
@@ -196,4 +200,5 @@ for variant in extlog-rt rt-extsize; do
   finish "$variant" "$img"; finish "$variant.log" "$logimg"; finish "$variant.rt" "$rtimg"
 done
 
+[ -n "${SUDO_UID:-}" ] && chown -R "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" "$OUT"
 echo "done. Verify: for f in $OUT/*.img.zst; do zstd -dc \$f | xfs_repair -n /dev/stdin; done  (external-device images need -l/-r)"

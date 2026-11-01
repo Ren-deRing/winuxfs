@@ -355,7 +355,7 @@ static void mounts_root_fixtures(const char *rootdir)
 {
 	DIR *d;
 	struct dirent *e;
-	int n = 0;
+	int n = 0, pass;
 
 	NEED(tools_zstd, "zstd");
 	NEED(tools_db, "xfs_db");
@@ -365,21 +365,33 @@ static void mounts_root_fixtures(const char *rootdir)
 		printf("SKIPPED %s: %s missing\n", __func__, rootdir);
 		return;
 	}
-	while ((e = readdir(d))) {
-		size_t l = strlen(e->d_name);
-		char zst[700], out[700], name[128];
+	/* pass 1 decompresses everything (an external log / RT image must exist
+	 * before its data image is mounted); pass 2 mounts the data images only */
+	for (pass = 0; pass < 2; pass++) {
+		rewinddir(d);
+		while ((e = readdir(d))) {
+			size_t l = strlen(e->d_name);
+			char zst[700], out[700], name[128];
+			bool companion;
 
-		if (l < 9 || strcmp(e->d_name + l - 8, ".img.zst"))
-			continue;
-		if (strstr(e->d_name, "dirty"))
-			continue;	/* dirty_log_refused_then_norecovery */
-		snprintf(name, sizeof(name), "%.*s", (int)(l - 4), e->d_name);
-		path_join(zst, sizeof(zst), rootdir, e->d_name);
-		path_join(out, sizeof(out), tmp, name);
-		CHECK(sh("zstd -d -q -f -o '%s' '%s'", out, zst) == 0);
-		check_fixture(tmp, name);
-		unlink(out);
-		n++;
+			if (l < 9 || strcmp(e->d_name + l - 8, ".img.zst"))
+				continue;
+			if (strstr(e->d_name, "dirty"))
+				continue;	/* dirty_log_refused_then_norecovery */
+			snprintf(name, sizeof(name), "%.*s", (int)(l - 4), e->d_name);
+			companion = strstr(name, ".log.img") || strstr(name, ".rt.img");
+			path_join(zst, sizeof(zst), rootdir, e->d_name);
+			path_join(out, sizeof(out), tmp, name);
+			if (pass == 0) {
+				CHECK(sh("zstd -d -q -f -o '%s' '%s'", out, zst) == 0);
+				continue;
+			}
+			if (!companion) {
+				check_fixture(tmp, name);
+				n++;
+			}
+			unlink(out);
+		}
 	}
 	closedir(d);
 	CHECK(n > 0);

@@ -359,6 +359,44 @@ static void replay_after_crash(void)
 	CHECK(repair_clean(crashed));
 }
 
+/* A log written by the real Linux kernel (tools/gen-root-fixtures.sh: 200 creates, a mkdir, then
+ * "shutdown -f"): replay it with an rw mount and compare with what the kernel had done. */
+static void kernel_written_log(void)
+{
+	static const char *fx = "../../tests/xfs/root-fixtures/dirty-log.img.zst";
+	char img[700], name[32];
+	struct mnt m;
+	wfs_ino_t d, f;
+	wfs_stat st;
+	int i, miss = 0;
+
+	if (access(fx, R_OK)) {
+		printf("SKIP kernel_written_log (no %s)\n", fx);
+		skipped++;
+		return;
+	}
+	snprintf(img, sizeof(img), "%s/kern.img", tmp);
+	CHECK(sh("zstd -dqf '%s' -o '%s'", fx, img) == 0);
+	CHECK(log_is_dirty(img));
+	CHECK_RC(mnt_open(&m, img, "", true), -WFS_EUCLEAN);
+	CHECK_RC(mnt_open(&m, img, "", false), 0);
+	if (!m.x)
+		return;
+	CHECK_RC(lk(&m, ROOT, "before.bin", &f, &st), 0);
+	CHECK(st.size == 65536);
+	CHECK_RC(lk(&m, ROOT, "new_dir", &d, &st), 0);
+	CHECK(st.ftype == WFS_FT_DIR);
+	for (i = 0; i < 200; i++) {
+		snprintf(name, sizeof(name), "new_%d", i);
+		if (lk(&m, ROOT, name, &f, &st) || st.size != 0)
+			miss++;
+	}
+	CHECK(miss == 0);
+	CHECK_RC(mnt_close(&m), 0);
+	CHECK(!log_is_dirty(img));
+	CHECK(repair_clean(img));
+}
+
 /* Replaying twice gives the same result (the first replay's own crash is T9). */
 static void replay_is_idempotent(void)
 {
@@ -407,6 +445,7 @@ int main(int argc, char **argv)
 		return 2;
 	RUN(replay_after_crash);
 	RUN(replay_is_idempotent);
+	RUN(kernel_written_log);
 	if (!failures)
 		sh("rm -rf '%s'", tmp);
 	else
