@@ -10,7 +10,7 @@
                      test_logcheck.c does)
         partition 3  hole-unwritten.img
         partition 4  perf: one 512 MiB file of incompressible bytes
-        partition 5  an empty mkfs image the Windows write test mounts read-write
+        partition 5  an empty rmapbt+reflink mkfs image the Windows write test mounts read-write
       and OUTDIR/expected-{main,hole,perf}.json (the fixtures' manifests).
       Needs xfsprogs (mkfs.xfs, xfs_db); exit 77 when missing.
   xfs_vm_acceptance.py verify OUTDIR VMOUT
@@ -218,7 +218,7 @@ def cmd_prepare(argv):
     if os.path.exists(wimg):
         os.unlink(wimg)
     if subprocess.run(["truncate", "-s", "320m", wimg]).returncode or subprocess.run(
-            ["mkfs.xfs", "-q", "-f", "-m", "crc=1,rmapbt=0,reflink=0,metadir=0", "-n", "parent=0",
+            ["mkfs.xfs", "-q", "-f", "-m", "crc=1,rmapbt=1,reflink=1,metadir=0", "-n", "parent=0",
              "-i", "sparse=1", wimg]).returncode:
         print("mkfs.xfs for the write image failed", file=sys.stderr)
         return 1
@@ -360,7 +360,7 @@ def cmd_verify(argv):
     wl, wr_ = flat(res.get("write_live_errors")), flat(res.get("write_remount_errors"))
     check("windows_write_roundtrip",
           res.get("write_mounted") is True and res.get("write_remounted") is True
-          and not res.get("write_exception") and len(res.get("write_stages") or []) == 6
+          and not res.get("write_exception") and len(res.get("write_stages") or []) == 7
           and res.get("write_volume_read_only") is False and not wl and not wr_,
           "; ".join(wl[:5] + wr_[:5]) or str(res.get("write_exception")) or str(res.get("write_stages")))
     if data_disk:

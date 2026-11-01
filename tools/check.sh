@@ -56,6 +56,15 @@ if command -v gcc >/dev/null && command -v mkfs.xfs >/dev/null && command -v xfs
   make -s -C backends/xfs test-rw
   make -s -C backends/xfs test-rw-san
   make -s -C backends/xfs test-rw-tsan
+  # M3a write suites: native, then the same on rmapbt+reflink images (M3d), plus TSan on the stress
+  make -s -C backends/xfs test-wops
+  make -s -C backends/xfs test-wdata
+  make -s -C backends/xfs test-wlink
+  make -s -C backends/xfs test-recover
+  WCRASH_POINTS=400 make -s -C backends/xfs test-crash
+  make -s -C backends/xfs test-wstress
+  WCRASH_POINTS=400 make -s -C backends/xfs test-wrmap
+  make -s -C backends/xfs test-wstress-tsan
   if [ "$fuzz" = 1 ]; then make -s -C backends/xfs fuzz-sample; fi
 else
   echo "SKIPPED: backends/xfs mount tests (gcc, mkfs.xfs and xfs_db needed; install xfsprogs)"

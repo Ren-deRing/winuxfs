@@ -350,6 +350,10 @@ wfs_err_t wfs_xfs_op_write(struct wfs_xfs *x, wfs_ino_t ino, uint64_t off, const
 	}
 	if (error || !len)
 		goto out;
+	if (xfs_is_reflink_inode(ip)) {	/* shared blocks need copy-on-write (M4) */
+		error = -WFS_EOPNOTSUPP;
+		goto out;
+	}
 	xfs_ilock(ip, XFS_IOLOCK_EXCL);
 	while (left) {
 		uint64_t n = left < WRITE_CHUNK ? left : WRITE_CHUNK, got;
@@ -384,6 +388,10 @@ int wfs_xfs_truncate(struct wfs_xfs *x, struct xfs_inode *ip, uint64_t newsize)
 		return -WFS_EFBIG;
 	xfs_ilock(ip, XFS_IOLOCK_EXCL);
 	old = (uint64_t)i_size_read(VFS_I(ip));
+	if (newsize < old && xfs_is_reflink_inode(ip)) {	/* freeing shared blocks (M4) */
+		error = -WFS_EOPNOTSUPP;
+		goto out;
+	}
 	if (newsize < old && (newsize & (bs - 1))) {
 		/* zero the tail of the new last block so later growth reads zeros */
 		struct xfs_bmbt_irec imap;

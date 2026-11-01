@@ -320,6 +320,13 @@ if ($m.Up) {
     $c = New-Object byte[] 1000; [Array]::Copy($a, $c, 1000)
     $exp['wd\sub\a-copy.bin'] = Get-Sha $c
     $stage += 'copy_truncate'
+    # attribute change, then writes to the same file (a setattr once left the inode lock broken)
+    Set-ItemProperty -LiteralPath "$Letter\wd\sub\b2.txt" -Name LastWriteTime -Value ([datetime]'2001-02-03 04:05:06')
+    Set-ItemProperty -LiteralPath "$Letter\wd\sub\b2.txt" -Name IsReadOnly -Value $true
+    Set-ItemProperty -LiteralPath "$Letter\wd\sub\b2.txt" -Name IsReadOnly -Value $false
+    Add-Content -LiteralPath "$Letter\wd\sub\b2.txt" -Value '!' -NoNewline
+    $exp['wd\sub\b2.txt'] = Get-Sha ([Text.Encoding]::ASCII.GetBytes('hello write + more!'))
+    $stage += 'setattr_then_write'
     [System.IO.File]::WriteAllBytes("$Letter\wd\tmp.bin", (& $rb 100000))
     Remove-Item -LiteralPath "$Letter\wd\tmp.bin" -Force
     New-Item -ItemType Directory -Path "$Letter\wd\many" | Out-Null; $exp['wd\many'] = 'DIR'

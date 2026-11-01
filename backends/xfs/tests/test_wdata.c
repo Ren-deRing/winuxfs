@@ -168,7 +168,9 @@ static const char *mkimg(const char *name, const char *opts)
 	return path;
 }
 
-#define PLAIN "-m crc=1,rmapbt=0,reflink=0,metadir=0 -n parent=0 -i sparse=1"
+#define PLAIN_STR "-m crc=1,rmapbt=0,reflink=0,metadir=0 -n parent=0 -i sparse=1"
+/* WFEAT overrides the mkfs features (make test-wrmap runs the write suites on rmapbt+reflink) */
+#define PLAIN (getenv("WFEAT") ? getenv("WFEAT") : PLAIN_STR)
 
 static bool repair_clean(const char *img)
 {
@@ -491,6 +493,46 @@ static void overwrite_updates_mtime(void)
 	CHECK_RC(mnt_close(&m), 0);
 }
 
+/* Inodes flagged reflink may share blocks: writing or freeing them is refused (M4 does CoW). */
+static void shared_inode_is_refused(void)
+{
+	const char *img = mkimg("wshared", "-m crc=1,rmapbt=1,reflink=1 -n parent=0 -i sparse=1");
+	struct mnt m;
+	wfs_ino_t f, g, other, d;
+	wfs_stat st;
+	uint8_t data[8000], back[8000];
+	size_t got = 0;
+
+	CHECK(img != NULL);
+	if (!img)
+		return;
+	fill(data, sizeof(data), 42);
+	CHECK_RC(mnt_open(&m, img, "", false), 0);
+	CHECK(m.x && m.x->rw);			/* rmapbt+reflink mount read-write */
+	CHECK_RC(mk(&m, ROOT, "f", WFS_FT_REG, 0644, &f, &st), 0);
+	CHECK_RC(wr(&m, f, 0, data, sizeof(data)), 0);
+	CHECK_RC(mk(&m, ROOT, "other", WFS_FT_REG, 0644, &other, &st), 0);
+	CHECK_RC(mnt_close(&m), 0);
+	/* mark /f as a reflink inode (v3.flags2 bit 1 = XFS_DIFLAG2_REFLINK) the way a reflinked file would be */
+	CHECK(sh("v=$(xfs_db -r -c 'path /f' -c 'p v3.flags2' '%s' | awk '{print $3}'); "
+		 "xfs_db -x -c 'path /f' -c \"write v3.flags2 $((v | 2))\" '%s' >/dev/null", img, img) == 0);
+	CHECK_RC(mnt_open(&m, img, "", false), 0);
+	CHECK(m.x && m.x->rw);
+	CHECK_RC(lk(&m, ROOT, "f", &f, &st), 0);
+	CHECK_RC(wr(&m, f, 0, data, 100), -WFS_EOPNOTSUPP);		/* in-place write: no */
+	CHECK_RC(trunc_to(&m, f, 10), -WFS_EOPNOTSUPP);			/* freeing blocks: no */
+	CHECK_RC(trunc_to(&m, f, 9000), 0);				/* growing is fine */
+	CHECK_RC(rdb(&m, f, 0, back, sizeof(back), &got), 0);		/* reads work */
+	CHECK(got == sizeof(back) && memcmp(back, data, sizeof(back)) == 0);
+	CHECK_RC(wfs_xfs_op_link(m.x, f, ROOT, "g", 1), 0);
+	CHECK_RC(ul(&m, ROOT, "f"), 0);					/* one of two links: fine */
+	CHECK_RC(lk(&m, ROOT, "g", &g, &st), 0);
+	CHECK_RC(ul(&m, ROOT, "g"), -WFS_EOPNOTSUPP);			/* the last link: no */
+	CHECK_RC(wfs_xfs_op_rename(m.x, ROOT, "other", 5, ROOT, "g", 1, 0), -WFS_EOPNOTSUPP);
+	CHECK_RC(lk(&m, ROOT, "g", &d, &st), 0);			/* still there */
+	CHECK_RC(mnt_close(&m), 0);
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 2) {
@@ -502,6 +544,7 @@ int main(int argc, char **argv)
 		return 2;
 	RUN(write_read_basic);
 	RUN(overwrite_updates_mtime);
+	RUN(shared_inode_is_refused);
 	RUN(truncate_basic);
 	RUN(big_offset);
 	RUN(enospc);
