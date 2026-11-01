@@ -27,6 +27,7 @@ for a in "$@"; do
   esac
 done
 if [ "$vm_only" = 0 ]; then  # host checks
+python3 -I tools/clean-tmp.py "${TMPDIR:-target/tmp}"
 cargo fmt --check
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
