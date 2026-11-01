@@ -249,13 +249,21 @@ fn run(a: &MountArgs, #[cfg(windows)] claim: &win::Claim) -> Result<(), CliError
     // Probing (`--type auto`) only reads, so the devices are opened
     // read-only for it and reopened read-write afterwards if needed. Off
     // Windows nothing is mounted, so nothing may be written either.
-    let first_ro = a.ro || auto || named.is_some_and(is_readonly_backend) || cfg!(not(windows));
+    // `--options ro` (the backend's own flag) must make the volume read-only for
+    // Windows too, or the filesystem looks writable and every write fails late.
+    let opt_ro = a.options.split(',').rev().find_map(|o| match o.trim() {
+        "ro" => Some(true),
+        "rw" => Some(false),
+        _ => None,
+    }) == Some(true);
+    let first_ro =
+        a.ro || opt_ro || auto || named.is_some_and(is_readonly_backend) || cfg!(not(windows));
     let devs = open_all(a, first_ro)?;
     let backend = match named {
         Some(b) => b,
         None => probe_one(&backends, &devs, &a.device)?,
     };
-    let read_only = a.ro || is_readonly_backend(backend);
+    let read_only = a.ro || opt_ro || is_readonly_backend(backend);
     let (vfs_opts, mount_opts) = mount_settings(backend.name(), read_only, a.case_insensitive);
 
     #[cfg(not(windows))]
