@@ -116,8 +116,22 @@ static void ent_free(struct ic_ent *e)
 		break;
 	}
 	xfs_ifork_zap_attr(ip);
-	if (ip->i_itemp)
+	if (ip->i_itemp) {
+		/* an inode-buffer completion on the AIL thread may still be finishing this
+		 * inode's flush (it clears IFLUSHING last): wait it out, which also orders
+		 * the frees below after its accesses */
+		for (;;) {
+			bool flushing;
+
+			spin_lock(&ip->i_flags_lock);
+			flushing = ip->i_flags & XFS_IFLUSHING;
+			spin_unlock(&ip->i_flags_lock);
+			if (!flushing)
+				break;
+			msleep(1);
+		}
 		xfs_inode_item_destroy(ip);
+	}
 	if (ip->i_cowfp) {
 		xfs_idestroy_fork(ip->i_cowfp);
 		kmem_cache_free(xfs_ifork_cache, ip->i_cowfp);
@@ -240,11 +254,25 @@ static void lru_push(struct ic_shard *s, struct ic_ent *e)
 static inline bool evictable(const struct ic_ent *e)
 {
 	/* like kernel reclaim: no log item attached to a cluster buffer, not pinned in the log */
-	const struct xfs_inode *ip = &e->ip;
-	bool clean = !ip->i_itemp || list_empty(&ip->i_itemp->ili_item.li_bio_list);
+	struct xfs_inode *ip = (struct xfs_inode *)&e->ip;
+	bool clean = true, flushing;
 
-	return !e->refs && !e->nlookup && !e->pinned && clean &&
-	       !atomic_read(&ip->i_pincount);
+	if (e->refs || e->nlookup || e->pinned || atomic_read(&ip->i_pincount))
+		return false;
+	if (ip->i_itemp) {
+		/* the flush completion unlinks the item under ili_lock, then clears IFLUSHING
+		 * under i_flags_lock and touches nothing of the inode after that: taking both
+		 * orders the free of the inode after that completion */
+		spin_lock(&ip->i_flags_lock);
+		flushing = ip->i_flags & XFS_IFLUSHING;
+		spin_unlock(&ip->i_flags_lock);
+		if (flushing)
+			return false;
+		spin_lock(&ip->i_itemp->ili_lock);
+		clean = list_empty(&ip->i_itemp->ili_item.li_bio_list);
+		spin_unlock(&ip->i_itemp->ili_lock);
+	}
+	return clean;
 }
 
 /* Called with the shard lock held. */
