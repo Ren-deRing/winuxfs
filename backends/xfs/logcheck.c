@@ -1186,6 +1186,13 @@ int
 wfs_log_check(const struct wfs_log_params *p, const struct wfs_log_reader *r,
 	      bool norecovery, bool *dirty_out)
 {
+	return wfs_log_check_ex(p, r, norecovery, false, dirty_out);
+}
+
+int
+wfs_log_check_ex(const struct wfs_log_params *p, const struct wfs_log_reader *r,
+		 bool norecovery, bool recover, bool *dirty_out)
+{
 	struct xlog	log;
 	xfs_daddr_t	head_blk = 0, tail_blk = 0;
 	int		error;
@@ -1249,6 +1256,11 @@ wfs_log_check(const struct wfs_log_params *p, const struct wfs_log_reader *r,
 
 	if (dirty_out)
 		*dirty_out = true;
+	if (recover && !norecovery) {
+		xfs_info(NULL, "log is dirty (head 0x%llx tail 0x%llx): it will be replayed",
+			 (unsigned long long)head_blk, (unsigned long long)tail_blk);
+		return 0;
+	}
 	if (norecovery) {
 		xfs_warn(NULL,
 	"log is dirty (head 0x%llx tail 0x%llx): mounting with norecovery, "
@@ -1273,7 +1285,7 @@ wfs_log_set_reader_provider(wfs_log_reader_provider fn)
 }
 
 int
-xfs_log_mount_ro_check(struct xfs_mount *mp, bool norecovery, bool *dirty_out)
+xfs_log_mount_ro_check(struct xfs_mount *mp, bool norecovery, bool recover, bool *dirty_out)
 {
 	struct wfs_log_params	p;
 	struct wfs_log_reader	r;
@@ -1301,5 +1313,5 @@ xfs_log_mount_ro_check(struct xfs_mount *mp, bool norecovery, bool *dirty_out)
 	error = provider(mp, &r);
 	if (error)
 		return error;
-	return wfs_log_check(&p, &r, norecovery, dirty_out);
+	return wfs_log_check_ex(&p, &r, norecovery, recover, dirty_out);
 }

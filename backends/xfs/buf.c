@@ -636,7 +636,8 @@ static int run_verify(struct xfs_buf *bp, const struct xfs_buf_ops *ops)
 		struct xfs_buf_ops const *saved = bp->b_ops;
 
 		bp->b_ops = ops;
-		if (x && x->perag_up && BD(bp->b_target)->role == WFS_DEV_DATA && !bp->b_pag)
+		if (x && x->perag_up && BD(bp->b_target)->role == WFS_DEV_DATA && !bp->b_pag &&
+		    bp->b_rhash_key != XFS_BUF_DADDR_NULL)	/* not the uncached sb re-read */
 			bp->b_error = -EFSCORRUPTED;	/* block outside every AG */
 		else
 			ops->verify_read(bp);

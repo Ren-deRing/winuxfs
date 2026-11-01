@@ -984,7 +984,7 @@ wfs_err_t wfs_xfs_mount(const wfs_host_api *api, wfs_blkdev *const devs[WFS_DEV_
 				wfs_xfs_buftarg_set_read_only(&x->bt[r]);
 	}
 	if (mp->m_logdev_targp) {
-		error = xfs_log_mount_ro_check(mp, x->opts.norecovery, &log_dirty);
+		error = xfs_log_mount_ro_check(mp, x->opts.norecovery, x->rw, &log_dirty);
 		if (error) {
 			if (error == -EUCLEAN || error == -WFS_EUCLEAN)
 				LOGMSG(x, 0, "xfs: log check failed: not mountable without "
