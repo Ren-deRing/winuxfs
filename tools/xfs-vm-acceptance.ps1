@@ -340,9 +340,12 @@ if ($m.Up) {
       Remove-Item -LiteralPath "$Letter\wd\many\$n" -Force; $exp.Remove("wd\many\$n")
     }
     $stage += 'many_files'
-    $kor = '한글 파일.txt'
-    [System.IO.File]::WriteAllBytes("$Letter\wd\$kor", [Text.Encoding]::UTF8.GetBytes('안녕'))
-    $exp["wd\$kor"] = Get-Sha ([Text.Encoding]::UTF8.GetBytes('안녕'))
+    # Built from code points: this script has no BOM, and Windows PowerShell 5.1 reads a BOM-less
+    # file as Windows-1252, which turned a literal Korean name into mojibake before winuxfs saw it.
+    $kor = ([char]0xD55C, [char]0xAE00, ' ', [char]0xD30C, [char]0xC77C, '.txt') -join ''
+    $korBody = [Text.Encoding]::UTF8.GetBytes(([char]0xC548, [char]0xB155) -join '')
+    [System.IO.File]::WriteAllBytes("$Letter\wd\$kor", $korBody)
+    $exp["wd\$kor"] = Get-Sha $korBody
     New-Item -ItemType Directory -Path "$Letter\wd\gone\inner" -Force | Out-Null
     Remove-Item -LiteralPath "$Letter\wd\gone" -Recurse -Force
     $stage += 'names_rmdir'

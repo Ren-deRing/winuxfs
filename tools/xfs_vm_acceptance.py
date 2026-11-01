@@ -379,6 +379,17 @@ def cmd_verify(argv):
                     dst.write(b)
                 pos += len(b)
                 left -= len(b)
+        # the Korean file name must be on disk as UTF-8, not as mojibake (a script encoding bug once
+        # made both sides agree on a garbled name, and the round trip alone cannot see that)
+        good = "\ud55c\uae00 \ud30c\uc77c.txt".encode("utf-8")
+        # the first four mojibake characters (UTF-8 bytes read as Windows-1252); the later ones differ
+        # between decoders for the bytes cp1252 leaves undefined, so only this prefix is compared
+        bad = "\u00ed\u2022\u0153\u00ea\u00b8\u20ac".encode("utf-8")
+        with open(part, "rb") as f:
+            raw = f.read()
+        check("korean_name_is_utf8_on_disk", good in raw and bad not in raw,
+              "UTF-8 name found: %s, mojibake found: %s" % (good in raw, bad in raw))
+        del raw
         r = subprocess.run(["xfs_repair", "-n", part], capture_output=True, text=True)
         check("xfs_repair_clean_after_windows_writes", r.returncode == 0,
               (r.stdout + r.stderr)[-400:])
