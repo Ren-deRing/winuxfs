@@ -168,7 +168,9 @@ static const char *mkimg(const char *name, const char *opts)
 	return path;
 }
 
-#define PLAIN "-m crc=1,rmapbt=0,reflink=0,metadir=0 -n parent=0 -i sparse=1"
+#define PLAIN_STR "-m crc=1,rmapbt=0,reflink=0,metadir=0 -n parent=0 -i sparse=1"
+/* WFEAT overrides the mkfs features (make test-wrmap runs the write suites on rmapbt+reflink) */
+#define PLAIN (getenv("WFEAT") ? getenv("WFEAT") : PLAIN_STR)
 
 static bool repair_clean(const char *img)
 {
@@ -223,7 +225,7 @@ static void rw_mount_unmount_is_clean(void)
  * superblock home; xfs_db sees the new label, xfs_repair is happy. */
 static void sync_sb_transaction_reaches_disk(void)
 {
-	const char *img = mkimg("label", PLAIN " -L before");
+	const char *img = mkimg("label", PLAIN_STR " -L before");
 	char snap[600], out[256];
 	struct mnt m;
 	long w0, f0;
@@ -266,11 +268,12 @@ static void sync_sb_transaction_reaches_disk(void)
 static void read_only_demotion_writes_nothing(void)
 {
 	const char *plain = mkimg("ro", PLAIN);
-	const char *rmap = mkimg("rmap", "-m crc=1,rmapbt=1,reflink=1");
+	const char *rmap = mkimg("rmap", "-m crc=1,rmapbt=1,reflink=1 -n parent=0");
+	const char *ppt = mkimg("ppt", "-m crc=1,rmapbt=1,reflink=1 -n parent=1");
 	struct mnt m;
 
-	CHECK(plain && rmap);
-	if (!plain || !rmap)
+	CHECK(plain && rmap && ppt);
+	if (!plain || !rmap || !ppt)
 		return;
 	nwrites = nflushes = 0;
 	CHECK_RC(mnt_open(&m, plain, "ro", false), 0);
@@ -284,12 +287,17 @@ static void read_only_demotion_writes_nothing(void)
 	CHECK_RC(mnt_close(&m), 0);
 
 	log_reset();
-	CHECK_RC(mnt_open(&m, rmap, "", false), 0);
+	CHECK_RC(mnt_open(&m, ppt, "", false), 0);
 	CHECK(m.x && !m.x->rw);
-	CHECK(log_has("rmapbt/reflink"));
+	CHECK(log_has("parent pointer"));
 	CHECK_RC(mnt_close(&m), 0);
 
 	CHECK(nwrites == 0 && nflushes == 0);
+	/* rmapbt and reflink are writable now (M3d) */
+	log_reset();
+	CHECK_RC(mnt_open(&m, rmap, "", false), 0);
+	CHECK(m.x && m.x->rw);
+	CHECK_RC(mnt_close(&m), 0);
 	/* a read-only mount still reads the same root */
 	log_reset();
 	CHECK_RC(mnt_open(&m, plain, "rw", false), 0);

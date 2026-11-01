@@ -192,7 +192,9 @@ static const char *mkimg(const char *name, const char *opts)
 	return path;
 }
 
-#define PLAIN "-m crc=1,rmapbt=0,reflink=0,metadir=0 -n parent=0 -i sparse=1"
+#define PLAIN_STR "-m crc=1,rmapbt=0,reflink=0,metadir=0 -n parent=0 -i sparse=1"
+/* WFEAT overrides the mkfs features (make test-wrmap runs the write suites on rmapbt+reflink) */
+#define PLAIN (getenv("WFEAT") ? getenv("WFEAT") : PLAIN_STR)
 
 static bool repair_clean(const char *img)
 {

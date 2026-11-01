@@ -113,6 +113,17 @@ wfs_err_t wfs_xfs_op_create(struct wfs_xfs *x, wfs_ino_t dir, const char *name, 
 	return error;
 }
 
+/*
+ * A reflink inode may share blocks with others. Freeing them needs the refcount
+ * decrease path and writing them needs copy-on-write, neither of which is tested
+ * here (M4): such files are refused instead of risking another file's data.
+ */
+static bool w_last_link_of_shared(struct xfs_inode *ip)
+{
+	return xfs_is_reflink_inode(ip) && VFS_I(ip)->i_nlink <= 1;
+}
+
+
 static wfs_err_t w_remove(struct wfs_xfs *x, wfs_ino_t dir, const char *name, uint32_t len,
 			  bool want_dir)
 {
@@ -141,6 +152,10 @@ static wfs_err_t w_remove(struct wfs_xfs *x, wfs_ino_t dir, const char *name, ui
 	}
 	if (want_dir != S_ISDIR(VFS_I(ip)->i_mode)) {
 		error = want_dir ? -WFS_ENOTDIR : -WFS_EISDIR;
+		goto out_ip;
+	}
+	if (w_last_link_of_shared(ip)) {
+		error = -WFS_EOPNOTSUPP;
 		goto out_ip;
 	}
 	inode_lock(VFS_I(dp));
@@ -464,6 +479,10 @@ wfs_err_t wfs_xfs_op_rename(struct wfs_xfs *x, wfs_ino_t odir, const char *oname
 			goto out_tip;
 	}
 	sn.type = tn.type = w_ftype_of(VFS_I(ip)->i_mode);
+	if (tip && w_last_link_of_shared(tip)) {
+		error = -WFS_EOPNOTSUPP;
+		goto out_tip;
+	}
 	error = xfs_rename((const struct mnt_idmap *)&w_idmap_dummy, sdp, &sn, ip, tdp, &tn, tip, 0);
 	if (error == -EEXIST && tip && S_ISDIR(VFS_I(tip)->i_mode))
 		error = -ENOTEMPTY;		/* xfs_rename: non-empty target directory */

@@ -679,8 +679,6 @@ static bool want_rw(struct wfs_xfs *x)
 		why = "no log device";
 	else if (sbp->sb_features_ro_compat & (uint32_t)XFS_SB_FEAT_RO_COMPAT_UNKNOWN)
 		why = "unknown read-only compatible features";
-	else if (xfs_has_rmapbt(mp) || xfs_has_reflink(mp))
-		why = "rmapbt/reflink updates are not supported yet";
 	else if (sbp->sb_rblocks || x->bt_bound[WFS_DEV_RT])
 		why = "realtime device writes are not supported";
 	else if (sbp->sb_qflags & XFS_ALL_QUOTA_ACCT)
