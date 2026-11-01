@@ -148,7 +148,7 @@ function Write-Manifest([string]$file, [long]$Skip = [long]::MaxValue) {
 }
 
 # ---- 1. clean image: mount, walk, probes ---------------------------------
-$m = Start-XfsMount $PartMain '' 'main'
+$m = Start-XfsMount $PartMain 'ro' 'main'
 $results.main_mounted = $m.Up
 $results.first_mount_ms = [math]::Round($m.Ms)
 if (-not $m.Up) {
@@ -225,7 +225,7 @@ if (-not $m.Up) {
 }
 
 # ---- 2. dirty log: refused with a message --------------------------------
-$m = Start-XfsMount $PartDirty '' 'dirty'
+$m = Start-XfsMount $PartDirty 'ro' 'dirty'
 $results.dirty_mounted = $m.Up
 $results.dirty_exit = $(if ($m.Proc.HasExited) { $m.Proc.ExitCode } else { -1 })
 $msg = (Get-Content $m.ErrFile -Raw) + (Get-Content $m.OutFile -Raw)
@@ -234,7 +234,7 @@ $results.dirty_message = $msg
 if ($m.Up) { Stop-XfsMount $m }
 
 # ---- 3. same image with norecovery ---------------------------------------
-$m = Start-XfsMount $PartDirty 'norecovery' 'norec'
+$m = Start-XfsMount $PartDirty 'ro,norecovery' 'norec'
 $results.norecovery_mounted = $m.Up
 if ($m.Up) {
   $r = Write-Manifest (Join-Path $Out 'manifest-dirty.json')
@@ -244,7 +244,7 @@ if ($m.Up) {
 } else { $results.norecovery_stderr = (Get-Content $m.ErrFile -Raw) }
 
 # ---- 4. hole / unwritten image --------------------------------------------
-$m = Start-XfsMount $PartHole '' 'hole'
+$m = Start-XfsMount $PartHole 'ro' 'hole'
 $results.hole_mounted = $m.Up
 if ($m.Up) {
   $r = Write-Manifest (Join-Path $Out 'manifest-hole.json') $SkipHashOver
@@ -253,7 +253,7 @@ if ($m.Up) {
 } else { $results.hole_stderr = (Get-Content $m.ErrFile -Raw) }
 
 # ---- 5. perf image: sequential read throughput ----------------------------
-$m = Start-XfsMount $PartPerf '' 'perf'
+$m = Start-XfsMount $PartPerf 'ro' 'perf'
 $results.perf_mounted = $m.Up
 if ($m.Up) {
   $f = "$Letter\big.bin"
