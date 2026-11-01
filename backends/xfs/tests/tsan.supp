@@ -1,0 +1,23 @@
+# Races TSan reports inside unmodified kernel XFS code. They are the kernel's own
+# lock-free reads, ordered by the CIL/AIL protocol rather than by one lock (KCSAN
+# treats them as benign there); the shim cannot add annotations to vendored code.
+#   xfs_dialloc_good_ag: unlocked hint reads of pagi_freecount / pagf_freeblks
+#   xfs_buf_item_unpin: bli_flags read after the CIL checkpoint orders the writers
+#   xfs_inode_item_format_core: li_lsn read while the AIL insert of the prior checkpoint
+race:xfs_dialloc_good_ag
+race:xfs_dialloc_ag
+race:xfs_buf_item_unpin
+race:xfs_inode_item_format_core
+#   xfs_buf_item_committed: bli_flags read by the CIL commit of an earlier checkpoint
+#   xfs_alloc_longest_free_extent / xfs_alloc_fixup_longest: pagf_longest, a lockless
+#     "is there room" hint that xfs_alloc_fix_freelist re-checks under the AGF lock
+race:xfs_buf_item_committed
+race:xfs_alloc_longest_free_extent
+race:xfs_alloc_fixup_longest
+#   xfs_inode_item_format_data_fork / xfs_iflush_finish: ili_fields, edited under the
+#     inode lock at CIL format time and read under ili_lock at flush completion
+#   xlog_cil_ctx_switch / xlog_cil_flush: CIL context pointers read outside xc_ctx_lock
+race:xfs_inode_item_format_data_fork
+race:xfs_iflush_finish
+race:xlog_cil_ctx_switch
+race:xlog_cil_flush

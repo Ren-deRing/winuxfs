@@ -570,7 +570,7 @@ int xfs_buf_trylock(struct xfs_buf *bp)
  */
 void xfs_buf_lock(struct xfs_buf *bp)
 {
-	if (atomic_read(&bp->b_pin_count) && (bp->b_flags & XBF_STALE) && xfs_log_force)
+	if (atomic_read(&bp->b_pin_count) && (READ_ONCE(bp->b_flags) & XBF_STALE) && xfs_log_force)
 		xfs_log_force(bp->b_mount, 0);
 	down(&bp->b_sema);
 }
