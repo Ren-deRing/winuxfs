@@ -44,3 +44,13 @@ bench-write: $(BENCH_WRITE)
 	  mkfs.xfs -q -f -m crc=1,rmapbt=0,reflink=0,metadir=0 -n parent=0 -i sparse=1 $$img; fi; \
 	$(BENCH_WRITE) $$img "$(OPTS)"; r=$$?; [ -n "$(IMG)" ] || rm -f $$img; exit $$r
 .PHONY: bench-write
+
+# Replay a dirty log and unmount cleanly: make replay-image IMG=path (the image is modified)
+REPLAY_IMAGE = $(OUT)/replay_image$(EXE)
+$(REPLAY_IMAGE): tests/replay_image.c $(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) wfs_xfs.h Makefile mk/wstress.mk | $(OUT)
+	$(CC) $(CFLAGS) $(LIBXFS_WNO) $(SANFLAGS) $(INC) $(KINC) -I. -o $@ tests/replay_image.c \
+		$(CORE_OBJ) $(SHIM_OBJ) $(BACKEND_OBJ) $(PENDING_LIB) $(LIBS)
+replay-image: $(REPLAY_IMAGE)
+	@test -n "$(IMG)" || { echo "usage: make replay-image IMG=path"; exit 2; }
+	$(REPLAY_IMAGE) $(IMG)
+.PHONY: replay-image
