@@ -367,13 +367,31 @@ static void statfs_matches_formula_from_xfs_db_fields(const char *fixdir, const 
 	if (!sh("command -v zstd >/dev/null 2>&1")) {
 		list_images(rootdir, ".img.zst", &fl);
 		for (i = 0; i < fl.n; i++) {
+			char base[128], zl[700], zr[700], logp[700], rtp[700];
+			struct stat zs;
+			size_t bl = strlen(fl.name[i]) - 8;	/* without ".img.zst" */
+
+			if ((bl > 4 && !strncmp(fl.name[i] + bl - 4, ".log", 4)) ||
+			    (bl > 3 && !strncmp(fl.name[i] + bl - 3, ".rt", 3)))
+				continue;	/* an external device: decompressed with its data image */
+			snprintf(base, sizeof(base), "%.*s", (int)bl, fl.name[i]);
 			snprintf(data, sizeof(data), "%s/root.img", tmp);
+			snprintf(logp, sizeof(logp), "%s/root.log.img", tmp);
+			snprintf(rtp, sizeof(rtp), "%s/root.rt.img", tmp);
+			snprintf(zl, sizeof(zl), "%s/%s.log.img.zst", rootdir, base);
+			snprintf(zr, sizeof(zr), "%s/%s.rt.img.zst", rootdir, base);
 			if (sh("zstd -dqf '%s/%s' -o '%s'", rootdir, fl.name[i], data)) {
 				CHECK(0 && "zstd failed");
 				continue;
 			}
-			check_image(data, NULL, NULL, "norecovery");	/* kernel images may carry a dirty log */
-			sh("rm -f '%s'", data);
+			if (stat(zl, &zs) == 0)
+				CHECK(sh("zstd -dqf '%s' -o '%s'", zl, logp) == 0);
+			if (stat(zr, &zs) == 0)
+				CHECK(sh("zstd -dqf '%s' -o '%s'", zr, rtp) == 0);
+			/* kernel images may carry a dirty log */
+			check_image(data, stat(zl, &zs) == 0 ? logp : NULL, stat(zr, &zs) == 0 ? rtp : NULL,
+				    "norecovery");
+			sh("rm -f '%s' '%s' '%s'", data, logp, rtp);
 		}
 	}
 }
