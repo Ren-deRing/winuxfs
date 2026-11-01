@@ -303,7 +303,7 @@ static int write_chunk(struct wfs_xfs *x, struct xfs_inode *ip, uint64_t pos, co
 			return error;
 	}
 	*done = end - pos;
-	if (end > (uint64_t)i_size_read(VFS_I(ip))) {		/* step 4 */
+	{							/* step 4: size (when it grows) and mtime/ctime */
 		struct xfs_trans *tp;
 
 		error = xfs_trans_alloc(mp, &M_RES(mp)->tr_fsyncts, 0, 0, 0, &tp);
@@ -311,7 +311,12 @@ static int write_chunk(struct wfs_xfs *x, struct xfs_inode *ip, uint64_t pos, co
 			return wfs_xfs_err(error);
 		xfs_ilock(ip, XFS_ILOCK_EXCL);
 		xfs_trans_ijoin(tp, ip, 0);
-		set_size(tp, ip, end);
+		if (end > (uint64_t)i_size_read(VFS_I(ip))) {
+			set_size(tp, ip, end);
+		} else {		/* an overwrite still changes mtime/ctime */
+			xfs_trans_ichgtime(tp, ip, XFS_ICHGTIME_MOD | XFS_ICHGTIME_CHG);
+			xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
+		}
 		error = xfs_trans_commit(tp);
 		xfs_iunlock(ip, XFS_ILOCK_EXCL);
 		if (error)

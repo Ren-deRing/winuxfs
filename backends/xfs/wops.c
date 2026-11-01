@@ -204,8 +204,7 @@ wfs_err_t wfs_xfs_op_setattr(struct wfs_xfs *x, wfs_ino_t ino, const wfs_stat *s
 		inode_set_mtime_to_ts(inode, (struct timespec64){ st->mtime.sec, st->mtime.nsec });
 	xfs_trans_ichgtime(tp, ip, XFS_ICHGTIME_CHG);
 	xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
-	error = wfs_xfs_err(xfs_trans_commit(tp));
-	xfs_iunlock(ip, XFS_ILOCK_EXCL);
+	error = wfs_xfs_err(xfs_trans_commit(tp));	/* the commit drops the ILOCK joined by alloc_ichange */
 out:
 	xfs_irele(ip);
 	return error;

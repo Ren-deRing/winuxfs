@@ -467,6 +467,30 @@ static void random_oracle(void)
 	free(model); free(buf);
 }
 
+/* an overwrite that changes no size still updates mtime and ctime */
+static void overwrite_updates_mtime(void)
+{
+	struct mnt m;
+	wfs_ino_t f;
+	wfs_stat st = { 0 }, a, b;
+	uint8_t buf[4096];
+
+	CHECK_RC(open_new(&m, mkimg("wmtime", PLAIN), &f), 0);
+	fill(buf, sizeof(buf), 5);
+	CHECK_RC(wr(&m, f, 0, buf, sizeof(buf)), 0);
+	st.mtime.sec = 1000;			/* long ago */
+	CHECK_RC(wfs_xfs_op_setattr(m.x, f, &st, WFS_SET_MTIME), 0);
+	CHECK_RC(wfs_xfs_op_getattr(m.x, f, &a), 0);
+	CHECK(a.mtime.sec == 1000);
+	fill(buf, sizeof(buf), 6);
+	CHECK_RC(wr(&m, f, 100, buf, 200), 0);	/* inside the file */
+	CHECK_RC(wfs_xfs_op_getattr(m.x, f, &b), 0);
+	CHECK(b.size == a.size);
+	CHECK(b.mtime.sec > 1000);
+	CHECK(b.ctime.sec >= b.mtime.sec);
+	CHECK_RC(mnt_close(&m), 0);
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 2) {
@@ -477,6 +501,7 @@ int main(int argc, char **argv)
 	if (sh("mkdir -p '%s'", tmp))
 		return 2;
 	RUN(write_read_basic);
+	RUN(overwrite_updates_mtime);
 	RUN(truncate_basic);
 	RUN(big_offset);
 	RUN(enospc);
