@@ -60,7 +60,8 @@ under `backends/xfs`; ported files keep their SPDX lines.
 
 Not in Milestone 1: XFS itself (Milestone 2); extended attributes (the ABI
 has `WFS_CAP_XATTR` but the adapter does not use it); Windows security
-descriptors beyond the default; a boot-time service.
+descriptors beyond the default; a boot-time service (added later, see
+`winuxfs service` in the README).
 
 Known gaps, from the review ledger:
 
@@ -105,6 +106,15 @@ Known gaps, from the review ledger:
   `powershell -Command "Set-Disk -Number N -IsOffline $false"` or, in
   `diskpart`, `select disk N` then `online disk`. A `winuxfs online` helper
   is not provided in M1.
+- **Service mounts.** `winuxfs service run` (started by the service manager,
+  LocalSystem, delayed auto-start, depends on `WinFsp.Launcher`) runs one
+  `mount` per config line on its own thread. Stop, shutdown and pre-shutdown
+  call `unmount` for each mount point in parallel and wait for the serving
+  threads, so the XFS log is flushed before Windows goes down (pre-shutdown
+  timeout 60 s). The mount-point claim objects live in the `Global\` namespace
+  so the CLI in any session can find them; they are readable only by SYSTEM and
+  administrators, so `unmount` needs an elevated prompt (as for any mount made
+  by an elevated process).
 - **`unmount` of nothing.** `winuxfs unmount X:` exits with the usage error
   code and prints "Nothing is mounted by winuxfs on X:" when no process serves
   X: (also when only a stale stop event of a killed process remains).

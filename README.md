@@ -14,7 +14,30 @@ winuxfs mount X: <disk | VHD | image file> --type <backend> [--log <dev>] [--rt 
 winuxfs mount Y: none --type memfs
 winuxfs unmount Y:
 winuxfs list-backends | list-partitions <device>
+winuxfs service install | uninstall      (mounts from winuxfs.conf at boot, see below)
 ```
+
+### Mounting at boot (Windows service)
+
+`winuxfs service install` (administrator) registers the `winuxfs` service. It
+reads `winuxfs.conf` next to `winuxfs.exe`, one mount per line, written like the
+arguments of `winuxfs mount`:
+
+```
+# winuxfs.conf
+Y: disk:1 --partition 1 --type xfs --case-insensitive
+```
+
+Then `sc.exe start winuxfs` (or reboot; it starts a short while after Windows).
+Because the service runs as SYSTEM, the drive letter is visible in every session
+(File Explorer, Steam, other users), unlike a mount made from an elevated shell,
+which a non-elevated Explorer does not see. Stopping the service or shutting
+Windows down unmounts cleanly (the file system log is flushed). A mount that
+fails (disk not ready yet) is retried every 5 s for 2 minutes. Progress and
+errors go to `winuxfs-service.log` next to the config. Edit the config, then
+`sc.exe stop winuxfs` and `sc.exe start winuxfs`. `winuxfs unmount Y:` works
+from an elevated prompt too. Disk numbers can change when disks are added or
+removed: check them with `Get-Disk`.
 
 See `docs/architecture.md` for the layering and the Milestone 1 limits.
 

@@ -320,7 +320,9 @@ mod win {
     //! a process that finished its teardown and has not exited yet): it is
     //! reset and reused, so `unmount X: && mount X: ...` never races.
     //!
-    //! Names are `Local\winuxfs-{live,stop}-<KEY>`, KEY being the mount
+    //! Names are `Global\winuxfs-{live,stop}-<KEY>` (the global namespace, so a
+    //! mount served by the Windows service in session 0 can be unmounted from
+    //! an administrator shell in any session), KEY being the mount
     //! point upper-cased with `\` replaced by `/`. Kernel object names are
     //! limited to MAX_PATH (260) characters, so mount points whose name
     //! would be longer are refused.
@@ -416,7 +418,7 @@ mod win {
             None => mp.trim_end_matches(['\\', '/']).to_string(),
         };
         let key = arg.to_uppercase().replace('\\', "/");
-        if "Local\\winuxfs-stop-".len() + key.encode_utf16().count() > MAX_OBJECT_NAME {
+        if "Global\\winuxfs-stop-".len() + key.encode_utf16().count() > MAX_OBJECT_NAME {
             return Err(CliError::usage(format!(
                 "Mount point {mp} is too long: use a drive letter or a path of at most \
                  about 230 characters."
@@ -426,7 +428,7 @@ mod win {
     }
 
     fn object_name(kind: &str, mp: &MountPoint) -> Vec<u16> {
-        wide(&format!("Local\\winuxfs-{kind}-{}", mp.key))
+        wide(&format!("Global\\winuxfs-{kind}-{}", mp.key))
     }
 
     struct OwnedHandle(HANDLE);
