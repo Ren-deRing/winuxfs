@@ -65,6 +65,8 @@ if command -v gcc >/dev/null && command -v mkfs.xfs >/dev/null && command -v xfs
   make -s -C backends/xfs test-wstress
   WCRASH_POINTS=400 make -s -C backends/xfs test-wrmap
   make -s -C backends/xfs test-wstress-tsan
+  # fuzzing after writes: mutated images mounted read-write and written to (ASan+UBSan, CRC on and off)
+  make -s -C backends/xfs test-wfuzz-all
   if [ "$fuzz" = 1 ]; then make -s -C backends/xfs fuzz-sample; fi
 else
   echo "SKIPPED: backends/xfs mount tests (gcc, mkfs.xfs and xfs_db needed; install xfsprogs)"
