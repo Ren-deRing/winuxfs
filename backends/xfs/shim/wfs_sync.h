@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Locks and atomics. Windows: SRWLOCK (declared locally so <windows.h> and
+ * Locks and atomics. Windows: SRWLOCK + condition variable (declared locally so <windows.h> and
  * its macro pollution never enter kernel-derived code). Elsewhere: pthread.
  * Spinlocks are mutexes (no interrupt context here). Buffer locks are no-ops
  * on read-only mounts (design 7.1); inode locks use rw_semaphore.
@@ -20,7 +20,14 @@ void ReleaseSRWLockShared(wfs_srw_t *);
 unsigned char TryAcquireSRWLockExclusive(wfs_srw_t *);
 unsigned char TryAcquireSRWLockShared(wfs_srw_t *);
 struct mutex { wfs_srw_t l; };
-struct rw_semaphore { wfs_srw_t l; };
+typedef struct { void *p; } wfs_cv_t;
+void InitializeConditionVariable(wfs_cv_t *);
+int SleepConditionVariableSRW(wfs_cv_t *, wfs_srw_t *, unsigned long, unsigned long);
+void WakeAllConditionVariable(wfs_cv_t *);
+/* Reader-preferring, like glibc's default pthread_rwlock: the kernel takes inode and
+ * buffer rw_semaphores recursively for reading, which deadlocks on a writer-fair SRWLOCK
+ * as soon as a writer queues between the two acquisitions. */
+struct rw_semaphore { wfs_srw_t l; wfs_cv_t cv; int readers; int writer; };
 typedef struct spinlock { wfs_srw_t l; } spinlock_t;
 static inline void mutex_init(struct mutex *m) { InitializeSRWLock(&m->l); }
 static inline void mutex_lock(struct mutex *m) { AcquireSRWLockExclusive(&m->l); }
@@ -32,13 +39,65 @@ static inline void spin_lock(spinlock_t *s) { AcquireSRWLockExclusive(&s->l); }
 static inline void spin_unlock(spinlock_t *s) { ReleaseSRWLockExclusive(&s->l); }
 static inline int spin_trylock(spinlock_t *s) { return TryAcquireSRWLockExclusive(&s->l) != 0; }
 static inline void spin_lock_destroy(spinlock_t *s) { (void)s; }
-static inline void init_rwsem(struct rw_semaphore *r) { InitializeSRWLock(&r->l); }
-static inline void down_read(struct rw_semaphore *r) { AcquireSRWLockShared(&r->l); }
-static inline void up_read(struct rw_semaphore *r) { ReleaseSRWLockShared(&r->l); }
-static inline int down_read_trylock(struct rw_semaphore *r) { return TryAcquireSRWLockShared(&r->l) != 0; }
-static inline void down_write(struct rw_semaphore *r) { AcquireSRWLockExclusive(&r->l); }
-static inline void up_write(struct rw_semaphore *r) { ReleaseSRWLockExclusive(&r->l); }
-static inline int down_write_trylock(struct rw_semaphore *r) { return TryAcquireSRWLockExclusive(&r->l) != 0; }
+static inline void init_rwsem(struct rw_semaphore *r)
+{
+	InitializeSRWLock(&r->l);
+	InitializeConditionVariable(&r->cv);
+	r->readers = 0;
+	r->writer = 0;
+}
+static inline void down_read(struct rw_semaphore *r)
+{
+	AcquireSRWLockExclusive(&r->l);
+	while (r->writer)
+		SleepConditionVariableSRW(&r->cv, &r->l, 0xFFFFFFFFul, 0);
+	r->readers++;
+	ReleaseSRWLockExclusive(&r->l);
+}
+static inline void up_read(struct rw_semaphore *r)
+{
+	AcquireSRWLockExclusive(&r->l);
+	if (--r->readers == 0)
+		WakeAllConditionVariable(&r->cv);
+	ReleaseSRWLockExclusive(&r->l);
+}
+static inline int down_read_trylock(struct rw_semaphore *r)
+{
+	int ok;
+
+	AcquireSRWLockExclusive(&r->l);
+	ok = !r->writer;
+	if (ok)
+		r->readers++;
+	ReleaseSRWLockExclusive(&r->l);
+	return ok;
+}
+static inline void down_write(struct rw_semaphore *r)
+{
+	AcquireSRWLockExclusive(&r->l);
+	while (r->writer || r->readers)
+		SleepConditionVariableSRW(&r->cv, &r->l, 0xFFFFFFFFul, 0);
+	r->writer = 1;
+	ReleaseSRWLockExclusive(&r->l);
+}
+static inline void up_write(struct rw_semaphore *r)
+{
+	AcquireSRWLockExclusive(&r->l);
+	r->writer = 0;
+	WakeAllConditionVariable(&r->cv);
+	ReleaseSRWLockExclusive(&r->l);
+}
+static inline int down_write_trylock(struct rw_semaphore *r)
+{
+	int ok;
+
+	AcquireSRWLockExclusive(&r->l);
+	ok = !r->writer && !r->readers;
+	if (ok)
+		r->writer = 1;
+	ReleaseSRWLockExclusive(&r->l);
+	return ok;
+}
 static inline void destroy_rwsem(struct rw_semaphore *r) { (void)r; }
 #else
 #include <pthread.h>

@@ -21,7 +21,7 @@ param(
   [string]$Dir = (Split-Path -Parent $MyInvocation.MyCommand.Path),
   [string]$Out = (Join-Path $Dir 'out'),
   [string]$Letter = 'Y:',
-  [int]$PartMain = 1, [int]$PartDirty = 2, [int]$PartHole = 3, [int]$PartPerf = 4,
+  [int]$PartMain = 1, [int]$PartDirty = 2, [int]$PartHole = 3, [int]$PartPerf = 4, [int]$PartWrite = 5,
   [long]$SkipHashOver = 1073741824   # hole image only: far.bin is 1 TiB (hash "skipped")
 )
 $ErrorActionPreference = 'Stop'
@@ -269,6 +269,92 @@ if ($m.Up) {
   $r = Write-Manifest (Join-Path $Out 'manifest-perf.json')
   $results.perf_hash_errors = @($r.Errors)
   Stop-XfsMount $m
+}
+
+# ---- 5. write path: create/write/rename/copy/truncate/delete, then remount ----
+function Get-Sha([byte[]]$b) {
+  $h = [System.Security.Cryptography.SHA256]::Create()
+  ([BitConverter]::ToString($h.ComputeHash($b))).Replace('-', '').ToLower()
+}
+function Test-WriteTree([hashtable]$exp) {
+  $root = "$Letter\"; $errs = @(); $seen = @{}
+  foreach ($i in (Get-ChildItem -LiteralPath $root -Recurse -Force)) {
+    $rel = $i.FullName.Substring($root.Length)
+    $seen[$rel] = $true
+    if ($i.PSIsContainer) { if ($exp[$rel] -ne 'DIR') { $errs += "unexpected dir $rel" } }
+    elseif (-not $exp.ContainsKey($rel)) { $errs += "unexpected file $rel" }
+    else {
+      $h = (Get-FileHash -LiteralPath $i.FullName -Algorithm SHA256).Hash.ToLower()
+      if ($h -ne $exp[$rel]) { $errs += "content differs: $rel" }
+    }
+  }
+  foreach ($k in $exp.Keys) { if (-not $seen.ContainsKey($k)) { $errs += "missing $k" } }
+  ,$errs
+}
+$m = Start-XfsMount $PartWrite '' 'write'
+$results.write_mounted = $m.Up
+if ($m.Up) {
+  $exp = @{}; $stage = @()
+  $rng = New-Object System.Random 12345
+  $rb = { param($n) $b = New-Object byte[] $n; $rng.NextBytes($b); ,$b }
+  try {
+    $vi = (& fsutil fsinfo volumeinfo $Letter) -join "`n"
+    $results.write_volume_read_only = ($vi -match 'Is ReadOnly|Read Only Volume')
+    New-Item -ItemType Directory -Path "$Letter\wd\sub" -Force | Out-Null
+    $exp['wd'] = 'DIR'; $exp['wd\sub'] = 'DIR'
+    $a = & $rb (3 * 1MB)
+    [System.IO.File]::WriteAllBytes("$Letter\wd\a.bin", $a)
+    $mid = & $rb 4096                                  # overwrite inside the file
+    $fs = [System.IO.File]::Open("$Letter\wd\a.bin", 'Open', 'ReadWrite')
+    $fs.Seek(1MB, 'Begin') | Out-Null; $fs.Write($mid, 0, $mid.Length); $fs.Dispose()
+    [Array]::Copy($mid, 0, $a, 1MB, $mid.Length)
+    $exp['wd\a.bin'] = Get-Sha $a
+    $stage += 'create_overwrite'
+    Set-Content -LiteralPath "$Letter\wd\b.txt" -Value 'hello write' -NoNewline
+    Add-Content -LiteralPath "$Letter\wd\b.txt" -Value ' + more' -NoNewline
+    Move-Item -LiteralPath "$Letter\wd\b.txt" -Destination "$Letter\wd\sub\b2.txt"
+    $exp['wd\sub\b2.txt'] = Get-Sha ([Text.Encoding]::ASCII.GetBytes('hello write + more'))
+    $stage += 'append_rename'
+    Copy-Item -LiteralPath "$Letter\wd\a.bin" -Destination "$Letter\wd\sub\a-copy.bin"
+    $fs = [System.IO.File]::Open("$Letter\wd\sub\a-copy.bin", 'Open', 'ReadWrite'); $fs.SetLength(1000); $fs.Dispose()
+    $c = New-Object byte[] 1000; [Array]::Copy($a, $c, 1000)
+    $exp['wd\sub\a-copy.bin'] = Get-Sha $c
+    $stage += 'copy_truncate'
+    [System.IO.File]::WriteAllBytes("$Letter\wd\tmp.bin", (& $rb 100000))
+    Remove-Item -LiteralPath "$Letter\wd\tmp.bin" -Force
+    New-Item -ItemType Directory -Path "$Letter\wd\many" | Out-Null; $exp['wd\many'] = 'DIR'
+    for ($i = 0; $i -lt 200; $i++) {
+      $n = 'f{0:D3}.txt' -f $i
+      Set-Content -LiteralPath "$Letter\wd\many\$n" -Value "file $i" -NoNewline
+      $exp["wd\many\$n"] = Get-Sha ([Text.Encoding]::ASCII.GetBytes("file $i"))
+    }
+    for ($i = 0; $i -lt 200; $i += 2) {
+      $n = 'f{0:D3}.txt' -f $i
+      Remove-Item -LiteralPath "$Letter\wd\many\$n" -Force; $exp.Remove("wd\many\$n")
+    }
+    $stage += 'many_files'
+    $kor = '한글 파일.txt'
+    [System.IO.File]::WriteAllBytes("$Letter\wd\$kor", [Text.Encoding]::UTF8.GetBytes('안녕'))
+    $exp["wd\$kor"] = Get-Sha ([Text.Encoding]::UTF8.GetBytes('안녕'))
+    New-Item -ItemType Directory -Path "$Letter\wd\gone\inner" -Force | Out-Null
+    Remove-Item -LiteralPath "$Letter\wd\gone" -Recurse -Force
+    $stage += 'names_rmdir'
+    $big = & $rb (40 * 1MB)
+    $t = $sw::StartNew()
+    [System.IO.File]::WriteAllBytes("$Letter\wd\big.bin", $big)
+    $results.write_mib_s = [math]::Round(40 / $t.Elapsed.TotalSeconds, 1)
+    $exp['wd\big.bin'] = Get-Sha $big
+    $stage += 'big_file'
+    $results.write_live_errors = @(Test-WriteTree $exp)
+  } catch { $results.write_exception = $_.Exception.Message }
+  $results.write_stages = $stage
+  Stop-XfsMount $m
+  $m = Start-XfsMount $PartWrite '' 'write2'
+  $results.write_remounted = $m.Up
+  if ($m.Up) {
+    $results.write_remount_errors = @(Test-WriteTree $exp)
+    Stop-XfsMount $m
+  }
 }
 
 $results.mount_ms = $script:mountMs

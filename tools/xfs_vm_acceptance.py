@@ -10,6 +10,7 @@
                      test_logcheck.c does)
         partition 3  hole-unwritten.img
         partition 4  perf: one 512 MiB file of incompressible bytes
+        partition 5  an empty mkfs image the Windows write test mounts read-write
       and OUTDIR/expected-{main,hole,perf}.json (the fixtures' manifests).
       Needs xfsprogs (mkfs.xfs, xfs_db); exit 77 when missing.
   xfs_vm_acceptance.py verify OUTDIR VMOUT
@@ -88,6 +89,7 @@ def write_gpt_disk(path, images):
         f.write(header(last, 1, last - ent_sectors))
         for im, st in zip(images, starts):
             copy_sparse(im, f, st)
+    return starts
 
 
 def copy_sparse(src, dst_f, at, chunk=MIB):
@@ -212,9 +214,20 @@ def cmd_prepare(argv):
     shutil.copyfile(hole_img[:-4] + ".manifest.json", os.path.join(out, "expected-hole.json"))
     with open(os.path.join(out, "expected-perf.json"), "w") as f:
         json.dump(perf_manifest, f, sort_keys=True, indent=1)
-    write_gpt_disk(os.path.join(out, "disk.img"), [main_img, dirty, hole_img, perf])
+    wimg = os.path.join(out, "write.img")
+    if os.path.exists(wimg):
+        os.unlink(wimg)
+    if subprocess.run(["truncate", "-s", "320m", wimg]).returncode or subprocess.run(
+            ["mkfs.xfs", "-q", "-f", "-m", "crc=1,rmapbt=0,reflink=0,metadir=0", "-n", "parent=0",
+             "-i", "sparse=1", wimg]).returncode:
+        print("mkfs.xfs for the write image failed", file=sys.stderr)
+        return 1
+    starts = write_gpt_disk(os.path.join(out, "disk.img"), [main_img, dirty, hole_img, perf, wimg])
+    with open(os.path.join(out, "write-part.json"), "w") as f:
+        json.dump({"offset": starts[4], "size": os.path.getsize(wimg)}, f)
     os.unlink(dirty)
     os.unlink(perf)
+    os.unlink(wimg)
     print(os.path.join(out, "disk.img"))
     return 0
 
@@ -261,6 +274,10 @@ def compare(exp, got):
 
 
 def cmd_verify(argv):
+    data_disk = None
+    if len(argv) == 4 and argv[2] == "--data-disk":
+        data_disk = argv[3]
+        argv = argv[:2]
     if len(argv) != 2:
         print(__doc__, file=sys.stderr)
         return 2
@@ -335,8 +352,39 @@ def cmd_verify(argv):
           and res.get("tiny_unchanged") is True
           and bool(res.get("volume_read_only") or res.get("attr_readonly_file_is_readonly")),
           json.dumps(wa)[:300])
+    def flat(x):                # PowerShell wraps arrays: "", [], [[]], "msg", ["msg"]
+        if isinstance(x, (list, tuple)):
+            return [y for e in x for y in flat(e)]
+        return [str(x)] if x else []
+
+    wl, wr_ = flat(res.get("write_live_errors")), flat(res.get("write_remount_errors"))
+    check("windows_write_roundtrip",
+          res.get("write_mounted") is True and res.get("write_remounted") is True
+          and not res.get("write_exception") and len(res.get("write_stages") or []) == 6
+          and res.get("write_volume_read_only") is False and not wl and not wr_,
+          "; ".join(wl[:5] + wr_[:5]) or str(res.get("write_exception")) or str(res.get("write_stages")))
+    if data_disk:
+        wp = load(os.path.join(exp_dir, "write-part.json"))
+        part = os.path.join(exp_dir, "write-after.img")
+        with open(data_disk, "rb") as src, open(part, "wb") as dst:
+            src.seek(wp["offset"])
+            dst.truncate(wp["size"])
+            left, pos = wp["size"], 0
+            while left:
+                b = src.read(min(MIB, left))
+                if not b:
+                    break
+                if b.count(0) != len(b):
+                    dst.seek(pos)
+                    dst.write(b)
+                pos += len(b)
+                left -= len(b)
+        r = subprocess.run(["xfs_repair", "-n", part], capture_output=True, text=True)
+        check("xfs_repair_clean_after_windows_writes", r.returncode == 0,
+              (r.stdout + r.stderr)[-400:])
+        os.unlink(part)
     keys = ("first_mount_ms", "mount_ms", "first_root_list_ms", "many_enum_ms", "many_get_childitem_ms",
-            "many_enum_warm_ms", "seqread_mib_s", "main_walk_ms", "main_entries")
+            "many_enum_warm_ms", "seqread_mib_s", "write_mib_s", "main_walk_ms", "main_entries")
     print("PERF " + " ".join(f"{k}={res.get(k)}" for k in keys))
     if failed:
         print("FAILED: " + ", ".join(failed), file=sys.stderr)

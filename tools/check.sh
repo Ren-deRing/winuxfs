@@ -206,5 +206,6 @@ vmctl run -- 'if exist \\host.lan\Data\t15out rmdir /s /q \\host.lan\Data\t15out
 vmctl run -- 'xcopy /y /e /i /q C:\t15\out \\host.lan\Data\t15out'
 XFS_OUT="$(dirname "$VMCTL")/../vm/shared/t15out"
 if [ "$xfs_rc" != 0 ]; then echo "XFS acceptance script failed ($xfs_rc)" >&2; exit 1; fi
-python3 -I tools/xfs_vm_acceptance.py verify "$XFS_DIR" "$XFS_OUT"
+vmctl down
+python3 -I tools/xfs_vm_acceptance.py verify "$XFS_DIR" "$XFS_OUT" --data-disk "$(dirname "$VMCTL")/../vm/storage2/data2.img"
 echo "VM acceptance OK"

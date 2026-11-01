@@ -424,6 +424,57 @@ static void parallel_writers(void)
 			free(t[i].f[k].data);
 }
 
+
+/* The Windows CopyFile pattern: the destination is first extended to its final size,
+ * then written in large chunks while the source is read back concurrently. */
+struct cp { struct mnt *m; wfs_ino_t src, dst; size_t len; int rc; };
+static void *cp_reader(void *arg)
+{
+	struct cp *c = arg;
+	uint8_t *b = malloc(65536);
+	size_t off, got;
+
+	for (off = 0; off < c->len; off += 65536) {
+		got = 0;
+		if (rdb(c->m, c->src, off, b, 65536, &got))
+			c->rc = -1;
+	}
+	free(b);
+	return NULL;
+}
+static void copy_pattern(void)
+{
+	struct mnt m;
+	struct cp c = { .m = &m, .len = 3u << 20 };
+	const char *img = mkimg("wcopy", PLAIN);
+	wfs_stat st;
+	uint8_t *data = malloc(c.len), *back = malloc(c.len);
+	pthread_t th;
+	size_t off;
+
+	CHECK(img != NULL);
+	if (!img)
+		return;
+	fill(data, c.len, 99);
+	CHECK_RC(mnt_open(&m, img, "", false), 0);
+	CHECK_RC(mk(&m, ROOT, "src", WFS_FT_REG, 0644, &c.src, &st), 0);
+	CHECK_RC(wr(&m, c.src, 0, data, c.len), 0);
+	CHECK_RC(mk(&m, ROOT, "dst", WFS_FT_REG, 0644, &c.dst, &st), 0);
+	pthread_create(&th, NULL, cp_reader, &c);
+	CHECK_RC(trunc_to(&m, c.dst, c.len), 0);		/* extend first */
+	for (off = 0; off < c.len; off += 1u << 20)
+		CHECK_RC(wr(&m, c.dst, off, data + off, 1u << 20), 0);
+	pthread_join(th, NULL);
+	CHECK(c.rc == 0);
+	CHECK_RC(trunc_to(&m, c.dst, 1000), 0);
+	CHECK(same(&m, c.dst, data, 1000));
+	(void)back;
+	CHECK_RC(mnt_close(&m), 0);
+	CHECK(repair_clean(img));
+	free(data);
+	free(back);
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 2) {
@@ -435,6 +486,7 @@ int main(int argc, char **argv)
 		printf("SKIPPED: xfsprogs not installed\n");
 		return 0;
 	}
+	RUN(copy_pattern);
 	RUN(parallel_writers);
 	printf("test_wstress: %d checks, %d failures, %d skipped\n", checks, failures, skipped);
 	return failures ? 1 : 0;
