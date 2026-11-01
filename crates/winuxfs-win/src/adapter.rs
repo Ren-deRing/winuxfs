@@ -130,11 +130,50 @@ pub fn errno_to_ntstatus(e: Errno) -> NTSTATUS {
     }
 }
 
+/// Length (in UTF-16 units, counted from the leading `\`) of a leading
+/// `\Device\Volume{...}` in `win`, or 0 when there is none.
+///
+/// Windows cannot map a WinFsp volume's NT device path back to its drive
+/// letter (`QueryFullProcessImageName` returns `\Device\Volume{GUID}\x.exe`
+/// even in Win32 mode), so programs that build a path from it and open it
+/// relative to the drive arrive here as `\Device\Volume{GUID}\x.exe`.
+/// League of Legends does this to locate its sibling executables.
+pub(crate) fn device_prefix_len(win: &[u16]) -> usize {
+    const SEP: u16 = b'\\' as u16;
+    let lower = |u: u16| {
+        if (b'A' as u16..=b'Z' as u16).contains(&u) {
+            u + 32
+        } else {
+            u
+        }
+    };
+    let pat = "\\device\\volume{";
+    let starts = win.len() >= pat.len()
+        && win
+            .iter()
+            .zip(pat.bytes())
+            .all(|(&u, b)| lower(u) == u16::from(b));
+    if !starts {
+        return 0;
+    }
+    match win.iter().position(|&u| u == b'}' as u16) {
+        Some(close) if win.get(close + 1).is_none_or(|&u| u == SEP) => close + 1,
+        _ => 0,
+    }
+}
+
 /// Converts a WinFsp path (`\`-separated UTF-16, starting with `\`) to a
 /// Vfs path. A single trailing `\` is ignored. Empty components, `.`/`..`
 /// and names [`namemap::from_windows`] rejects are `EINVAL`.
 pub(crate) fn vfs_path(win: &[u16]) -> Result<Vec<u8>, Errno> {
     const SEP: u16 = b'\\' as u16;
+    let pre = device_prefix_len(win);
+    let win = &win[pre..];
+    let win = if pre > 0 && win.is_empty() {
+        &[SEP][..]
+    } else {
+        win
+    };
     let rest = win.strip_prefix(&[SEP]).ok_or(Errno::EINVAL)?;
     let rest = rest.strip_suffix(&[SEP]).unwrap_or(rest);
     let mut out = Vec::with_capacity(win.len() + 1);
@@ -310,11 +349,68 @@ pub(crate) fn file_info(st: &Stat, read_only_mount: bool) -> FSP_FSCTL_FILE_INFO
 
 /// Runs a callback body, turning a panic into `STATUS_UNSUCCESSFUL`.
 pub(crate) fn guard(name: &str, f: impl FnOnce() -> NTSTATUS) -> NTSTATUS {
+    TRACE_PATH.with(|p| p.borrow_mut().clear());
     match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(st) => st,
+        Ok(st) => {
+            if st != 0 {
+                trace_failure(name, st);
+            }
+            st
+        }
         Err(p) => {
             log_panic(name, &*p);
             STATUS_UNSUCCESSFUL
+        }
+    }
+}
+
+thread_local! {
+    static TRACE_PATH: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Remembers the path of the callback running on this thread (trace only).
+pub(crate) fn trace_path(name: &[u16]) {
+    if trace_file().is_some() {
+        TRACE_PATH.with(|p| *p.borrow_mut() = String::from_utf16_lossy(name));
+    }
+}
+
+/// Opt-in diagnostics: `WINUXFS_TRACE=<file>` appends one line per failing callback.
+fn trace_file() -> Option<&'static std::sync::Mutex<std::fs::File>> {
+    static F: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> =
+        std::sync::OnceLock::new();
+    F.get_or_init(|| {
+        let path = std::env::var_os("WINUXFS_TRACE")?;
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()?;
+        Some(std::sync::Mutex::new(f))
+    })
+    .as_ref()
+}
+
+/// `WINUXFS_TRACE_ALL=1` additionally logs every successful Open and Read.
+pub(crate) fn trace_line(line: impl FnOnce() -> String) {
+    use std::io::Write;
+    static ALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ALL.get_or_init(|| std::env::var_os("WINUXFS_TRACE_ALL").is_some()) {
+        return;
+    }
+    if let Some(f) = trace_file() {
+        if let Ok(mut f) = f.lock() {
+            let _ = writeln!(f, "{}", line());
+        }
+    }
+}
+
+fn trace_failure(name: &str, st: NTSTATUS) {
+    use std::io::Write;
+    if let Some(f) = trace_file() {
+        let path = TRACE_PATH.with(|p| p.borrow().clone());
+        if let Ok(mut f) = f.lock() {
+            let _ = writeln!(f, "{name} {:#010x} {path}", st as u32);
         }
     }
 }
@@ -349,6 +445,26 @@ pub struct MountOptions {
     pub read_only: bool,
     /// Must match the Vfs: `true` iff the Vfs is not case-insensitive.
     pub case_sensitive: bool,
+    /// Also grants access to Authenticated Users. The default descriptor
+    /// admits only the mounting user, SYSTEM and Administrators, which locks
+    /// out everybody else when the mounting user is SYSTEM (the service).
+    pub allow_users: bool,
+}
+
+/// The security descriptor (SDDL) of every file of a mount: owner and group
+/// are the mounting user `sid`, who gets full access, as do SYSTEM and
+/// Administrators (and Authenticated Users with `allow_users`). On a
+/// read-only mount they get read and execute access only, so Windows' own
+/// access check refuses write opens (WinFsp's `ReadOnlyVolume` flag only
+/// reports the volume as read-only; it does not refuse write opens).
+pub fn volume_sddl(sid: &str, read_only: bool, allow_users: bool) -> String {
+    let r = if read_only { "FRFX" } else { "FA" };
+    let users = if allow_users {
+        format!("(A;;{r};;;AU)")
+    } else {
+        String::new()
+    };
+    format!("O:{sid}G:{sid}D:P(A;;{r};;;{sid})(A;;{r};;;SY)(A;;{r};;;BA){users}")
 }
 
 #[cfg(windows)]
@@ -362,6 +478,38 @@ mod tests {
     use super::*;
     use winuxfs_core::plugin::{FileType, Stat, Timespec};
     use winuxfs_core::Errno;
+
+    #[test]
+    fn volume_device_prefix_is_dropped() {
+        let w = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+        let p = |s: &str| vfs_path(&w(s)).unwrap();
+        assert_eq!(
+            p("\\Device\\Volume{ab-1}\\Riot Games\\x.exe"),
+            b"/Riot Games/x.exe"
+        );
+        assert_eq!(p("\\device\\VOLUME{ab-1}"), b"/");
+        assert_eq!(
+            device_prefix_len(&"\\Device\\Volume{ab}\\x".encode_utf16().collect::<Vec<_>>()),
+            18
+        );
+        assert_eq!(p("\\Device\\Volume{ab-1}\\"), b"/");
+        // A plain directory called Device is untouched.
+        assert_eq!(p("\\Device\\Volume\\x"), b"/Device/Volume/x");
+    }
+
+    #[test]
+    fn sddl_is_private_unless_users_are_allowed() {
+        let a = volume_sddl("S-1-5-18", false, false);
+        assert_eq!(
+            a,
+            "O:S-1-5-18G:S-1-5-18D:P(A;;FA;;;S-1-5-18)(A;;FA;;;SY)(A;;FA;;;BA)"
+        );
+        assert!(!a.contains("AU"));
+        let b = volume_sddl("S-1-5-21-1-2-3-1001", false, true);
+        assert!(b.ends_with("(A;;FA;;;BA)(A;;FA;;;AU)"), "{b}");
+        let c = volume_sddl("S-1-5-18", true, true);
+        assert!(c.ends_with("(A;;FRFX;;;AU)") && !c.contains("FA"), "{c}");
+    }
 
     #[test]
     fn panics_in_callbacks_become_status_unsuccessful() {

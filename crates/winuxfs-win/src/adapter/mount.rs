@@ -186,17 +186,10 @@ fn current_user_sid() -> Result<String, WinFspError> {
     res
 }
 
-/// The fixed descriptor of this milestone: owner and group are the mounting
-/// user, who gets full access, as do SYSTEM and Administrators. On a
-/// read-only mount they get read and execute access only, so Windows' own
-/// access check refuses write opens (WinFsp's `ReadOnlyVolume` flag only
-/// reports the volume as read-only; it does not refuse write opens).
-fn security_descriptor(read_only: bool) -> Result<Vec<u8>, WinFspError> {
+/// The descriptor of every file of the mount, see [`super::volume_sddl`].
+fn security_descriptor(read_only: bool, allow_users: bool) -> Result<Vec<u8>, WinFspError> {
     let sid = current_user_sid()?;
-    let r = if read_only { "FRFX" } else { "FA" };
-    let sddl = wide(&format!(
-        "O:{sid}G:{sid}D:P(A;;{r};;;{sid})(A;;{r};;;SY)(A;;{r};;;BA)"
-    ));
+    let sddl = wide(&super::volume_sddl(&sid, read_only, allow_users));
     let mut psd: *mut c_void = std::ptr::null_mut();
     let mut len = 0u32;
     // SAFETY: sddl is NUL-terminated; psd receives a LocalAlloc'd
@@ -292,7 +285,7 @@ pub fn mount_vfs(
         read_only: opts.read_only,
         case_insensitive: !opts.case_sensitive,
         label,
-        sd: security_descriptor(opts.read_only)?,
+        sd: security_descriptor(opts.read_only, opts.allow_users)?,
         open: Mutex::new(HashSet::new()),
     }));
     let interface = Box::into_raw(Box::new(FSP_FILE_SYSTEM_INTERFACE {
@@ -340,9 +333,24 @@ pub fn mount_vfs(
     // SAFETY: fs is live; user_context is ours.
     unsafe { (*fs).user_context = ctx.cast() };
 
-    let mut mp = wide(mount_point);
-    // SAFETY: fs is live and mp is NUL-terminated.
-    let st = unsafe { winfsp.file_system_set_mount_point(fs, mp.as_mut_ptr()) };
+    // A drive letter is first tried in the `\\.\X:` form, which registers the
+    // volume with the Mount Manager (needs administrator rights). Without that
+    // Windows cannot map the volume back to its letter, so
+    // QueryFullProcessImageName returns `\Device\Volume{GUID}\...` and
+    // programs that rebuild paths from it (League of Legends) break.
+    let bytes = mount_point.as_bytes();
+    let is_letter = bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    let mut st = STATUS_UNSUCCESSFUL;
+    if is_letter {
+        let mut mm = wide(&format!("\\\\.\\{mount_point}"));
+        // SAFETY: fs is live and mm is NUL-terminated.
+        st = unsafe { winfsp.file_system_set_mount_point(fs, mm.as_mut_ptr()) };
+    }
+    if st < 0 {
+        let mut mp = wide(mount_point);
+        // SAFETY: fs is live and mp is NUL-terminated.
+        st = unsafe { winfsp.file_system_set_mount_point(fs, mp.as_mut_ptr()) };
+    }
     if st < 0 {
         // SAFETY: no dispatcher was started; fs is not used again.
         unsafe { winfsp.file_system_delete(fs) };
@@ -496,6 +504,7 @@ unsafe extern "system" fn get_security_by_name(
     guard("GetSecurityByName", || {
         // SAFETY: WinFsp passes our file system and a NUL-terminated name.
         let (c, name) = unsafe { (ctx(fs), wstr(name)) };
+        super::trace_path(name);
         let st = match stat_path(c, name) {
             Ok(st) => st,
             Err(status) => return status,
@@ -519,6 +528,7 @@ unsafe extern "system" fn get_security_by_name(
 /// `Create`/`Open` (`info` really points to an `FSP_FSCTL_OPEN_FILE_INFO`).
 unsafe fn finish_open(
     c: &Context,
+    req_name: &[u16],
     h: Handle,
     st: &Stat,
     disk: &[u8],
@@ -532,7 +542,11 @@ unsafe fn finish_open(
         *info = file_info(st, c.read_only);
         if c.case_insensitive {
             let oi = info as *mut FSP_FSCTL_OPEN_FILE_INFO;
-            let name = windows_path(disk);
+            // WinFsp wants the normalized name to differ from the requested
+            // one by case only, so a device prefix is kept as requested.
+            let pre = super::device_prefix_len(req_name);
+            let mut name = req_name[..pre].to_vec();
+            name.extend(windows_path(disk));
             let bytes = name.len() * 2;
             if !(*oi).normalized_name.is_null() && bytes <= usize::from((*oi).normalized_name_size)
             {
@@ -595,6 +609,7 @@ unsafe extern "system" fn open(
     guard("Open", || {
         // SAFETY: WinFsp passes our file system and a NUL-terminated name.
         let (c, name) = unsafe { (ctx(fs), wstr(name)) };
+        super::trace_path(name);
         // Backstop for the read-only descriptor: the owner is implicitly
         // granted WRITE_DAC, and backup privileges bypass the DACL.
         if c.read_only && granted_access & WRITE_ACCESS != 0 {
@@ -617,8 +632,16 @@ unsafe extern "system" fn open(
             c.vfs.close(h);
             return STATUS_FILE_IS_A_DIRECTORY;
         }
+        super::trace_line(|| {
+            format!(
+                "OPEN {:#x} opts={create_options:#x} acc={granted_access:#x} size={} {}",
+                h.0,
+                st.size,
+                String::from_utf8_lossy(&disk)
+            )
+        });
         // SAFETY: WinFsp's out pointers.
-        unsafe { finish_open(c, h, &st, &disk, file_context, info) };
+        unsafe { finish_open(c, name, h, &st, &disk, file_context, info) };
         STATUS_SUCCESS
     })
 }
@@ -637,6 +660,7 @@ unsafe extern "system" fn create(
     guard("Create", || {
         // SAFETY: WinFsp passes our file system and a NUL-terminated name.
         let (c, name) = unsafe { (ctx(fs), wstr(name)) };
+        super::trace_path(name);
         if c.read_only {
             return STATUS_MEDIA_WRITE_PROTECTED;
         }
@@ -645,6 +669,12 @@ unsafe extern "system" fn create(
             Err(_) => return STATUS_OBJECT_NAME_INVALID,
         };
         let is_dir = create_options & FILE_DIRECTORY_FILE != 0;
+        super::trace_line(|| {
+            format!(
+                "CREATE dir={is_dir} opts={create_options:#x} {}",
+                String::from_utf16_lossy(name)
+            )
+        });
         let ftype = if is_dir { FileType::Dir } else { FileType::Reg };
         let mode = create_mode(is_dir, attributes);
         let (h, st, disk) = match c.vfs.create_resolved(&path, ftype, mode) {
@@ -653,7 +683,7 @@ unsafe extern "system" fn create(
             Err(e) => return errno_to_ntstatus(e),
         };
         // SAFETY: WinFsp's out pointers.
-        unsafe { finish_open(c, h, &st, &disk, file_context, info) };
+        unsafe { finish_open(c, name, h, &st, &disk, file_context, info) };
         STATUS_SUCCESS
     })
 }
@@ -701,6 +731,13 @@ unsafe extern "system" fn cleanup(
         // the file's current (normalized) name.
         let (c, name) = unsafe { (ctx(fs), wstr(name)) };
         let h = handle(file_context);
+        super::trace_line(|| {
+            format!(
+                "CLEANUP-DELETE {:#x} {}",
+                h.0,
+                String::from_utf16_lossy(name)
+            )
+        });
         let Ok(path) = vfs_path(name) else {
             log_cleanup_error(name, Errno::EINVAL);
             return;
@@ -870,6 +907,7 @@ unsafe extern "system" fn can_delete(
         if c.read_only {
             return STATUS_MEDIA_WRITE_PROTECTED;
         }
+        super::trace_line(|| format!("CANDELETE {}", String::from_utf16_lossy(name)));
         if matches!(vfs_path(name).as_deref(), Ok(b"/")) {
             return STATUS_ACCESS_DENIED;
         }
@@ -906,6 +944,13 @@ unsafe extern "system" fn rename(
         if c.read_only {
             return STATUS_MEDIA_WRITE_PROTECTED;
         }
+        super::trace_line(|| {
+            format!(
+                "RENAME replace={replace_if_exists} {} -> {}",
+                String::from_utf16_lossy(old_w),
+                String::from_utf16_lossy(new_w)
+            )
+        });
         let (Ok(old), Ok(new)) = (vfs_path(old_w), vfs_path(new_w)) else {
             return STATUS_OBJECT_NAME_INVALID;
         };
@@ -985,6 +1030,12 @@ unsafe extern "system" fn read(
         if done == 0 {
             return STATUS_END_OF_FILE;
         }
+        super::trace_line(|| {
+            format!(
+                "READ {:#x} off={offset} len={length} got={done} size={size}",
+                h.0
+            )
+        });
         // SAFETY: valid out pointer.
         unsafe { *transferred = done as u32 };
         STATUS_SUCCESS

@@ -53,6 +53,11 @@ pub struct MountArgs {
     /// Match file names without regard to case.
     #[arg(long)]
     pub case_insensitive: bool,
+    /// Also let all signed-in users use the volume (the default admits only
+    /// the mounting user, SYSTEM and Administrators). The Windows service
+    /// turns this on, because its mounting user is SYSTEM.
+    #[arg(long)]
+    pub allow_users: bool,
     /// Backend-specific mount options.
     #[arg(long, value_name = "STR", default_value = "")]
     pub options: String,
@@ -175,6 +180,7 @@ pub fn mount_settings(
     label: &str,
     read_only: bool,
     case_insensitive: bool,
+    allow_users: bool,
 ) -> (VfsOptions, MountOptions) {
     (
         VfsOptions {
@@ -185,6 +191,7 @@ pub fn mount_settings(
             volume_label: label.to_string(),
             read_only,
             case_sensitive: !case_insensitive,
+            allow_users,
         },
     )
 }
@@ -264,7 +271,8 @@ fn run(a: &MountArgs, #[cfg(windows)] claim: &win::Claim) -> Result<(), CliError
         None => probe_one(&backends, &devs, &a.device)?,
     };
     let read_only = a.ro || opt_ro || is_readonly_backend(backend);
-    let (vfs_opts, mount_opts) = mount_settings(backend.name(), read_only, a.case_insensitive);
+    let (vfs_opts, mount_opts) =
+        mount_settings(backend.name(), read_only, a.case_insensitive, a.allow_users);
 
     #[cfg(not(windows))]
     {
@@ -320,7 +328,9 @@ mod win {
     //! a process that finished its teardown and has not exited yet): it is
     //! reset and reused, so `unmount X: && mount X: ...` never races.
     //!
-    //! Names are `Local\winuxfs-{live,stop}-<KEY>`, KEY being the mount
+    //! Names are `Global\winuxfs-{live,stop}-<KEY>` (the global namespace, so a
+    //! mount served by the Windows service in session 0 can be unmounted from
+    //! an administrator shell in any session), KEY being the mount
     //! point upper-cased with `\` replaced by `/`. Kernel object names are
     //! limited to MAX_PATH (260) characters, so mount points whose name
     //! would be longer are refused.
@@ -334,9 +344,13 @@ mod win {
 
     use windows_sys::core::BOOL;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, FALSE, HANDLE, TRUE,
-        WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        CloseHandle, GetLastError, LocalFree, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, FALSE,
+        HANDLE, TRUE, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
     use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
     use windows_sys::Win32::System::Console::{
         SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_C_EVENT,
@@ -416,7 +430,7 @@ mod win {
             None => mp.trim_end_matches(['\\', '/']).to_string(),
         };
         let key = arg.to_uppercase().replace('\\', "/");
-        if "Local\\winuxfs-stop-".len() + key.encode_utf16().count() > MAX_OBJECT_NAME {
+        if "Global\\winuxfs-stop-".len() + key.encode_utf16().count() > MAX_OBJECT_NAME {
             return Err(CliError::usage(format!(
                 "Mount point {mp} is too long: use a drive letter or a path of at most \
                  about 230 characters."
@@ -426,7 +440,62 @@ mod win {
     }
 
     fn object_name(kind: &str, mp: &MountPoint) -> Vec<u16> {
-        wide(&format!("Local\\winuxfs-{kind}-{}", mp.key))
+        wide(&format!("Global\\winuxfs-{kind}-{}", mp.key))
+    }
+
+    /// Security attributes for the named objects: SYSTEM, Administrators and
+    /// the owner get full access. Without them an object made by SYSTEM (the
+    /// service) is only readable for Administrators, so `unmount` could not
+    /// signal it.
+    struct ObjectSecurity {
+        sd: *mut c_void,
+        attr: SECURITY_ATTRIBUTES,
+    }
+
+    impl ObjectSecurity {
+        fn new() -> ObjectSecurity {
+            let sddl = wide("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)");
+            let mut sd: *mut c_void = std::ptr::null_mut();
+            // SAFETY: sddl is NUL-terminated; sd receives a LocalAlloc'd
+            // descriptor that Drop frees.
+            let ok = unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut sd,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                sd = std::ptr::null_mut();
+            }
+            ObjectSecurity {
+                sd,
+                attr: SECURITY_ATTRIBUTES {
+                    nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                    lpSecurityDescriptor: sd,
+                    bInheritHandle: FALSE,
+                },
+            }
+        }
+
+        /// Null (the default descriptor) if the conversion failed.
+        fn ptr(&self) -> *const SECURITY_ATTRIBUTES {
+            if self.sd.is_null() {
+                null()
+            } else {
+                &self.attr
+            }
+        }
+    }
+
+    impl Drop for ObjectSecurity {
+        fn drop(&mut self) {
+            if !self.sd.is_null() {
+                // SAFETY: allocated by the conversion above, freed once.
+                unsafe { LocalFree(self.sd) };
+            }
+        }
     }
 
     struct OwnedHandle(HANDLE);
@@ -481,7 +550,8 @@ mod win {
             let live_name = object_name("live", &mp);
             // SAFETY: valid NUL-terminated name; owned by this thread when
             // newly created.
-            let live = unsafe { CreateMutexW(null(), TRUE, live_name.as_ptr()) };
+            let sec = ObjectSecurity::new();
+            let live = unsafe { CreateMutexW(sec.ptr(), TRUE, live_name.as_ptr()) };
             // SAFETY: no preconditions.
             let err = unsafe { GetLastError() };
             if live.is_null() {
@@ -510,7 +580,7 @@ mod win {
             };
             let stop_name = object_name("stop", &mp);
             // SAFETY: valid NUL-terminated name; manual reset, not signalled.
-            let stop = unsafe { CreateEventW(null(), TRUE, FALSE, stop_name.as_ptr()) };
+            let stop = unsafe { CreateEventW(sec.ptr(), TRUE, FALSE, stop_name.as_ptr()) };
             if stop.is_null() {
                 return Err(release(in_use()));
             }
@@ -767,11 +837,11 @@ mod tests {
 
     #[test]
     fn ro_turns_on_both_read_only_flags() {
-        let (v, m) = mount_settings("memfs", true, false);
+        let (v, m) = mount_settings("memfs", true, false, false);
         assert!(v.read_only && m.read_only);
         assert!(!v.case_insensitive && m.case_sensitive);
         assert_eq!(m.volume_label, "memfs");
-        let (v, m) = mount_settings("memfs", false, true);
+        let (v, m) = mount_settings("memfs", false, true, false);
         assert!(!v.read_only && !m.read_only);
         assert!(v.case_insensitive && !m.case_sensitive);
     }

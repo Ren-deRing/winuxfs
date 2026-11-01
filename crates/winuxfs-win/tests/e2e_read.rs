@@ -114,6 +114,7 @@ fn mount_with(s: Setup) -> Mounted {
         volume_label: LABEL.to_string(),
         read_only,
         case_sensitive: true,
+        allow_users: false,
     };
     let fs = mount_vfs(&fsp, vfs.clone(), DRIVE, &opts).expect("mount_vfs");
     Mounted {
@@ -384,6 +385,7 @@ fn mount_rejects_read_only_mismatch() {
             volume_label: LABEL.to_string(),
             read_only: mount_ro,
             case_sensitive: true,
+            allow_users: false,
         };
         assert!(
             mount_vfs(&fsp, vfs.clone(), DRIVE, &opts).is_err(),
@@ -471,6 +473,7 @@ fn mount_rejects_case_mode_mismatch() {
         volume_label: LABEL.to_string(),
         read_only: false,
         case_sensitive: false,
+        allow_users: false,
     };
     assert!(mount_vfs(&fsp, vfs.clone(), DRIVE, &opts).is_err());
     assert_eq!(Arc::strong_count(&vfs), 1);

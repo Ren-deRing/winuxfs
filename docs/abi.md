@@ -31,7 +31,7 @@ A backend is told it must not write only through `blk_read_only()` of its device
 
 Within one `readdir` call every `next_cookie` must differ from the cookie passed in and from every earlier `next_cookie` of that call; the host fails the call with EIO otherwise. (Cookies need not be increasing.) The `Vfs` also remembers the last cookie of every page of a listing and fails with EIO if a chain returns to one, so a misbehaving backend cannot make a scan loop forever.
 
-Note: this rule rejects a backend whose cookies are hashes (ext4-style htree) as soon as two entries of a directory collide, because the repeated cookie fails the call with EIO. That is fine for XFS (M1 to M2); revisit it before adding such a backend (M3+).
+Note: this rule rejects a backend whose cookies are hashes (ext4-style htree) as soon as two entries of a directory collide, because the repeated cookie fails the call with EIO. That is fine for XFS, whose cookies are unique; revisit the rule before adding a backend with hashed cookies.
 
 If an entry is renamed while a directory is being paged, a backend may give it a new cookie, so it can be returned twice (memfs does this); callers must not assume exactly-once delivery across concurrent renames.
 

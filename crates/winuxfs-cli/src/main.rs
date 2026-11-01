@@ -12,6 +12,7 @@ use clap::{Parser, Subcommand};
 
 mod cmd_list;
 mod cmd_mount;
+mod cmd_service;
 mod common;
 
 use common::{CliError, EXIT_USAGE};
@@ -50,6 +51,11 @@ enum Cmd {
         /// The mount point given to `mount`.
         mountpoint: String,
     },
+    /// Mount file systems at boot through a Windows service (Windows only).
+    Service {
+        #[command(subcommand)]
+        action: cmd_service::ServiceCmd,
+    },
 }
 
 fn run(cli: Cli) -> Result<(), CliError> {
@@ -58,6 +64,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::ListPartitions { device } => cmd_list::list_partitions(&device),
         Cmd::Mount(a) => cmd_mount::mount(&a),
         Cmd::Unmount { mountpoint } => cmd_mount::unmount(&mountpoint),
+        Cmd::Service { action } => cmd_service::run(action),
     }
 }
 
