@@ -333,9 +333,24 @@ pub fn mount_vfs(
     // SAFETY: fs is live; user_context is ours.
     unsafe { (*fs).user_context = ctx.cast() };
 
-    let mut mp = wide(mount_point);
-    // SAFETY: fs is live and mp is NUL-terminated.
-    let st = unsafe { winfsp.file_system_set_mount_point(fs, mp.as_mut_ptr()) };
+    // A drive letter is first tried in the `\\.\X:` form, which registers the
+    // volume with the Mount Manager (needs administrator rights). Without that
+    // Windows cannot map the volume back to its letter, so
+    // QueryFullProcessImageName returns `\Device\Volume{GUID}\...` and
+    // programs that rebuild paths from it (League of Legends) break.
+    let bytes = mount_point.as_bytes();
+    let is_letter = bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    let mut st = STATUS_UNSUCCESSFUL;
+    if is_letter {
+        let mut mm = wide(&format!("\\\\.\\{mount_point}"));
+        // SAFETY: fs is live and mm is NUL-terminated.
+        st = unsafe { winfsp.file_system_set_mount_point(fs, mm.as_mut_ptr()) };
+    }
+    if st < 0 {
+        let mut mp = wide(mount_point);
+        // SAFETY: fs is live and mp is NUL-terminated.
+        st = unsafe { winfsp.file_system_set_mount_point(fs, mp.as_mut_ptr()) };
+    }
     if st < 0 {
         // SAFETY: no dispatcher was started; fs is not used again.
         unsafe { winfsp.file_system_delete(fs) };
@@ -513,6 +528,7 @@ unsafe extern "system" fn get_security_by_name(
 /// `Create`/`Open` (`info` really points to an `FSP_FSCTL_OPEN_FILE_INFO`).
 unsafe fn finish_open(
     c: &Context,
+    req_name: &[u16],
     h: Handle,
     st: &Stat,
     disk: &[u8],
@@ -526,7 +542,11 @@ unsafe fn finish_open(
         *info = file_info(st, c.read_only);
         if c.case_insensitive {
             let oi = info as *mut FSP_FSCTL_OPEN_FILE_INFO;
-            let name = windows_path(disk);
+            // WinFsp wants the normalized name to differ from the requested
+            // one by case only, so a device prefix is kept as requested.
+            let pre = super::device_prefix_len(req_name);
+            let mut name = req_name[..pre].to_vec();
+            name.extend(windows_path(disk));
             let bytes = name.len() * 2;
             if !(*oi).normalized_name.is_null() && bytes <= usize::from((*oi).normalized_name_size)
             {
@@ -621,7 +641,7 @@ unsafe extern "system" fn open(
             )
         });
         // SAFETY: WinFsp's out pointers.
-        unsafe { finish_open(c, h, &st, &disk, file_context, info) };
+        unsafe { finish_open(c, name, h, &st, &disk, file_context, info) };
         STATUS_SUCCESS
     })
 }
@@ -649,6 +669,12 @@ unsafe extern "system" fn create(
             Err(_) => return STATUS_OBJECT_NAME_INVALID,
         };
         let is_dir = create_options & FILE_DIRECTORY_FILE != 0;
+        super::trace_line(|| {
+            format!(
+                "CREATE dir={is_dir} opts={create_options:#x} {}",
+                String::from_utf16_lossy(name)
+            )
+        });
         let ftype = if is_dir { FileType::Dir } else { FileType::Reg };
         let mode = create_mode(is_dir, attributes);
         let (h, st, disk) = match c.vfs.create_resolved(&path, ftype, mode) {
@@ -657,7 +683,7 @@ unsafe extern "system" fn create(
             Err(e) => return errno_to_ntstatus(e),
         };
         // SAFETY: WinFsp's out pointers.
-        unsafe { finish_open(c, h, &st, &disk, file_context, info) };
+        unsafe { finish_open(c, name, h, &st, &disk, file_context, info) };
         STATUS_SUCCESS
     })
 }
@@ -705,6 +731,13 @@ unsafe extern "system" fn cleanup(
         // the file's current (normalized) name.
         let (c, name) = unsafe { (ctx(fs), wstr(name)) };
         let h = handle(file_context);
+        super::trace_line(|| {
+            format!(
+                "CLEANUP-DELETE {:#x} {}",
+                h.0,
+                String::from_utf16_lossy(name)
+            )
+        });
         let Ok(path) = vfs_path(name) else {
             log_cleanup_error(name, Errno::EINVAL);
             return;
@@ -874,6 +907,7 @@ unsafe extern "system" fn can_delete(
         if c.read_only {
             return STATUS_MEDIA_WRITE_PROTECTED;
         }
+        super::trace_line(|| format!("CANDELETE {}", String::from_utf16_lossy(name)));
         if matches!(vfs_path(name).as_deref(), Ok(b"/")) {
             return STATUS_ACCESS_DENIED;
         }
@@ -910,6 +944,13 @@ unsafe extern "system" fn rename(
         if c.read_only {
             return STATUS_MEDIA_WRITE_PROTECTED;
         }
+        super::trace_line(|| {
+            format!(
+                "RENAME replace={replace_if_exists} {} -> {}",
+                String::from_utf16_lossy(old_w),
+                String::from_utf16_lossy(new_w)
+            )
+        });
         let (Ok(old), Ok(new)) = (vfs_path(old_w), vfs_path(new_w)) else {
             return STATUS_OBJECT_NAME_INVALID;
         };

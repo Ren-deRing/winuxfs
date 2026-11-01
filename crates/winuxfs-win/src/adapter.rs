@@ -130,11 +130,50 @@ pub fn errno_to_ntstatus(e: Errno) -> NTSTATUS {
     }
 }
 
+/// Length (in UTF-16 units, counted from the leading `\`) of a leading
+/// `\Device\Volume{...}` in `win`, or 0 when there is none.
+///
+/// Windows cannot map a WinFsp volume's NT device path back to its drive
+/// letter (`QueryFullProcessImageName` returns `\Device\Volume{GUID}\x.exe`
+/// even in Win32 mode), so programs that build a path from it and open it
+/// relative to the drive arrive here as `\Device\Volume{GUID}\x.exe`.
+/// League of Legends does this to locate its sibling executables.
+pub(crate) fn device_prefix_len(win: &[u16]) -> usize {
+    const SEP: u16 = b'\\' as u16;
+    let lower = |u: u16| {
+        if (b'A' as u16..=b'Z' as u16).contains(&u) {
+            u + 32
+        } else {
+            u
+        }
+    };
+    let pat = "\\device\\volume{";
+    let starts = win.len() >= pat.len()
+        && win
+            .iter()
+            .zip(pat.bytes())
+            .all(|(&u, b)| lower(u) == u16::from(b));
+    if !starts {
+        return 0;
+    }
+    match win.iter().position(|&u| u == b'}' as u16) {
+        Some(close) if win.get(close + 1).is_none_or(|&u| u == SEP) => close + 1,
+        _ => 0,
+    }
+}
+
 /// Converts a WinFsp path (`\`-separated UTF-16, starting with `\`) to a
 /// Vfs path. A single trailing `\` is ignored. Empty components, `.`/`..`
 /// and names [`namemap::from_windows`] rejects are `EINVAL`.
 pub(crate) fn vfs_path(win: &[u16]) -> Result<Vec<u8>, Errno> {
     const SEP: u16 = b'\\' as u16;
+    let pre = device_prefix_len(win);
+    let win = &win[pre..];
+    let win = if pre > 0 && win.is_empty() {
+        &[SEP][..]
+    } else {
+        win
+    };
     let rest = win.strip_prefix(&[SEP]).ok_or(Errno::EINVAL)?;
     let rest = rest.strip_suffix(&[SEP]).unwrap_or(rest);
     let mut out = Vec::with_capacity(win.len() + 1);
@@ -439,6 +478,24 @@ mod tests {
     use super::*;
     use winuxfs_core::plugin::{FileType, Stat, Timespec};
     use winuxfs_core::Errno;
+
+    #[test]
+    fn volume_device_prefix_is_dropped() {
+        let w = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+        let p = |s: &str| vfs_path(&w(s)).unwrap();
+        assert_eq!(
+            p("\\Device\\Volume{ab-1}\\Riot Games\\x.exe"),
+            b"/Riot Games/x.exe"
+        );
+        assert_eq!(p("\\device\\VOLUME{ab-1}"), b"/");
+        assert_eq!(
+            device_prefix_len(&"\\Device\\Volume{ab}\\x".encode_utf16().collect::<Vec<_>>()),
+            18
+        );
+        assert_eq!(p("\\Device\\Volume{ab-1}\\"), b"/");
+        // A plain directory called Device is untouched.
+        assert_eq!(p("\\Device\\Volume\\x"), b"/Device/Volume/x");
+    }
 
     #[test]
     fn sddl_is_private_unless_users_are_allowed() {
